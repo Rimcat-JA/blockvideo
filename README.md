@@ -312,5 +312,5 @@ VOICEVOX で合成した音声を公開する場合は、各キャラクター�
 
 ## About Contributors
 
-- [Karin](https://github.com/Rimcat-JA): She is the main developer of the repository, designing the structure and usage of the project. Furthermore, she is maintaining the repository when there are bugs.
-- [Thérèse](https://github.com/FidesTherese): She is the comment adder of the repository, explaining the source codes for developers.
+- [Karin](https://github.com/Rimcat-JA): Project Manager
+- [Thérèse](https://github.com/FidesTherese): Main Developer
