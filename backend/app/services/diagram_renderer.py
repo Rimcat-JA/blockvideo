@@ -70,6 +70,8 @@ LINE_W = 6
 
 @dataclass
 class DiagramResult:
+    """Path and dimensions produced by a structured diagram renderer."""
+
     output_path: Path
     width: int
     height: int
@@ -94,6 +96,7 @@ _MONO_CANDIDATES = [
 
 
 def _font(size: int, mono: bool = False):
+    """Load a proportional or monospace font from the platform candidates."""
     for path in (_MONO_CANDIDATES if mono else _FONT_CANDIDATES):
         try:
             return ImageFont.truetype(path, size=size)
@@ -103,6 +106,7 @@ def _font(size: int, mono: bool = False):
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
+    """Measure text using PIL with a defensive font-size fallback."""
     if not text:
         return (0, 0)
     try:
@@ -113,6 +117,7 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
 
 
 def _has_cjk(text: str) -> bool:
+    """Return whether text contains kana, CJK, or full-width characters."""
     return any(
         "　" <= ch <= "ヿ"      # kana + CJK punctuation
         or "一" <= ch <= "鿿"   # kanji
@@ -143,18 +148,21 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_w: int, max_h: int,
 
 def _centered(draw: ImageDraw.ImageDraw, text: str, cx: int, cy: int, font,
               fill=INK) -> None:
+    """Draw text centered around a supplied point."""
     w, h = _text_size(draw, text, font)
     draw.text((cx - w / 2, cy - h / 2), text, font=font, fill=fill)
 
 
 def _rounded(draw: ImageDraw.ImageDraw, box, radius: int, fill, outline,
              width: int = LINE_W) -> None:
+    """Draw a themed rounded rectangle used by diagram nodes and frames."""
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline,
                            width=width)
 
 
 def _arrow_head(draw: ImageDraw.ImageDraw, tip: tuple[float, float],
                 angle: float, color, size: int = 30) -> None:
+    """Draw a triangular arrowhead at a line endpoint."""
     a1 = angle + math.radians(150)
     a2 = angle - math.radians(150)
     p1 = (tip[0] + size * math.cos(a1), tip[1] + size * math.sin(a1))
@@ -164,6 +172,7 @@ def _arrow_head(draw: ImageDraw.ImageDraw, tip: tuple[float, float],
 
 def _arrow(draw: ImageDraw.ImageDraw, start, end, color=ARROW,
            width: int = LINE_W, head: int = 30) -> None:
+    """Draw one straight arrow between two points."""
     draw.line([start, end], fill=color, width=width)
     angle = math.atan2(end[1] - start[1], end[0] - start[0])
     _arrow_head(draw, end, angle, color, head)
@@ -171,6 +180,7 @@ def _arrow(draw: ImageDraw.ImageDraw, start, end, color=ARROW,
 
 def _polyline_arrow(draw: ImageDraw.ImageDraw, points: list[tuple[float, float]],
                     color=ARROW, width: int = LINE_W, head: int = 30) -> None:
+    """Draw a routed arrow through a sequence of points."""
     if len(points) < 2:
         return
     draw.line(points, fill=color, width=width, joint="curve")
@@ -180,6 +190,7 @@ def _polyline_arrow(draw: ImageDraw.ImageDraw, points: list[tuple[float, float]]
 
 
 def _dot(draw: ImageDraw.ImageDraw, center, r: int = 14, fill=ARROW) -> None:
+    """Draw a filled endpoint marker used in procedure and reference arrows."""
     cx, cy = center
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
 
@@ -245,6 +256,7 @@ def compose_on_canvas(content: Image.Image, *, width: int, height: int,
 
 
 def _blank_layer(w: int, h: int) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    """Create a transparent RGBA drawing layer and its PIL draw object."""
     img = Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
     return img, ImageDraw.Draw(img)
 
@@ -401,6 +413,7 @@ _GRID_WIDE = [
 
 
 def _load(paths: list[str], size: int):
+    """Load the first available font path or PIL's built-in fallback font."""
     for path in paths:
         try:
             return ImageFont.truetype(path, size=size)
@@ -413,6 +426,7 @@ _NOTDEF_CACHE: dict[int, bytes] = {}
 
 
 def _render_glyph(font, ch: str) -> bytes:
+    """Rasterize one glyph into a comparable bitmap for coverage checks."""
     img = Image.new("L", (72, 72), 0)
     ImageDraw.Draw(img).text((4, 4), ch, font=font, fill=255)
     return img.tobytes()
@@ -563,6 +577,7 @@ PROC_R = 42
 
 
 def _frame_height(frame: dict) -> int:
+    """Calculate an environment frame's natural height from its bindings."""
     bindings = [b for b in (frame.get("bindings") or []) if isinstance(b, dict)]
     return FRAME_PAD * 2 + 54 + max(1, len(bindings)) * BIND_H
 

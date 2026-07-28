@@ -1,3 +1,4 @@
+/** Route-level project monitor with controls, output preview, and block list. */
 import { useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Layout } from '@/components/Layout';
@@ -16,6 +17,7 @@ import { BlockList } from '@/components/BlockList';
 const POLL_INTERVAL_MS = 2000;
 
 export function ProjectDetailPage() {
+  /** Poll active projects and expose generation, cancellation, and rerender UI. */
   const params = useParams<{ id: string }>();
   const id = Number(params.id);
   const project = useProject(id);

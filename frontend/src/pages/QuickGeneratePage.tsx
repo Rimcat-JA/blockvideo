@@ -1,3 +1,4 @@
+/** Route-level quick workflow: paste a script, queue it, and watch progress. */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Layout } from '@/components/Layout';

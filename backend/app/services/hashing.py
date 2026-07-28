@@ -42,4 +42,5 @@ def hash_value(*parts: Any, **kwargs: Any) -> str:
 
 
 def short_hash(*parts: Any) -> str:
+    """Return the first sixteen hexadecimal characters of ``hash_value``."""
     return hash_value(*parts)[:16]

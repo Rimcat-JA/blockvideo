@@ -11,6 +11,8 @@ from app.core.config import get_settings
 
 
 class Base(DeclarativeBase):
+    """Declarative base shared by every SQLAlchemy model."""
+
     pass
 
 
@@ -19,6 +21,7 @@ _SessionLocal: sessionmaker[Session] | None = None
 
 
 def _make_engine_url(database_url: str) -> str:
+    """Prepare a SQLite URL and create its parent directory when necessary."""
     # SQLAlchemy needs forward slashes even on Windows; we already converted.
     if database_url.startswith("sqlite:///"):
         path = database_url[len("sqlite:///") :]
@@ -27,6 +30,7 @@ def _make_engine_url(database_url: str) -> str:
 
 
 def get_engine():
+    """Return the lazily constructed process-wide SQLAlchemy engine."""
     global _engine
     if _engine is None:
         settings = get_settings()
@@ -40,6 +44,7 @@ def get_engine():
 
 
 def get_session_factory() -> sessionmaker[Session]:
+    """Return the cached session factory bound to the application engine."""
     global _SessionLocal
     if _SessionLocal is None:
         _SessionLocal = sessionmaker(
@@ -49,6 +54,7 @@ def get_session_factory() -> sessionmaker[Session]:
 
 
 def init_db() -> None:
+    """Create model tables and apply the project's additive SQLite updates."""
     # Import models so they register with Base.
     from app.models import block as _block  # noqa: F401
     from app.models import job as _job  # noqa: F401
@@ -95,6 +101,7 @@ def _add_missing_columns(engine) -> None:
 
 
 def get_db() -> Iterator[Session]:
+    """Yield one request-scoped session and close it after the request."""
     factory = get_session_factory()
     db = factory()
     try:

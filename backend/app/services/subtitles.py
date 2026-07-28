@@ -13,6 +13,8 @@ from typing import Callable
 
 @dataclass
 class SubtitleCue:
+    """One timed subtitle cue and its optional per-cue vertical margin."""
+
     start_ms: int
     end_ms: int
     text: str
@@ -23,6 +25,7 @@ class SubtitleCue:
 
 # Colors -> ASS &HBBGGRR& form.
 def _rgb_to_ass(hex_color: str) -> str:
+    """Convert a CSS-style RGB color into ASS's BGR color notation."""
     h = hex_color.lstrip("#")
     if len(h) == 3:
         h = "".join(c * 2 for c in h)
@@ -40,6 +43,7 @@ _NO_LEAD = "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮーヽ�
 
 
 def _is_hiragana(ch: str) -> bool:
+    """Return whether a character belongs to the Hiragana Unicode block."""
     return "ぁ" <= ch <= "ゟ"
 
 
@@ -132,6 +136,7 @@ class BandFit:
 
     @property
     def text(self) -> str:
+        """Return wrapped lines using ASS's explicit line-break marker."""
         return "\\N".join(self.lines)
 
 
@@ -382,6 +387,7 @@ def _escape_ass(text: str) -> str:
 
 
 def ms_to_ass_time(ms: int) -> str:
+    """Format milliseconds as the centisecond timestamp used by ASS."""
     h, rem = divmod(ms, 3_600_000)
     m, rem = divmod(rem, 60_000)
     s, x = divmod(rem, 1_000)
@@ -393,6 +399,7 @@ def build_subtitle_cues(
     *,
     max_chars_per_line: int = 36,
 ) -> list[SubtitleCue]:
+    """Convert absolute block intervals into wrapped project-level cues."""
     cues: list[SubtitleCue] = []
     for idx, start_ms, end_ms, text in blocks:
         wrapped = _wrap_japanese(text or "", max_chars_per_line)
@@ -476,6 +483,7 @@ def render_ass(
 
 
 def build_vtt_time(ms: int) -> str:
+    """Format milliseconds as the millisecond timestamp used by WebVTT."""
     h, rem = divmod(ms, 3_600_000)
     m, rem = divmod(rem, 60_000)
     s, x = divmod(rem, 1_000)
@@ -483,6 +491,7 @@ def build_vtt_time(ms: int) -> str:
 
 
 def render_vtt(cues: list[SubtitleCue], output_path: Path) -> int:
+    """Write cues as a WebVTT file and return the number of cues written."""
     body = ["WEBVTT", ""]
     for i, c in enumerate(cues, 1):
         body.append(str(i))

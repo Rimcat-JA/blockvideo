@@ -32,6 +32,8 @@ SPLIT_SYSTEM_PROMPT = (
 
 @dataclass
 class SplitResult:
+    """Split output plus fallback diagnostics for one script or segment."""
+
     blocks: list[SplitBlock]
     used_fallback: bool
     attempts: int
@@ -69,6 +71,7 @@ def normalize_kept(text: str) -> str:
 
 
 def split_joined_source(blocks: list[SplitBlock]) -> str:
+    """Concatenate model block source fields for equality diagnostics."""
     return "".join(b.source_text for b in blocks)
 
 
@@ -230,7 +233,7 @@ _NARRATION_GAP_PATTERNS = [
 
 
 def narration_has_gaps(tts_text: str, source_text: str) -> bool:
-    """True when removing the code left the narration ungrammatical.
+    """Return whether removing code left the narration ungrammatical.
 
     Only blocks that actually contained a fence can have holes, so that is
     required first — it keeps the patterns from firing on prose that merely
@@ -251,6 +254,7 @@ _REPAIR_SCHEMA = {
 
 
 def _build_repair_prompt(source_text: str, narration: str) -> LLMRequest:
+    """Build the constrained request used to repair code-induced speech gaps."""
     return LLMRequest(
         messages=[
             LLMMessage(
@@ -354,6 +358,7 @@ def unmask_code_blocks(text: str, blocks: list[str]) -> str:
 def _build_split_prompt(
     script: str, settings: Settings, *, attempt: int = 1
 ) -> LLMRequest:
+    """Build the source-preserving JSON request for one split attempt."""
     user_prompt = (
         "次の日本語台本を意味のまとまりで分割してください。\n"
         f"目安: 1ブロックあたり {settings.splitter_min_chars}〜{settings.splitter_max_chars} "
@@ -420,6 +425,7 @@ def _build_split_prompt(
 
 
 def _deterministic_split(text: str, settings: Settings) -> list[SplitBlock]:
+    """Split text locally at punctuation when LLM splitting is unusable."""
     # Use the same routine as the FakeLLMProvider's split function but applied
     # with the configured sizing parameters.
     normalized = re.sub(r"\s+", " ", text).strip()
@@ -601,6 +607,7 @@ async def split_segment(
 
 
 def chunks_to_block_texts(blocks: Iterable[SplitBlock]) -> list[str]:
+    """Extract source text from split blocks for callers needing plain chunks."""
     return [b.source_text for b in blocks]
 
 

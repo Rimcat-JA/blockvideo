@@ -1,3 +1,5 @@
+/** TypeScript mirrors of the backend response and request contracts. */
+/** Overall project lifecycle values stored by the backend. */
 export type ProjectStatus =
   | 'pending'
   | 'splitting'
@@ -8,8 +10,10 @@ export type ProjectStatus =
   | 'failed'
   | 'cancelled';
 
+/** Per-stage block status values. */
 export type BlockStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 
+/** Visual renderer values returned by the backend planner. */
 export type VisualType =
   | 'ai_image'
   | 'code_slide'
@@ -19,6 +23,7 @@ export type VisualType =
   | 'title_slide'
   | 'text_slide';
 
+/** Compact project row used by the project list. */
 export interface ProjectSummary {
   id: number;
   title: string;
@@ -32,6 +37,7 @@ export interface ProjectSummary {
   updated_at: string | null;
 }
 
+/** Full project state returned by the detail and quick-create endpoints. */
 export interface ProjectDetail extends ProjectSummary {
   source_script: string;
   global_visual_style: string | null;
@@ -55,6 +61,7 @@ export interface ProjectDetail extends ProjectSummary {
   output_subtitle_path: string | null;
 }
 
+/** One block's text, visual plan, stage statuses, and artifact URLs. */
 export interface BlockSummary {
   id: number;
   project_id: number;
@@ -77,6 +84,7 @@ export interface BlockSummary {
   error_message: string | null;
 }
 
+/** Progress and error state for an asynchronous generation job. */
 export interface JobSummary {
   id: number;
   project_id: number;
@@ -89,6 +97,7 @@ export interface JobSummary {
   error_message: string | null;
 }
 
+/** Full form payload for the detailed project-creation screen. */
 export interface CreateProjectInput {
   title: string;
   source_script: string;
@@ -119,16 +128,19 @@ export interface CreateProjectInput {
   };
 }
 
+/** One normalized VOICEVOX speaker and its styles. */
 export interface SpeakerInfo {
   speaker_id: number;
   name: string;
   styles: Array<{ id: number; name?: string }>;
 }
 
+/** Speaker discovery response returned by the backend. */
 export interface SpeakersEnvelope {
   url: string;
   speakers: SpeakerInfo[];
 }
+/** Minimal quick-create payload; omitted pacing values use server defaults. */
 export interface QuickCreateInput {
   source_script: string;
   title?: string;
@@ -144,7 +156,9 @@ export interface QuickCreateInput {
 }
 
 export interface QuickCreateResponse {
+  /** Project created by the quick endpoint. */
   project: ProjectDetail;
+  /** Job immediately queued for that project. */
   job: JobSummary;
   message: string;
 }

@@ -1,3 +1,4 @@
+/** Detailed project-creation form for scripts, providers, VOICEVOX, and ASS. */
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useState } from 'react';
@@ -6,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { createProjectSchema, type CreateProjectForm } from '@/lib/validation';
 
 export function ProjectForm() {
+  /** Validate the form, submit provider settings, and navigate to the project. */
   const navigate = useNavigate();
   const create = useCreateProject();
   const speakers = useSpeakers();

@@ -15,6 +15,8 @@ from app.providers.llm import LLMProvider, LLMRequest, LLMResponse, ProviderErro
 
 
 class OpenAICompatibleProvider(LLMProvider):
+    """HTTP client for APIs implementing the OpenAI chat-completions shape."""
+
     name = "openai_compatible"
 
     def __init__(
@@ -27,6 +29,7 @@ class OpenAICompatibleProvider(LLMProvider):
         client: httpx.AsyncClient | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
+        """Configure credentials, endpoint, model, and an async HTTP client."""
         if not api_key:
             raise ProviderError("LLM API key is required", safe=True)
         if not base_url:
@@ -62,7 +65,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     @staticmethod
     def _rejects_max_tokens(status: int, body: str) -> bool:
-        """True when the endpoint wants ``max_completion_tokens`` instead.
+        """Return whether the endpoint wants ``max_completion_tokens`` instead.
 
         OpenAI's GPT-5 family dropped ``max_tokens``; other OpenAI-compatible
         endpoints still require it. Rather than hard-coding a model list that
@@ -71,6 +74,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return status == 400 and "max_tokens" in body and "max_completion_tokens" in body
 
     async def chat(self, request: LLMRequest) -> LLMResponse:
+        """POST a request, retrying once with GPT-5 token syntax when needed."""
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -119,5 +123,6 @@ class OpenAICompatibleProvider(LLMProvider):
         return LLMResponse(content=content, raw=data)
 
     async def aclose(self) -> None:
+        """Close the underlying HTTP client when the provider is disposable."""
         if self._client is not None:
             await self._client.aclose()

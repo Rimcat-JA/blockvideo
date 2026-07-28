@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class HealthResponse(BaseModel):
+    """Backend health flags exposed to the frontend and smoke scripts."""
+
     status: str
     version: str
     ffmpeg_available: bool
@@ -14,17 +16,23 @@ class HealthResponse(BaseModel):
 
 
 class VoicevoxSpeaker(BaseModel):
+    """Small speaker representation returned by the legacy speaker endpoint."""
+
     speaker_id: int
     name: str
     styles: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class VoicevoxSpeakersResponse(BaseModel):
+    """Envelope for the legacy VOICEVOX speaker list response."""
+
     url: str
     speakers: list[VoicevoxSpeaker]
 
 
 class ProviderConfig(BaseModel):
+    """Optional BYOK provider values accepted during project creation."""
+
     model_config = ConfigDict(extra="forbid")
 
     llm_api_key: str | None = Field(default=None)
@@ -36,6 +44,8 @@ class ProviderConfig(BaseModel):
 
 
 class ProjectCreate(BaseModel):
+    """Full project-creation payload including rendering and pacing settings."""
+
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=255)
@@ -65,6 +75,7 @@ class ProjectCreate(BaseModel):
     @field_validator("voicevox_url")
     @classmethod
     def _validate_url(cls, value: str) -> str:
+        """Reject VOICEVOX endpoints that are not explicitly HTTP(S) URLs."""
         if not (value.startswith("http://") or value.startswith("https://")):
             raise ValueError("VOICEVOX URL must start with http:// or https://")
         return value
@@ -72,6 +83,7 @@ class ProjectCreate(BaseModel):
     @field_validator("subtitle_position")
     @classmethod
     def _validate_position(cls, value: str) -> str:
+        """Restrict subtitle placement to the three supported alignments."""
         if value not in {"top", "middle", "bottom"}:
             raise ValueError("subtitle_position must be top|middle|bottom")
         return value
@@ -104,12 +116,15 @@ class QuickCreate(BaseModel):
     @field_validator("voicevox_url")
     @classmethod
     def _validate_url(cls, value: str) -> str:
+        """Validate the optional VOICEVOX endpoint used by quick generation."""
         if not (value.startswith("http://") or value.startswith("https://")):
             raise ValueError("VOICEVOX URL must start with http:// or https://")
         return value
 
 
 class ProjectPatch(BaseModel):
+    """Partial project settings update applied by the PATCH route."""
+
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = None
@@ -132,6 +147,8 @@ class ProjectPatch(BaseModel):
 
 
 class ProjectSummary(BaseModel):
+    """Compact project representation used by list responses."""
+
     id: int
     title: str
     status: str
@@ -145,6 +162,8 @@ class ProjectSummary(BaseModel):
 
 
 class ProjectDetail(ProjectSummary):
+    """Project summary plus source, provider, pacing, and subtitle settings."""
+
     source_script: str
     global_visual_style: str | None
     voicevox_url: str
@@ -170,6 +189,8 @@ class ProjectDetail(ProjectSummary):
 
 
 class BlockSummary(BaseModel):
+    """Block state and API URLs for its generated artifacts."""
+
     id: int
     project_id: int
     index: int
@@ -192,6 +213,8 @@ class BlockSummary(BaseModel):
 
 
 class BlockPatch(BaseModel):
+    """Editable block text and visual-plan fields for the block PATCH route."""
+
     model_config = ConfigDict(extra="forbid")
 
     source_text: str | None = Field(default=None, min_length=1, max_length=4000)
@@ -200,6 +223,8 @@ class BlockPatch(BaseModel):
 
 
 class JobSummary(BaseModel):
+    """Public progress representation of a background generation job."""
+
     id: int
     project_id: int
     current_stage: str
@@ -212,6 +237,8 @@ class JobSummary(BaseModel):
 
 
 class GenerateAllResponse(BaseModel):
+    """Response returned when a project generation or rerender is queued."""
+
     job: JobSummary
     message: str = "queued"
 
@@ -225,16 +252,22 @@ class QuickCreateResponse(BaseModel):
 
 
 class SpeakerStyle(BaseModel):
+    """One VOICEVOX style belonging to a speaker."""
+
     id: int
     name: str | None = None
 
 
 class SpeakerInfo(BaseModel):
+    """Normalized VOICEVOX speaker and style information for the UI."""
+
     speaker_id: int
     name: str
     styles: list[SpeakerStyle] = Field(default_factory=list)
 
 
 class SpeakersEnvelope(BaseModel):
+    """VOICEVOX speaker discovery response with the queried base URL."""
+
     url: str
     speakers: list[SpeakerInfo]

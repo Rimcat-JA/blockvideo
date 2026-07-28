@@ -28,6 +28,7 @@ KATAKANA_IDENTIFIERS = ("アソック", "クッダー", "コンス", "セット�
 
 
 def main(path: Path) -> int:
+    """Validate authored slides, narration lengths, and common pronunciations."""
     text = path.read_text(encoding="utf-8")
     problems = 0
 

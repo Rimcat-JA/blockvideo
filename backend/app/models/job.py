@@ -11,6 +11,8 @@ from app.db import Base
 
 
 class JobStatus(str, enum.Enum):
+    """Lifecycle states for a queued or running generation job."""
+
     pending = "pending"
     running = "running"
     completed = "completed"
@@ -19,6 +21,8 @@ class JobStatus(str, enum.Enum):
 
 
 class GenerationJob(Base):
+    """Persisted progress and cancellation state for one pipeline invocation."""
+
     __tablename__ = "generation_jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -48,6 +52,7 @@ class GenerationJob(Base):
     project: Mapped["Project"] = relationship("Project", back_populates="jobs")  # noqa: F821
 
     def to_summary(self) -> dict:
+        """Return the public job progress representation."""
         return {
             "id": self.id,
             "project_id": self.project_id,

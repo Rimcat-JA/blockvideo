@@ -16,6 +16,8 @@ from app.providers.llm import ProviderError
 
 @dataclass
 class VoicevoxSettings:
+    """VOICEVOX synthesis parameters copied from project settings."""
+
     base_url: str = "http://127.0.0.1:50021"
     speaker_id: int = 1
     speed_scale: float = 1.0
@@ -28,20 +30,27 @@ class VoicevoxSettings:
 
 @dataclass
 class Speaker:
+    """Normalized VOICEVOX speaker metadata."""
+
     speaker_id: int
     name: str
     styles: list[dict[str, Any]] = field(default_factory=list)
 
 
 class VoicevoxClient:
+    """Async HTTP client for a running VOICEVOX Engine instance."""
+
     def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+        """Create a client pointed at one VOICEVOX base URL."""
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def aclose(self) -> None:
+        """Close the HTTP connection pool owned by this client."""
         await self._client.aclose()
 
     async def health(self) -> bool:
+        """Return whether the engine answers its version endpoint."""
         try:
             r = await self._client.get(f"{self.base_url}/version")
             return r.status_code == 200
@@ -49,6 +58,7 @@ class VoicevoxClient:
             return False
 
     async def speakers(self) -> list[Speaker]:
+        """Fetch and normalize all available speakers and styles."""
         try:
             r = await self._client.get(f"{self.base_url}/speakers")
         except httpx.HTTPError as exc:
@@ -73,6 +83,7 @@ class VoicevoxClient:
         ]
 
     async def audio_query(self, text: str, speaker_id: int) -> dict[str, Any]:
+        """Ask VOICEVOX for a synthesis query for one text fragment."""
         url = f"{self.base_url}/audio_query"
         params = {"text": text, "speaker": speaker_id}
         try:
@@ -96,6 +107,7 @@ class VoicevoxClient:
         return r.json()
 
     async def synthesis(self, query: dict[str, Any], speaker_id: int) -> bytes:
+        """Synthesize a prepared query and return the WAV response bytes."""
         url = f"{self.base_url}/synthesis"
         params = {"speaker": speaker_id}
         try:
@@ -134,6 +146,7 @@ class VoicevoxClient:
     async def synthesize_text(
         self, text: str, settings: VoicevoxSettings
     ) -> tuple[bytes, dict[str, Any]]:
+        """Build, tune, and synthesize a query for complete text."""
         query = await self.audio_query(text, settings.speaker_id)
         self.apply_settings(query, settings)
         audio = await self.synthesis(query, settings.speaker_id)
@@ -150,19 +163,23 @@ class FakeVoicevoxClient:
     """
 
     def __init__(self) -> None:
+        """Create an offline client with a call log and default speaker."""
         self.speaker_id = 1
         self.calls: list[tuple[str, int]] = []
 
     async def health(self) -> bool:
+        """Report healthy because no external engine is required."""
         return True
 
     async def speakers(self) -> list[Speaker]:
+        """Return the deterministic fake speaker catalog."""
         return [
             Speaker(speaker_id=1, name="Fake四国めたん", styles=[{"id": 1, "name": "ノーマル"}]),
             Speaker(speaker_id=2, name="Fake春日部つむぎ", styles=[{"id": 2, "name": "ノーマル"}]),
         ]
 
     async def synthesize_text(self, text: str, settings: VoicevoxSettings) -> tuple[bytes, dict]:
+        """Return deterministic low-amplitude WAV bytes sized by text length."""
         self.calls.append((text, settings.speaker_id))
         import math
         import struct

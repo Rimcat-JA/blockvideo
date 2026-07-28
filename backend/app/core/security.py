@@ -30,6 +30,7 @@ def mask(value: str | None) -> str:
 
 
 def is_likely_key(value: str) -> bool:
+    """Return whether free-form text contains a string shaped like an API key."""
     if not value:
         return False
     return bool(_KEY_PATTERN.search(value))
@@ -61,6 +62,7 @@ class SecretBundle:
     image_model: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
+        """Return provider metadata with key previews instead of raw secrets."""
         return {
             "llm": {
                 "has_key": bool(self.llm_api_key),
@@ -81,18 +83,23 @@ class SecretStore:
     """In-memory store keyed by project_id. Never persists to disk."""
 
     def __init__(self) -> None:
+        """Initialize an empty process-local project-to-secrets mapping."""
         self._store: dict[int, SecretBundle] = {}
 
     def set(self, project_id: int, bundle: SecretBundle) -> None:
+        """Associate a temporary secret bundle with a project."""
         self._store[project_id] = bundle
 
     def get(self, project_id: int) -> SecretBundle | None:
+        """Return a project's secret bundle, if it is still in memory."""
         return self._store.get(project_id)
 
     def drop(self, project_id: int) -> None:
+        """Forget all temporary secrets associated with a project."""
         self._store.pop(project_id, None)
 
     def summary(self, project_id: int) -> dict[str, Any]:
+        """Return a safe diagnostic summary for a project's credentials."""
         bundle = self.get(project_id)
         if bundle is None:
             return {"llm": {}, "image": {}}

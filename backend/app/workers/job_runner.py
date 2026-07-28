@@ -25,7 +25,10 @@ from app.services.pipeline import (
 
 
 class JobRegistry:
+    """Track process-local asyncio tasks and their cancellation events."""
+
     def __init__(self) -> None:
+        """Create empty task and cancellation registries."""
         self._tasks: dict[int, asyncio.Task] = {}
         self._cancel_flags: dict[int, asyncio.Event] = {}
 
@@ -34,6 +37,7 @@ class JobRegistry:
         job_id: int,
         coro_factory: Callable[[], Awaitable[Any]],
     ) -> asyncio.Task:
+        """Start a job task that owns status commits and final cleanup."""
         cancel = asyncio.Event()
         self._cancel_flags[job_id] = cancel
 
@@ -78,6 +82,7 @@ class JobRegistry:
         return task
 
     def request_cancel(self, job_id: int) -> bool:
+        """Signal a live task or mark a not-yet-running job for cancellation."""
         ev = self._cancel_flags.get(job_id)
         if ev is not None:
             ev.set()
@@ -99,9 +104,11 @@ class JobRegistry:
             db.close()
 
     def is_running(self, job_id: int) -> bool:
+        """Return whether this process currently tracks the job's task."""
         return job_id in self._tasks
 
     def _is_cancel_requested(self, job_id: int, db) -> bool:
+        """Read the durable cancellation flag for a job."""
         job = db.execute(
             select(GenerationJob).where(GenerationJob.id == job_id)
         ).scalar_one_or_none()
@@ -113,6 +120,7 @@ job_registry = JobRegistry()
 
 
 async def enqueue_full_pipeline(project_id: int) -> GenerationJob:
+    """Create and submit a full split-to-MP4 generation job."""
     factory = get_session_factory()
     db = factory()
     try:
@@ -134,6 +142,7 @@ async def enqueue_full_pipeline(project_id: int) -> GenerationJob:
 
 
 async def enqueue_rerender(project_id: int) -> GenerationJob:
+    """Create and submit a render-only project job."""
     factory = get_session_factory()
     db = factory()
     try:
@@ -152,6 +161,7 @@ async def enqueue_rerender(project_id: int) -> GenerationJob:
 
 
 async def enqueue_block_visual_rerun(project_id: int, block_index: int) -> GenerationJob:
+    """Create and submit a one-block visual regeneration job."""
     factory = get_session_factory()
     db = factory()
     try:
@@ -172,6 +182,7 @@ async def enqueue_block_visual_rerun(project_id: int, block_index: int) -> Gener
 
 
 async def enqueue_block_audio_rerun(project_id: int, block_index: int) -> GenerationJob:
+    """Create and submit a one-block audio regeneration job."""
     factory = get_session_factory()
     db = factory()
     try:

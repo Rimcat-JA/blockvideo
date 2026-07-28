@@ -1,3 +1,4 @@
+/** Small status-to-style presentation component for projects and blocks. */
 import type { BlockStatus, ProjectStatus } from '@/lib/types';
 
 const statusMap: Record<string, string> = {
@@ -14,6 +15,7 @@ const statusMap: Record<string, string> = {
 };
 
 export function StatusBadge({ status }: { status: BlockStatus | ProjectStatus | string }) {
+  /** Render a badge class chosen from the shared status map. */
   const cls = statusMap[status] ?? 'badge-pending';
   return <span className={cls}>{status}</span>;
 }

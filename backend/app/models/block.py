@@ -11,6 +11,8 @@ from app.db import Base
 
 
 class BlockStatus(str, enum.Enum):
+    """Status values for an individual pipeline stage on a block."""
+
     pending = "pending"
     running = "running"
     completed = "completed"
@@ -19,6 +21,8 @@ class BlockStatus(str, enum.Enum):
 
 
 class VisualType(str, enum.Enum):
+    """Visual renderer selected for a block's slide plan."""
+
     ai_image = "ai_image"
     code_slide = "code_slide"
     # Author-drawn slide content, rendered verbatim.
@@ -34,6 +38,8 @@ class VisualType(str, enum.Enum):
 
 
 class Block(Base):
+    """Persisted script block with visual, audio, and render artifacts."""
+
     __tablename__ = "blocks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -104,6 +110,7 @@ class Block(Base):
     project: Mapped["Project"] = relationship("Project", back_populates="blocks")  # noqa: F821
 
     def to_summary(self) -> dict:
+        """Return block state with API-relative artifact URLs."""
         return {
             "id": self.id,
             "index": self.index,
@@ -126,6 +133,7 @@ class Block(Base):
         }
 
     def _artifact_url(self, kind: str) -> str | None:
+        """Build the API URL for one available block artifact kind."""
         if kind == "image" and self.image_path:
             return f"/api/projects/{self.project_id}/artifacts/image/{self.index}"
         if kind == "audio" and self.audio_path:

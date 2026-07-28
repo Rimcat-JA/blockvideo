@@ -46,6 +46,7 @@ class SentenceSpan:
     end_ms: int
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this span for the block's narration JSON file."""
         return {
             "text": self.text,
             "char_start": self.char_start,
@@ -56,6 +57,7 @@ class SentenceSpan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SentenceSpan":
+        """Reconstruct a span while applying safe primitive conversions."""
         return cls(
             text=str(data.get("text", "")),
             char_start=int(data.get("char_start", 0)),
@@ -76,6 +78,8 @@ class NarrationPlan:
 
 @dataclass
 class _Piece:
+    """Internal sentence fragment with source-text character offsets."""
+
     text: str
     char_start: int
     char_end: int
@@ -110,6 +114,7 @@ def split_sentences_with_offsets(text: str) -> list[_Piece]:
 
 
 def _phrase_seconds(phrase: dict[str, Any]) -> float:
+    """Sum the voiced and pause mora durations in one accent phrase."""
     total = 0.0
     for mora in phrase.get("moras") or []:
         total += (mora.get("consonant_length") or 0.0) + (mora.get("vowel_length") or 0.0)
@@ -120,7 +125,7 @@ def _phrase_seconds(phrase: dict[str, Any]) -> float:
 
 
 def _breath_mora(seconds: float) -> dict[str, Any]:
-    """A silent mora used as the pause between two sentences."""
+    """Build a silent mora used as the pause between two sentences."""
     return {
         "text": "、",
         "consonant": None,
@@ -285,6 +290,7 @@ _MORA_WEIGHTS = (
 
 
 def _mora_weight(text: str) -> float:
+    """Estimate Japanese speaking weight for offsets inside one sentence."""
     total = 0.0
     for ch in text:
         for matches, weight in _MORA_WEIGHTS:

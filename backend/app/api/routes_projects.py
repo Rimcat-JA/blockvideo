@@ -39,6 +39,7 @@ router = APIRouter(prefix="/projects")
 
 
 def _project_summary(project: Project) -> ProjectSummary:
+    """Map an ORM project to the compact list-response schema."""
     return ProjectSummary(
         id=project.id,
         title=project.title,
@@ -54,6 +55,7 @@ def _project_summary(project: Project) -> ProjectSummary:
 
 
 def _project_detail(project: Project) -> ProjectDetail:
+    """Map all user-visible project settings and state to API JSON."""
     return ProjectDetail(
         id=project.id,
         title=project.title,
@@ -91,6 +93,7 @@ def _project_detail(project: Project) -> ProjectDetail:
 
 
 def _block_summary(block: Block) -> BlockSummary:
+    """Map a block ORM row to the response schema and artifact URLs."""
     project_id = block.project_id
     return BlockSummary(
         id=block.id,
@@ -116,6 +119,7 @@ def _block_summary(block: Block) -> BlockSummary:
 
 
 def _job_summary(job: GenerationJob) -> JobSummary:
+    """Map a persisted job row to its public progress schema."""
     return JobSummary(
         id=job.id,
         project_id=job.project_id,
@@ -198,6 +202,7 @@ async def quick_create(
 
 @router.post("", response_model=ProjectDetail, status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectDetail:
+    """Create a configured project without enqueueing its pipeline."""
     project = Project(
         title=payload.title,
         source_script=payload.source_script,
@@ -243,12 +248,14 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
 
 @router.get("", response_model=list[ProjectSummary])
 def list_projects(db: Session = Depends(get_db)) -> list[ProjectSummary]:
+    """Return projects newest first for the project-list screen."""
     projects = db.execute(select(Project).order_by(Project.created_at.desc())).scalars().all()
     return [_project_summary(p) for p in projects]
 
 
 @router.get("/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail:
+    """Return one project or a 404 response when it does not exist."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -257,6 +264,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
 
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
+    """Delete a project, its temporary secrets, database rows, and files."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -280,6 +288,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
 def patch_project(
     project_id: int, payload: ProjectPatch, db: Session = Depends(get_db)
 ) -> ProjectDetail:
+    """Apply supplied project settings and return the refreshed project."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -292,6 +301,7 @@ def patch_project(
 
 @router.get("/{project_id}/blocks", response_model=list[BlockSummary])
 def list_blocks(project_id: int, db: Session = Depends(get_db)) -> list[BlockSummary]:
+    """Return a project's blocks in script order."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -300,6 +310,7 @@ def list_blocks(project_id: int, db: Session = Depends(get_db)) -> list[BlockSum
 
 @router.get("/{project_id}/jobs", response_model=list[JobSummary])
 def list_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobSummary]:
+    """Return the latest twenty jobs for a project."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -314,6 +325,7 @@ def list_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobSummary
 
 @router.post("/{project_id}/generate-all", response_model=GenerateAllResponse, status_code=202)
 async def generate_all(project_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
+    """Ensure project storage exists and queue a complete pipeline run."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -345,6 +357,7 @@ def cancel_project(project_id: int, db: Session = Depends(get_db)) -> dict[str, 
 
 @router.post("/{project_id}/rerender", response_model=GenerateAllResponse, status_code=202)
 async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
+    """Queue a render-only job when the project already has blocks."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -358,6 +371,7 @@ async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAl
 
 @router.get("/{project_id}/artifacts/image/{block_index}")
 def artifact_image(project_id: int, block_index: int, db: Session = Depends(get_db)):
+    """Serve a block image after checking its database path and file presence."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -372,6 +386,7 @@ def artifact_image(project_id: int, block_index: int, db: Session = Depends(get_
 
 @router.get("/{project_id}/artifacts/audio/{block_index}")
 def artifact_audio(project_id: int, block_index: int, db: Session = Depends(get_db)):
+    """Serve a block WAV file after validating its storage-relative path."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -386,6 +401,7 @@ def artifact_audio(project_id: int, block_index: int, db: Session = Depends(get_
 
 @router.get("/{project_id}/artifacts/video/{block_index}")
 def artifact_video_block(project_id: int, block_index: int, db: Session = Depends(get_db)):
+    """Serve one block MP4 after validating ownership and disk presence."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -400,6 +416,7 @@ def artifact_video_block(project_id: int, block_index: int, db: Session = Depend
 
 @router.get("/{project_id}/download")
 def download_video(project_id: int, db: Session = Depends(get_db)):
+    """Serve the completed project MP4 with a stable download filename."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")

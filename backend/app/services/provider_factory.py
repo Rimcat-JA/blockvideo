@@ -24,6 +24,8 @@ from app.providers.voicevox import FakeVoicevoxClient, VoicevoxClient, VoicevoxS
 
 @dataclass
 class ProviderBundle:
+    """All provider clients required by one pipeline execution."""
+
     llm: LLMProvider
     image: ImageProvider | None
     voicevox: VoicevoxClient | FakeVoicevoxClient
@@ -34,6 +36,7 @@ class ProviderBundle:
 
     @property
     def planner(self) -> LLMProvider:
+        """Return the optional cheaper planner or the main LLM provider."""
         return self.llm_planner or self.llm
 
 
@@ -50,10 +53,12 @@ def _openrouter_headers(base_url: str, settings: Settings) -> dict[str, str]:
 
 
 def get_settings_for(project: Project) -> Settings:
+    """Return global settings for a project; retained as a test seam."""
     return get_settings()
 
 
 def build_providers_for_project(project: Project) -> ProviderBundle:
+    """Build fake or real clients using project secrets and environment fallbacks."""
     secrets: SecretBundle | None = (
         secret_store.get(project.id) if not project.use_fake_providers else None
     )
@@ -121,6 +126,7 @@ def build_providers_for_project(project: Project) -> ProviderBundle:
 
 
 def build_voicevox_settings(project: Project, settings: Settings | None = None) -> VoicevoxSettings:
+    """Translate persisted project voice controls into client settings."""
     s = settings or get_settings()
     return VoicevoxSettings(
         base_url=project.voicevox_url or s.voicevox_url,

@@ -30,6 +30,7 @@ TIMEOUT_SEC = 180.0
 def _request(
     method: str, path: str, payload: dict | None = None
 ) -> tuple[int, dict | str]:
+    """Send one JSON request to the local backend and decode its response."""
     url = f"{API_BASE}{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json"} if payload is not None else {}
@@ -50,6 +51,7 @@ def _request(
 
 
 def _wait_for_status(project_id: int, target: set[str], timeout: float) -> dict:
+    """Poll a project until a target status or timeout/failure is reached."""
     deadline = time.monotonic() + timeout
     last: dict = {}
     while time.monotonic() < deadline:
@@ -72,6 +74,7 @@ def _wait_for_status(project_id: int, target: set[str], timeout: float) -> dict:
 
 
 def main() -> int:
+    """Run the offline sample project and print its generated artifact paths."""
     if not SCRIPT_PATH.exists():
         print(f"sample script not found: {SCRIPT_PATH}", file=sys.stderr)
         return 1

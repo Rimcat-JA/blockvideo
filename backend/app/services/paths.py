@@ -7,10 +7,12 @@ from app.core.config import get_settings
 
 
 def project_dir(project_id: int) -> Path:
+    """Return the root directory for one project."""
     return get_settings().storage_root / "projects" / f"{project_id:04d}"
 
 
 def project_block_dir(project_id: int, index: int) -> Path:
+    """Return one block's artifact directory inside a project."""
     return project_dir(project_id) / "blocks" / f"{index:04d}"
 
 
@@ -26,6 +28,7 @@ def block_image_path(project_id: int, index: int, slot: int = 0) -> Path:
 
 
 def block_audio_path(project_id: int, index: int) -> Path:
+    """Return the canonical WAV path for one block."""
     return project_block_dir(project_id, index) / "audio.wav"
 
 
@@ -39,6 +42,7 @@ def block_narration_path(project_id: int, index: int) -> Path:
 
 
 def block_video_path(project_id: int, index: int) -> Path:
+    """Return the canonical block MP4 path."""
     return project_block_dir(project_id, index) / "video.mp4"
 
 
@@ -53,22 +57,27 @@ def project_subtitle_path(project_id: int) -> Path:
 
 
 def project_json_path(project_id: int) -> Path:
+    """Return the project metadata JSON path."""
     return project_dir(project_id) / "project.json"
 
 
 def timeline_json_path(project_id: int) -> Path:
+    """Return the absolute-timeline JSON path."""
     return project_dir(project_id) / "timeline.json"
 
 
 def output_video_path(project_id: int) -> Path:
+    """Return the final project MP4 path under the output directory."""
     return project_dir(project_id) / "output" / "video.mp4"
 
 
 def concat_list_path(project_id: int) -> Path:
+    """Return the FFmpeg concat-demuxer list path."""
     return project_dir(project_id) / "concat.list"
 
 
 def ensure_project_layout(project_id: int) -> None:
+    """Create the project, block, output, and log directories if absent."""
     pd = project_dir(project_id)
     (pd / "blocks").mkdir(parents=True, exist_ok=True)
     (pd / "output").mkdir(parents=True, exist_ok=True)
@@ -76,6 +85,7 @@ def ensure_project_layout(project_id: int) -> None:
 
 
 def relpath_for_db(absolute: Path) -> str:
+    """Convert an artifact path to a storage-relative database value."""
     settings = get_settings()
     try:
         return absolute.resolve().relative_to(settings.storage_root.resolve()).as_posix()
@@ -84,5 +94,6 @@ def relpath_for_db(absolute: Path) -> str:
 
 
 def abspath_from_db(rel: str) -> Path:
+    """Resolve a storage-relative database path back to an absolute path."""
     settings = get_settings()
     return (settings.storage_root / rel).resolve()

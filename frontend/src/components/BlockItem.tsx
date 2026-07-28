@@ -1,19 +1,23 @@
+/** Detailed block card with artifacts, stage state, and regeneration actions. */
 import { useRegenerateBlockAudio, useRegenerateBlockVisual, useRerender } from '@/api/hooks';
 import { api } from '@/api/client';
 import type { BlockSummary } from '@/lib/types';
 import { StatusBadge } from './StatusBadge';
 
+/** Block card inputs, including the parent project used by mutations. */
 interface BlockItemProps {
   block: BlockSummary;
   projectId: number;
 }
 
 function formatMs(ms: number | null | undefined): string {
+  /** Format nullable milliseconds using the Japanese UI unit. */
   if (ms == null) return '-';
   return `${(ms / 1000).toFixed(2)}秒`;
 }
 
 export function BlockItem({ block, projectId }: BlockItemProps) {
+  /** Render block metadata and controls for partial regeneration. */
   const visual = useRegenerateBlockVisual(projectId);
   const audio = useRegenerateBlockAudio(projectId);
   const rerender = useRerender(projectId);

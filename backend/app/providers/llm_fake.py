@@ -18,12 +18,16 @@ from app.providers.llm import LLMProvider, LLMRequest, LLMResponse
 
 
 class FakeLLMProvider(LLMProvider):
+    """Deterministic offline LLM used by tests and the demo command."""
+
     name = "fake"
 
     def __init__(self) -> None:
+        """Create a provider with an inspectable record of fake calls."""
         self.calls: list[tuple[str, str, int]] = []  # (purpose, hash, n_messages)
 
     async def chat(self, request: LLMRequest) -> LLMResponse:
+        """Infer the prompt purpose and return a deterministic JSON response."""
         last_user = next(
             (m.content for m in reversed(request.messages) if m.role == "user"), ""
         )
@@ -47,6 +51,7 @@ class FakeLLMProvider(LLMProvider):
 
     @staticmethod
     def _detect_purpose(text: str) -> str:
+        """Classify a prompt using the markers used by the fake workflows."""
         # Order matters: the visual-plan prompt quotes the project's
         # global_visual_style, so it must be recognised before the
         # global-style prompt or every plan request is misrouted.
@@ -62,6 +67,7 @@ class FakeLLMProvider(LLMProvider):
 
     @staticmethod
     def _default_global_style() -> str:
+        """Return the stable visual style used by fake planning."""
         return (
             "大学講義用のシンプルなスライド。白または薄いグレー(%)の背景、"
             "青緑(#0F766E)をアクセント、等幅フォントでコード、"
@@ -124,6 +130,7 @@ class FakeLLMProvider(LLMProvider):
 
     @classmethod
     def _build_split_payload(cls, last_user: str) -> str:
+        """Extract a script from a split prompt and serialize fake blocks."""
         # Try to extract the script from the prompt heuristically.
         m = re.search(r"```(?:text|script)?\s*(.*?)```", last_user, flags=re.DOTALL)
         if m:
@@ -145,6 +152,7 @@ class FakeLLMProvider(LLMProvider):
 
     @staticmethod
     def _build_visual_plan(user_prompt: str) -> dict:
+        """Choose a small visual-plan fixture from narration keywords."""
         # Heuristic visual-plan selection based on TTS text. Returns the full
         # plan structure expected by Pydantic.
         text_match = re.search(r"「(.+?)」", user_prompt, flags=re.DOTALL)

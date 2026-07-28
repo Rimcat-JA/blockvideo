@@ -1,5 +1,7 @@
+/** Zod validation shared by the detailed project form and its submit handler. */
 import { z } from 'zod';
 
+/** Client-side constraints that mirror the backend ProjectCreate schema. */
 export const createProjectSchema = z.object({
   title: z.string().min(1, 'タイトルを入力してください').max(255),
   source_script: z

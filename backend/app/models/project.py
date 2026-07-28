@@ -11,6 +11,8 @@ from app.db import Base
 
 
 class ProjectStatus(str, enum.Enum):
+    """Lifecycle states reported while a project moves through the pipeline."""
+
     pending = "pending"
     splitting = "splitting"
     planning = "planning"
@@ -22,6 +24,8 @@ class ProjectStatus(str, enum.Enum):
 
 
 class Project(Base):
+    """Persisted video request, configuration, progress, and output metadata."""
+
     __tablename__ = "projects"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -113,6 +117,7 @@ class Project(Base):
     )
 
     def to_summary(self) -> dict:
+        """Return the small JSON-compatible view used by internal callers."""
         return {
             "id": self.id,
             "title": self.title,

@@ -18,6 +18,7 @@ from app.db import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Initialize process-wide logging and the local database on startup."""
     configure_logging()
     settings = get_settings()
     log.info(
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    """Build the FastAPI application and register its routers and middleware."""
     settings = get_settings()
     app = FastAPI(
         title="BlockVideo API",
@@ -50,6 +52,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def _unhandled(_request, exc: Exception):  # pragma: no cover
+        """Convert unexpected exceptions into a short JSON error response."""
         log.error("unhandled exception: {error}", error=str(exc))
         return JSONResponse(
             status_code=500,

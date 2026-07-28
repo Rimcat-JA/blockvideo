@@ -1,7 +1,9 @@
+/** Route wrapper for the full project-creation form. */
 import { Layout } from '@/components/Layout';
 import { ProjectForm } from '@/components/ProjectForm';
 
 export function NewProjectPage() {
+  /** Render the detailed form inside the shared layout. */
   return (
     <Layout>
       <h1 className="text-2xl font-bold text-slate-800">新規プロジェクト</h1>

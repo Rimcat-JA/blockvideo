@@ -27,12 +27,15 @@ from app.services.mermaid_renderer import mmdc_available, render_mermaid_to_png_
 
 @dataclass
 class RenderResult:
+    """Path and dimensions of a rendered slide image."""
+
     output_path: Path
     width: int
     height: int
 
 
 def _pick_font(size: int) -> ImageFont.ImageFont:
+    """Choose the first installed font capable of rendering common UI text."""
     candidates = [
         "C:/Windows/Fonts/msgothic.ttc",
         "C:/Windows/Fonts/meiryo.ttc",
@@ -83,6 +86,7 @@ def _wrap_lines(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> l
 
 
 def _fill_background(img: Image.Image, draw: ImageDraw.ImageDraw) -> None:
+    """Fill a slide canvas with the shared diagram background color."""
     draw.rectangle([(0, 0), img.size], fill=DIAGRAM_BG)
 
 
@@ -97,6 +101,7 @@ def render_text_slide(
     accent: tuple[int, int, int] = (15, 118, 110),
     fg: tuple[int, int, int] = (15, 23, 42),
 ) -> RenderResult:
+    """Render a heading and wrapped explanatory body as a light slide."""
     img = Image.new("RGB", (width, height), color=bg_color)
     draw = ImageDraw.Draw(img)
     _fill_background(img, draw)
@@ -130,6 +135,7 @@ def render_title_slide(
     subtitle: str,
     chapter_label: str | None = None,
 ) -> RenderResult:
+    """Render a chapter/title slide with an optional small chapter label."""
     img = Image.new("RGB", (width, height), color=(248, 250, 252))
     draw = ImageDraw.Draw(img)
     _fill_background(img, draw)
@@ -164,6 +170,7 @@ def render_comparison(
     left: dict[str, str],
     right: dict[str, str],
 ) -> RenderResult:
+    """Render two labeled content panels for a comparison visual plan."""
     img = Image.new("RGB", (width, height), color=(248, 250, 252))
     draw = ImageDraw.Draw(img)
     _fill_background(img, draw)
@@ -221,6 +228,7 @@ def render_code_slide(
     code: str,
     language: str = "text",
 ) -> RenderResult:
+    """Render syntax-neutral code text with line numbers and a language tag."""
     img = Image.new("RGB", (width, height), color=(15, 23, 42))
     draw = ImageDraw.Draw(img)
     # heading
@@ -360,8 +368,9 @@ def render_diagram(
 
 
 def _embed_heading(mermaid_source: str, heading: str) -> str:
-    """Prepend a Mermaid ``title``/``accTitle`` so the heading appears in the
-    rendered image without breaking the diagram body. If the source already
+    """Prepend a Mermaid ``title``/``accTitle`` to the rendered image.
+
+    If the source already
     starts with a graph/flowchart directive, inject the title line after it.
     """
     lines = mermaid_source.splitlines()
@@ -375,6 +384,7 @@ _EDGE_RX = re.compile(r"([A-Za-z0-9_]+)\s*-->\s*([A-Za-z0-9_]+)")
 
 
 def _parse_simple_mermaid(source: str) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Extract simple box nodes and arrows for the no-mmdc fallback renderer."""
     boxes: dict[str, str] = {}
     edges: list[tuple[str, str]] = []
     for raw in source.splitlines():
@@ -396,6 +406,7 @@ def _draw_boxes_and_edges(
     boxes: dict[str, str],
     edges: list[tuple[str, str]],
 ) -> None:
+    """Draw the small vertical graph subset understood by the PIL fallback."""
     if not boxes:
         return
     keys = list(boxes.keys())

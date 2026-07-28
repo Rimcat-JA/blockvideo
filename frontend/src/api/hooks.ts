@@ -1,12 +1,15 @@
+/** React Query hooks that connect pages/components to the API client. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type { CreateProjectInput, QuickCreateInput } from '@/lib/types';
 
 export function useProjects() {
+  /** Fetch the newest project summaries. */
   return useQuery({ queryKey: ['projects'], queryFn: () => api.listProjects() });
 }
 
 export function useProject(id: number | null) {
+  /** Fetch one project when a route id is available. */
   return useQuery({
     queryKey: ['project', id],
     enabled: id != null,
@@ -15,6 +18,7 @@ export function useProject(id: number | null) {
 }
 
 export function useQuickCreate() {
+  /** Create a project from the quick-generation form. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: QuickCreateInput) => api.quickCreate(input),
@@ -36,6 +40,7 @@ export function useLiveProject(id: number | null) {
 }
 
 export function useProjectBlocks(projectId: number | null) {
+  /** Fetch the ordered blocks for a selected project. */
   return useQuery({
     queryKey: ['blocks', projectId],
     enabled: projectId != null,
@@ -44,6 +49,7 @@ export function useProjectBlocks(projectId: number | null) {
 }
 
 export function useCreateProject() {
+  /** Create a detailed project and refresh the project list. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: CreateProjectInput) => api.createProject(input),
@@ -52,6 +58,7 @@ export function useCreateProject() {
 }
 
 export function useDeleteProject() {
+  /** Delete a project and invalidate its list entry. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.deleteProject(id),
@@ -60,6 +67,7 @@ export function useDeleteProject() {
 }
 
 export function useGenerateAll(projectId: number) {
+  /** Queue complete generation and refresh project/block cache entries. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.generateAll(projectId),
@@ -71,6 +79,7 @@ export function useGenerateAll(projectId: number) {
 }
 
 export function useCancel(projectId: number) {
+  /** Request cancellation and refresh the project status. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.cancelProject(projectId),
@@ -79,6 +88,7 @@ export function useCancel(projectId: number) {
 }
 
 export function useRerender(projectId: number) {
+  /** Queue render-only regeneration for an existing project. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.rerender(projectId),
@@ -89,6 +99,7 @@ export function useRerender(projectId: number) {
 }
 
 export function useRegenerateBlockVisual(projectId: number) {
+  /** Queue one block's visual regeneration and invalidate related queries. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (blockId: number) => api.regenerateBlockVisual(blockId),
@@ -100,6 +111,7 @@ export function useRegenerateBlockVisual(projectId: number) {
 }
 
 export function useRegenerateBlockAudio(projectId: number) {
+  /** Queue one block's audio regeneration and invalidate related queries. */
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (blockId: number) => api.regenerateBlockAudio(blockId),
@@ -111,6 +123,7 @@ export function useRegenerateBlockAudio(projectId: number) {
 }
 
 export function useSpeakers(url?: string) {
+  /** Fetch speaker choices for the VOICEVOX settings controls. */
   return useQuery({
     queryKey: ['speakers', url ?? 'default'],
     queryFn: () => api.speakers(url),

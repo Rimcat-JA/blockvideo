@@ -12,6 +12,8 @@ from app.providers.llm import ProviderError
 
 
 class OpenAIImageProvider(ImageProvider):
+    """OpenAI Images API client that writes decoded image bytes to disk."""
+
     name = "openai"
 
     def __init__(
@@ -23,6 +25,7 @@ class OpenAIImageProvider(ImageProvider):
         timeout: float = 120.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        """Configure the Images API endpoint and optional injected client."""
         if not api_key:
             raise ProviderError("Image API key is required", safe=True)
         self._api_key = api_key
@@ -33,6 +36,7 @@ class OpenAIImageProvider(ImageProvider):
     async def generate_image(
         self, prompt: str, width: int, height: int, output_path: Path
     ) -> Path:
+        """Request one base64 image and persist it as a PNG-like output file."""
         url = f"{self._base_url}/images/generations"
         payload = {
             "model": self._model,
@@ -77,5 +81,6 @@ class OpenAIImageProvider(ImageProvider):
         return "1024x1536"
 
     async def aclose(self) -> None:
+        """Close the provider's HTTP client."""
         if self._client is not None:
             await self._client.aclose()

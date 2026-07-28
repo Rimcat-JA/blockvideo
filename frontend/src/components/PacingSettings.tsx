@@ -1,3 +1,4 @@
+/** Per-project narration, slide, subtitle, and speaker controls. */
 import { useSpeakers } from '@/api/hooks';
 
 /** The tempo knobs a viewer actually feels, and their defaults. */
@@ -35,6 +36,7 @@ interface SliderProps {
 function Slider({
   label, hint, value, min, max, step, unit, fallback, disabled, onChange,
 }: SliderProps) {
+  /** Render one numeric range control with default-value feedback. */
   const changed = Math.abs(value - fallback) > 1e-9;
   return (
     <div>

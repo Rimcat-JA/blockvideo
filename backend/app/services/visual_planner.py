@@ -159,6 +159,7 @@ ENV_DIAGRAM_SCHEMA = {
 async def generate_global_style(
     provider: LLMProvider, *, project_title: str
 ) -> str:
+    """Ask the LLM for one style description shared by all project blocks."""
     request = LLMRequest(
         messages=[
             LLMMessage(role="system", content=VISUAL_PLAN_SYSTEM),
@@ -241,7 +242,7 @@ _CODE_MARKERS = re.compile(
 
 
 def _looks_like_code(text: str) -> bool:
-    """True when a 'diagram' body is really a code listing.
+    """Return whether a 'diagram' body is really a code listing.
 
     Mermaid sources always start with a graph directive; anything that opens
     with S-expressions or statements is code the model mislabelled.
@@ -318,6 +319,7 @@ _BORDER_CHARS = "─━┌┏┐┓└┗┘┛├┣┤┫┬┳┴┻┼╋═
 
 
 def _cell_width(line: str) -> int:
+    """Return display width using two columns for full-width East Asian glyphs."""
     return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in line)
 
 
@@ -351,7 +353,7 @@ def slide_alignment_issues(body: str) -> list[str]:
 
 
 def authored_plan(heading: str, body: str) -> VisualPlan:
-    """A plan for author-drawn slide content — built locally, no LLM call."""
+    """Build an author-drawn slide plan locally without an LLM call."""
     return VisualPlan(
         visual_type=VisualType.verbatim_slide,
         heading=heading or None,

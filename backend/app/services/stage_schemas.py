@@ -9,6 +9,8 @@ from app.models.block import VisualType
 
 
 class SplitBlock(BaseModel):
+    """Validated block text returned by the script-splitting stage."""
+
     model_config = ConfigDict(extra="forbid")
 
     index: int = Field(ge=0)
@@ -20,6 +22,8 @@ class SplitBlock(BaseModel):
 
 
 class SplitPayload(BaseModel):
+    """Validated ordered collection of split blocks."""
+
     model_config = ConfigDict(extra="forbid")
 
     blocks: list[SplitBlock] = Field(min_length=1, max_length=500)
@@ -27,6 +31,7 @@ class SplitPayload(BaseModel):
     @field_validator("blocks")
     @classmethod
     def _validate_indices(cls, blocks: list[SplitBlock]) -> list[SplitBlock]:
+        """Require model indices to match the returned list order."""
         for i, block in enumerate(blocks):
             if block.index != i:
                 raise ValueError(
@@ -36,6 +41,8 @@ class SplitPayload(BaseModel):
 
 
 class VisualPlan(BaseModel):
+    """Validated visual choice and renderer-specific payload for one block."""
+
     model_config = ConfigDict(extra="forbid")
 
     visual_type: VisualType
@@ -61,6 +68,7 @@ class VisualPlan(BaseModel):
     @field_validator("left_panel", "right_panel")
     @classmethod
     def _restrict_panels(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Keep comparison panels limited to title and content strings."""
         if value is None:
             return value
         # Reject unknown / unwanted keys explicitly.
@@ -76,12 +84,16 @@ class VisualPlan(BaseModel):
 
 
 class VisualPlanPayload(BaseModel):
+    """Envelope used when validating an LLM visual-plan response."""
+
     model_config = ConfigDict(extra="forbid")
 
     plan: VisualPlan
 
 
 class GlobalVisualStylePayload(BaseModel):
+    """Validated project-wide style returned by the planning stage."""
+
     model_config = ConfigDict(extra="forbid")
 
     global_visual_style: str = Field(min_length=4, max_length=2000)

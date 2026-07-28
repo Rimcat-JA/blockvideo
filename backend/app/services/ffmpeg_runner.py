@@ -25,6 +25,8 @@ SLIDE_BG_HEX = "0xF8FAFC"
 
 @dataclass
 class BlockClip:
+    """Description of a block media clip used by FFmpeg callers."""
+
     image_path: Path
     audio_path: Path
     duration_ms: int
@@ -141,7 +143,7 @@ def build_block_video_args(
 
 
 def _escape_sub_path(path: Path) -> str:
-    """Escape an .ass path for the libass ``subtitles=`` filter on Windows.
+    r"""Escape an .ass path for the libass ``subtitles=`` filter on Windows.
 
     The libass filter uses ``:`` as an option separator, so the drive-letter
     colon must be escaped (``\\:``) and the whole path wrapped in single
@@ -220,6 +222,7 @@ async def run_ffmpeg(args: list[str], *, log_path: Path | None = None) -> None:
 
 
 async def ffprobe_duration_ms(path: Path) -> int:
+    """Run FFprobe and return the media duration in milliseconds."""
     ffprobe = resolve_ffprobe()
     if not shutil.which(ffprobe) and not Path(ffprobe).exists():
         raise ProviderError(
@@ -247,16 +250,19 @@ async def ffprobe_duration_ms(path: Path) -> int:
 
 
 def ffprobe_available() -> bool:
+    """Return whether the configured FFprobe executable can be found."""
     ffprobe = resolve_ffprobe()
     return bool(shutil.which(ffprobe)) or Path(ffprobe).exists()
 
 
 def ffmpeg_available() -> bool:
+    """Return whether the configured FFmpeg executable can be found."""
     ffmpeg = resolve_ffmpeg()
     return bool(shutil.which(ffmpeg)) or Path(ffmpeg).exists()
 
 
 def write_concat_list(items: list[Path], list_file: Path) -> None:
+    """Write absolute media paths in FFmpeg concat-demuxer syntax."""
     list_file.parent.mkdir(parents=True, exist_ok=True)
     with list_file.open("w", encoding="utf-8") as fp:
         for item in items:

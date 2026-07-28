@@ -1,3 +1,4 @@
+/** PacingSettings defaults, sliders, reset, and speaker control tests. */
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -8,6 +9,7 @@ vi.mock('@/api/client', () => ({
 }));
 
 function renderPanel(value: Pacing = DEFAULT_PACING, onChange = vi.fn()) {
+  /** Render the settings panel inside the query provider used by its hook. */
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>

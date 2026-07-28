@@ -1,3 +1,4 @@
+/** ProgressBar rendering and clamping tests. */
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ProgressBar } from '@/components/ProgressBar';

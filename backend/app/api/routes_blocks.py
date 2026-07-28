@@ -21,6 +21,7 @@ router = APIRouter(prefix="/blocks")
 
 @router.get("/{block_id}", response_model=BlockSummary)
 def get_block(block_id: int, db: Session = Depends(get_db)) -> BlockSummary:
+    """Return one block's current state and artifact URLs."""
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -29,6 +30,7 @@ def get_block(block_id: int, db: Session = Depends(get_db)) -> BlockSummary:
 
 @router.patch("/{block_id}", response_model=BlockSummary)
 def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db)) -> BlockSummary:
+    """Apply editable block fields and return the refreshed block."""
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -41,6 +43,7 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
 
 @router.post("/{block_id}/regenerate-visual", response_model=GenerateAllResponse, status_code=202)
 async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
+    """Queue visual regeneration for the block's project/index pair."""
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -67,6 +70,7 @@ async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> Gen
 
 @router.post("/{block_id}/regenerate-audio", response_model=GenerateAllResponse, status_code=202)
 async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
+    """Queue audio regeneration for the block's project/index pair."""
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -93,6 +97,7 @@ async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> Gene
 
 @router.post("/{block_id}/rerender", response_model=GenerateAllResponse, status_code=202)
 async def rerender_block(block_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
+    """Queue a project render because final concat is project-wide."""
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")

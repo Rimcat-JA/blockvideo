@@ -1,3 +1,4 @@
+/** Validation contract tests for the detailed project form. */
 import { describe, expect, it } from 'vitest';
 import { createProjectSchema } from '@/lib/validation';
 

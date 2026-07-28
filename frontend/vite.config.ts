@@ -1,4 +1,5 @@
 /// <reference types="vitest" />
+/** Vite development server, source alias, API proxy, and Vitest settings. */
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';

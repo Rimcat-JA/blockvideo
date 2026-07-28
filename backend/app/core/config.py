@@ -118,6 +118,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Load and cache settings, creating the runtime storage directories."""
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     (settings.storage_root / "projects").mkdir(parents=True, exist_ok=True)
@@ -130,6 +131,7 @@ def reset_settings_cache() -> None:
 
 
 def resolve_ffmpeg(settings: Settings | None = None) -> str:
+    """Resolve the FFmpeg executable from settings, environment, or PATH."""
     settings = settings or get_settings()
     if settings.ffmpeg_path:
         return settings.ffmpeg_path
@@ -141,6 +143,7 @@ def resolve_ffmpeg(settings: Settings | None = None) -> str:
 
 
 def resolve_ffprobe(settings: Settings | None = None) -> str:
+    """Resolve the FFprobe executable from settings, environment, or PATH."""
     settings = settings or get_settings()
     if settings.ffprobe_path:
         return settings.ffprobe_path

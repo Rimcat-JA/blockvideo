@@ -1,3 +1,5 @@
+/** Progress display shared by quick generation and project detail pages. */
+/** Props for a normalized 0..1 project progress display. */
 interface ProgressBarProps {
   progress: number;
   stage?: string | null;
@@ -5,6 +7,7 @@ interface ProgressBarProps {
 }
 
 export function ProgressBar({ progress, stage, status }: ProgressBarProps) {
+  /** Clamp progress, format it as a percentage, and render the bar. */
   const clamped = Math.max(0, Math.min(1, progress || 0));
   const percent = Math.round(clamped * 100);
   return (

@@ -21,6 +21,8 @@ from app.services.narration import (
 
 @dataclass
 class AudioResult:
+    """Audio artifact path, measured duration, and optional sentence spans."""
+
     path: Path
     duration_ms: int
     # When VOICEVOX planned the narration sentence by sentence, where each
@@ -29,6 +31,7 @@ class AudioResult:
 
 
 async def ffprobe_duration_ms(path: Path) -> int:
+    """Run FFprobe and return an audio file's duration in milliseconds."""
     ffprobe = resolve_ffprobe()
     if not shutil.which(ffprobe) and not Path(ffprobe).exists():
         raise ProviderError(
@@ -171,15 +174,18 @@ def compute_display_duration_ms(
     post_seconds: float = 0.35,
     min_seconds: float = 2.0,
 ) -> int:
+    """Add reading margins to audio duration while enforcing a minimum hold."""
     total = audio_duration_ms + int(pre_seconds * 1000) + int(post_seconds * 1000)
     floor = int(min_seconds * 1000)
     return max(total, floor)
 
 
 def ffprobe_is_available() -> bool:
+    """Return whether FFprobe is available for audio duration measurement."""
     ffprobe = resolve_ffprobe()
     return bool(shutil.which(ffprobe)) or Path(ffprobe).exists()
 
 
 async def measure_audio_ms(path: Path) -> int:
+    """Measure one audio file through the shared FFprobe helper."""
     return await ffprobe_duration_ms(path)

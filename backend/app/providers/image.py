@@ -19,7 +19,9 @@ class ImageProvider(abc.ABC):
     @abc.abstractmethod
     async def generate_image(
         self, prompt: str, width: int, height: int, output_path: Path
-    ) -> Path: ...
+    ) -> Path:
+        """Generate an image and write it to the requested output path."""
+        ...
 
 
 class ImageValidationError(ProviderError):

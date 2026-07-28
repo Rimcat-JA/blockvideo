@@ -20,6 +20,8 @@ from app.core.logging import log
 
 @dataclass
 class MermaidRenderResult:
+    """Dimensions and output path returned by the async Mermaid wrapper."""
+
     output_path: Path
     width: int
     height: int
@@ -34,8 +36,11 @@ def mmdc_available() -> bool:
 
 
 def _escape_subprocess_arg(value: str) -> str:
-    """No shell is involved; we pass argv elements verbatim. Kept as a hook
-    so callers see that no shell escaping is needed here."""
+    """Pass an argv element through without shell escaping.
+
+    No shell is involved; we pass argv elements verbatim. Kept as a hook
+    so callers see that no shell escaping is needed here.
+    """
     return value
 
 

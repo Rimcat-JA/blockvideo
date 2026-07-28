@@ -1,10 +1,13 @@
+/** Shared page shell with navigation and the centered content column. */
 import type { ReactNode } from 'react';
 
+/** Content supplied to the application shell. */
 interface LayoutProps {
   children: ReactNode;
 }
 
 export function Layout({ children }: LayoutProps) {
+  /** Render navigation around one route's page content. */
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">

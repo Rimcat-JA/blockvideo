@@ -62,6 +62,8 @@ ProgressCallback = Callable[[str, float, str | None], Awaitable[None]]
 
 @dataclass
 class StageContext:
+    """Shared project, provider, settings, and cancellation state for stages."""
+
     project: Project
     settings: Settings
     bundle: ProviderBundle
@@ -70,11 +72,13 @@ class StageContext:
     is_cancelled: Callable[[], bool] = lambda: False
 
     async def report(self, stage: str, progress: float, message: str | None = None) -> None:
+        """Forward stage progress to the optional worker callback."""
         if self.progress_cb:
             await self.progress_cb(stage, progress, message)
 
 
 async def ensure_global_style(ctx: StageContext, db: Session) -> str:
+    """Load a persisted global style or generate and save it once."""
     if ctx.project.global_visual_style:
         return ctx.project.global_visual_style
     style = await generate_global_style(ctx.bundle.llm, project_title=ctx.project.title)
@@ -86,6 +90,7 @@ async def ensure_global_style(ctx: StageContext, db: Session) -> str:
 
 
 async def run_split_stage(ctx: StageContext, db: Session) -> list[Block]:
+    """Split the source script, repair narration, and synchronize block rows."""
     script = normalize_kept(ctx.project.source_script)
     result = await split_script(script, ctx.bundle.llm, ctx.settings)
     log.info(
@@ -251,6 +256,7 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
 
 
 async def run_image_stage(ctx: StageContext, db: Session) -> int:
+    """Render every pending block image while honoring cancellation."""
     count = 0
     style = ctx.project.global_visual_style or ""
     for block in sorted(ctx.project.blocks, key=lambda b: b.index):
@@ -267,6 +273,7 @@ async def run_image_stage(ctx: StageContext, db: Session) -> int:
 async def _render_block_image(
     ctx: StageContext, block: Block, style: str, db: Session
 ) -> None:
+    """Render one block's primary and additional slide images."""
     ensure_project_layout(ctx.project.id)
     plan = block.visual_plan_json or {}
     output = block_image_path(ctx.project.id, block.index)
@@ -325,6 +332,7 @@ async def _render_block_image(
 
 
 async def run_audio_stage(ctx: StageContext, db: Session) -> int:
+    """Synthesize every pending block and persist durations and spans."""
     count = 0
     ensure_project_layout(ctx.project.id)
     for block in sorted(ctx.project.blocks, key=lambda b: b.index):
@@ -341,6 +349,7 @@ async def run_audio_stage(ctx: StageContext, db: Session) -> int:
 async def _render_block_audio(
     ctx: StageContext, block: Block, db: Session
 ) -> None:
+    """Synthesize one block and save its audio timing metadata."""
     output = block_audio_path(ctx.project.id, block.index)
     block.status_audio = BlockStatus.running
     block.error_message = None
@@ -378,6 +387,7 @@ async def _render_block_audio(
 
 
 async def run_render_stage(ctx: StageContext, db: Session) -> Path:
+    """Encode block videos, concatenate them, and write project metadata."""
     ensure_project_layout(ctx.project.id)
     settings = ctx.settings
 
@@ -581,7 +591,7 @@ def _block_slides(
     boundaries_ms: list[int] | None = None,
     max_slides: int = 1,
 ) -> list[tuple[Path, int]]:
-    """The ordered (image, duration) pairs a block should display.
+    """Return the ordered (image, duration) pairs a block should display.
 
     Extra slides are whatever ``image_1.png``, ``image_2.png`` … the image
     stage produced for this block. The block's running time is shared equally
@@ -666,6 +676,7 @@ def _write_block_ass(
 
 
 def _project_json_payload(project: Project, timeline: list[dict[str, Any]]) -> str:
+    """Serialize project settings and its timeline as human-readable JSON."""
     import json
 
     payload = {
@@ -697,6 +708,7 @@ def _project_json_payload(project: Project, timeline: list[dict[str, Any]]) -> s
 
 
 def _timeline_json_payload(timeline: list[dict[str, Any]]) -> str:
+    """Serialize only timeline rows for consumers that do not need settings."""
     import json
 
     return json.dumps(timeline, ensure_ascii=False, indent=2)
@@ -780,6 +792,7 @@ async def run_full_pipeline(
 async def rerun_block_visual(
     project_id: int, block_index: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
+    """Re-render one block's image while preserving its audio and plan."""
     from app.db import get_session_factory
 
     factory = get_session_factory()
@@ -819,6 +832,7 @@ async def rerun_block_visual(
 async def rerun_block_audio(
     project_id: int, block_index: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
+    """Re-synthesize one block's audio and refresh its timing metadata."""
     from app.db import get_session_factory
 
     factory = get_session_factory()
@@ -854,6 +868,7 @@ async def rerun_block_audio(
 async def rerender_project(
     project_id: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
+    """Delete stale video artifacts and rebuild only the project render stage."""
     from app.db import get_session_factory
 
     factory = get_session_factory()

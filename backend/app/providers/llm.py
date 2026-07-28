@@ -14,12 +14,16 @@ from typing import Any
 
 @dataclass
 class LLMMessage:
+    """One role/content pair sent to an LLM provider."""
+
     role: str  # "system" | "user" | "assistant"
     content: str
 
 
 @dataclass
 class LLMRequest:
+    """Vendor-neutral chat request including optional JSON/schema hints."""
+
     messages: list[LLMMessage]
     response_format: dict[str, Any] | None = None  # JSON schema hint
     temperature: float = 0.2
@@ -28,6 +32,8 @@ class LLMRequest:
 
 @dataclass
 class LLMResponse:
+    """Normalized provider response with optional raw vendor payload."""
+
     content: str
     raw: dict[str, Any] | None = None
 
@@ -43,7 +49,9 @@ class LLMProvider(abc.ABC):
     name: str = "abstract"
 
     @abc.abstractmethod
-    async def chat(self, request: LLMRequest) -> LLMResponse: ...
+    async def chat(self, request: LLMRequest) -> LLMResponse:
+        """Send a chat request and return normalized text content."""
+        ...
 
     async def chat_json(self, request: LLMRequest) -> dict[str, Any]:
         """Request and parse JSON, tolerating models that wrap it in prose.
@@ -91,6 +99,7 @@ class ProviderError(RuntimeError):
     """
 
     def __init__(self, message: str, *, safe: bool = True, original: Exception | None = None) -> None:
+        """Create an error with a user-safe message and optional original cause."""
         super().__init__(message)
         self.safe = safe
         self.original = original

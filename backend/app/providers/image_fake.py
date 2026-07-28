@@ -10,14 +10,18 @@ from app.providers.image import ImageProvider
 
 
 class FakeImageProvider(ImageProvider):
+    """Draw deterministic placeholder slides without a network request."""
+
     name = "fake"
 
     def __init__(self) -> None:
+        """Create an empty call log for test assertions."""
         self.calls: list[tuple[str, int, int, str]] = []
 
     async def generate_image(
         self, prompt: str, width: int, height: int, output_path: Path
     ) -> Path:
+        """Render a labeled placeholder image derived from the prompt hash."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
         h = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:6]
         self.calls.append((prompt, width, height, h))

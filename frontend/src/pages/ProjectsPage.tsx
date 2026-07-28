@@ -1,9 +1,11 @@
+/** Route-level project index with links and destructive delete action. */
 import { Link } from 'react-router-dom';
 import { Layout } from '@/components/Layout';
 import { useProjects, useDeleteProject } from '@/api/hooks';
 import { StatusBadge } from '@/components/StatusBadge';
 
 export function ProjectsPage() {
+  /** Fetch and render project summaries, loading/error states, and actions. */
   const { data, isLoading, error } = useProjects();
   const del = useDeleteProject();
 

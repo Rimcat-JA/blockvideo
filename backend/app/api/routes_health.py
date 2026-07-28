@@ -16,6 +16,7 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
+    """Report application version and whether FFmpeg tools are available."""
     return HealthResponse(
         status="ok",
         version=__version__,
