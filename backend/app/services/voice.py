@@ -1,4 +1,12 @@
-"""Audio generation helpers — wrapping VOICEVOX client with caching."""
+"""Audio generation helpers wrapping VOICEVOX with retries and timing files.
+
+Imports:
+    ``asyncio`` runs FFprobe and retry sleeps without blocking the event loop.
+    ``json`` parses FFprobe output; ``shutil`` checks executable availability.
+    Dataclasses/paths represent audio results and destinations.
+    Provider/narration modules provide the client, error, and sentence-timing
+    boundaries.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +29,15 @@ from app.services.narration import (
 
 @dataclass
 class AudioResult:
-    """Audio artifact path, measured duration, and optional sentence spans."""
+    """Audio artifact path, measured duration, and optional sentence spans.
+
+    Attributes:
+        path: Written WAV artifact.
+        duration_ms: FFprobe-measured audio duration.
+        spans: Sentence timings when per-sentence planning succeeded; empty for
+            fallback single-shot/fake synthesis.
+
+    """
 
     path: Path
     duration_ms: int
@@ -31,7 +47,18 @@ class AudioResult:
 
 
 async def ffprobe_duration_ms(path: Path) -> int:
-    """Run FFprobe and return an audio file's duration in milliseconds."""
+    """Run FFprobe and return an audio file's duration in milliseconds.
+
+    Args:
+        path: Audio file to inspect.
+
+    Returns:
+        Rounded ``format.duration`` in milliseconds.
+
+    Raises:
+        ProviderError: If FFprobe is unavailable or exits non-zero.
+
+    """
     ffprobe = resolve_ffprobe()
     if not shutil.which(ffprobe) and not Path(ffprobe).exists():
         raise ProviderError(
@@ -62,7 +89,20 @@ async def ffprobe_duration_ms(path: Path) -> int:
 
 
 async def _with_retries(make_audio, *, max_attempts: int) -> bytes:
-    """Run a synthesis coroutine, retrying transient VOICEVOX failures."""
+    """Run a synthesis coroutine with bounded exponential backoff.
+
+    Args:
+        make_audio: Zero-argument awaitable factory that performs one request.
+        max_attempts: Number of attempts, including the first try.
+
+    Returns:
+        The first successful WAV byte sequence.
+
+    Raises:
+        ProviderError: Re-raises permanent speaker-ID errors or the last
+            transient provider error after all attempts.
+
+    """
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -91,7 +131,24 @@ async def synthesize_audio(
     client: VoicevoxClient | FakeVoicevoxClient | None = None,
     max_attempts: int = 3,
 ) -> AudioResult:
-    """Synthesize one block of narration. Retries on transient errors."""
+    """Synthesize one block with simple whole-text fallback behavior.
+
+    Args:
+        text: Narration text sent to VOICEVOX.
+        settings: Voice/speaker controls.
+        output_path: WAV destination.
+        client: Optional caller-owned live or fake client.
+        max_attempts: Maximum transient synthesis attempts.
+
+    Returns:
+        ``AudioResult`` with the written path and FFprobe duration; spans are
+        empty because this path does not build a sentence plan.
+
+    Side Effects:
+        Creates parent directories, writes a WAV, and closes an internally
+        created live client.
+
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     close_client = False
     if client is None:
@@ -123,11 +180,25 @@ async def synthesize_block(
 ) -> AudioResult:
     """Synthesize a block, measuring where each sentence lands in the audio.
 
+    Args:
+        text: Narration text for one block.
+        settings: Voice/speaker controls.
+        output_path: WAV destination.
+        client: Optional live/fake client; fake clients use simple synthesis.
+        sentence_pause_seconds: Extra pause between measured sentences.
+        plan_concurrency: Maximum concurrent VOICEVOX query requests.
+        max_attempts: Maximum transient synthesis attempts.
+
+    Returns:
+        ``AudioResult`` with measured duration and rescaled spans when planning
+        succeeds; otherwise the same result shape from ``synthesize_audio``.
+
     Plans the narration sentence by sentence (see ``narration``) so that the
     caption and slide changes can be timed against the real voice instead of
     against character counts, and so the gap at each ``。`` can be widened
     into a breath. Falls back to plain single-shot synthesis — identical to
     the behaviour before this existed — whenever the plan cannot be built.
+
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     close_client = False
@@ -174,18 +245,34 @@ def compute_display_duration_ms(
     post_seconds: float = 0.35,
     min_seconds: float = 2.0,
 ) -> int:
-    """Add reading margins to audio duration while enforcing a minimum hold."""
+    """Add reading margins to audio duration while enforcing a floor.
+
+    Args:
+        audio_duration_ms: Measured narration duration.
+        pre_seconds: Lead-in hold before/around narration.
+        post_seconds: Trailing hold after narration.
+        min_seconds: Minimum total display duration.
+
+    Returns:
+        Maximum of the margin-adjusted duration and the configured minimum,
+        expressed in milliseconds.
+
+    """
     total = audio_duration_ms + int(pre_seconds * 1000) + int(post_seconds * 1000)
     floor = int(min_seconds * 1000)
     return max(total, floor)
 
 
 def ffprobe_is_available() -> bool:
-    """Return whether FFprobe is available for audio duration measurement."""
+    """Return whether configured FFprobe is discoverable."""
     ffprobe = resolve_ffprobe()
     return bool(shutil.which(ffprobe)) or Path(ffprobe).exists()
 
 
 async def measure_audio_ms(path: Path) -> int:
-    """Measure one audio file through the shared FFprobe helper."""
+    """Measure one audio file through the shared FFprobe helper.
+
+    This alias keeps callers independent of the implementation name used by
+    the synthesis module.
+    """
     return await ffprobe_duration_ms(path)

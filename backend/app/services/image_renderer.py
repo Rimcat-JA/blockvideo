@@ -1,8 +1,16 @@
-"""Local image rendering.
+"""Local PIL image rendering for every supported visual type.
 
-Renders one of several visual types to a 1920x1080 PNG using a combination
-of Jinja2 templates, cairosvg, and PIL. We never ship fonts in the repo —
-the renderer relies on system-installed fonts.
+Renders text, title, comparison, code, formula, author-drawn, structured
+diagram, and Mermaid visuals to PNG.  PIL performs the local drawing; Mermaid
+CLI is used only for Mermaid graph sources before a PIL canvas composition.
+We never ship fonts in the repo — the renderer relies on system-installed fonts.
+
+Imports:
+    ``re`` parses the small Mermaid fallback subset.
+    Dataclasses/paths/types describe render results and loose plan payloads.
+    PIL performs image, text, font, and drawing operations.
+    Model/services supply visual enum values, structured diagram renderers,
+    Mermaid CLI, and safe diagnostics.
 """
 from __future__ import annotations
 
@@ -27,7 +35,13 @@ from app.services.mermaid_renderer import mmdc_available, render_mermaid_to_png_
 
 @dataclass
 class RenderResult:
-    """Path and dimensions of a rendered slide image."""
+    """Path and dimensions of one rendered slide image.
+
+    Attributes:
+        output_path: PNG written by the selected renderer.
+        width, height: Exact output dimensions requested by the pipeline.
+
+    """
 
     output_path: Path
     width: int
@@ -101,7 +115,22 @@ def render_text_slide(
     accent: tuple[int, int, int] = (15, 118, 110),
     fg: tuple[int, int, int] = (15, 23, 42),
 ) -> RenderResult:
-    """Render a heading and wrapped explanatory body as a light slide."""
+    """Render a heading and wrapped explanatory body as a light slide.
+
+    Args:
+        output_path: PNG destination.
+        width: Output width in pixels.
+        height: Output height in pixels.
+        heading: Main visible heading.
+        body: Explanatory text, limited to the first eight wrapped lines.
+        bg_color: RGB background color before the shared fill.
+        accent: RGB color for the accent bar.
+        fg: RGB color for heading text.
+
+    Returns:
+        ``RenderResult`` for the written PNG.
+
+    """
     img = Image.new("RGB", (width, height), color=bg_color)
     draw = ImageDraw.Draw(img)
     _fill_background(img, draw)
@@ -135,7 +164,20 @@ def render_title_slide(
     subtitle: str,
     chapter_label: str | None = None,
 ) -> RenderResult:
-    """Render a chapter/title slide with an optional small chapter label."""
+    """Render a chapter/title slide with an optional label.
+
+    Args:
+        output_path: PNG destination.
+        width: Output width in pixels.
+        height: Output height in pixels.
+        title: Main title text.
+        subtitle: Optional subtitle below the title.
+        chapter_label: Optional small label above the title.
+
+    Returns:
+        ``RenderResult`` for the written PNG.
+
+    """
     img = Image.new("RGB", (width, height), color=(248, 250, 252))
     draw = ImageDraw.Draw(img)
     _fill_background(img, draw)
@@ -170,7 +212,20 @@ def render_comparison(
     left: dict[str, str],
     right: dict[str, str],
 ) -> RenderResult:
-    """Render two labeled content panels for a comparison visual plan."""
+    """Render two labeled panels for a comparison plan.
+
+    Args:
+        output_path: PNG destination.
+        width: Output width in pixels.
+        height: Output height in pixels.
+        heading: Comparison heading.
+        left: Left panel mapping with optional ``title`` and ``content``.
+        right: Right panel mapping with optional ``title`` and ``content``.
+
+    Returns:
+        ``RenderResult`` for the written PNG.
+
+    """
     img = Image.new("RGB", (width, height), color=(248, 250, 252))
     draw = ImageDraw.Draw(img)
     _fill_background(img, draw)
@@ -228,7 +283,20 @@ def render_code_slide(
     code: str,
     language: str = "text",
 ) -> RenderResult:
-    """Render syntax-neutral code text with line numbers and a language tag."""
+    """Render syntax-neutral code with line numbers and a language tag.
+
+    Args:
+        output_path: PNG destination.
+        width: Output width in pixels.
+        height: Output height in pixels.
+        heading: Visible code-slide heading.
+        code: Source text to display; long output is clipped to the canvas.
+        language: Optional uppercase language badge.
+
+    Returns:
+        ``RenderResult`` for the written PNG.
+
+    """
     img = Image.new("RGB", (width, height), color=(15, 23, 42))
     draw = ImageDraw.Draw(img)
     # heading
@@ -301,7 +369,7 @@ def render_diagram(
     heading: str,
     diagram_source: str,
 ) -> RenderResult:
-    """Render a Mermaid diagram.
+    """Render Mermaid source with CLI-first and PIL fallback behavior.
 
     Primary path: invoke ``mmdc`` (mermaid-cli) to render the Mermaid source
     faithfully — branching, trees, labeled edges, subgraphs and all. This is
@@ -311,6 +379,22 @@ def render_diagram(
     renderer which only understands a tiny subset of Mermaid (vertical chain
     of ``[..]`` boxes with ``-->`` edges). That keeps the pipeline working
     without a Node toolchain, at the cost of diagram fidelity.
+
+    Args:
+        output_path: PNG destination.
+        width: Exact output width in pixels.
+        height: Exact output height in pixels.
+        heading: Visible heading.
+        diagram_source: Mermaid source; empty/unsupported input is shown as
+            text in the fallback path.
+
+    Returns:
+        ``RenderResult`` for either the Mermaid or fallback PNG.
+
+    Side Effects:
+        May create a temporary PNG, invoke ``mmdc``/``npx``, log a warning on
+        failure, and write the final PNG.
+
     """
     source = (diagram_source or "").strip()
     if source and mmdc_available():
@@ -492,12 +576,24 @@ def render_formula(
     formula: str,
     note: str = "",
 ) -> RenderResult:
-    """Render a formula panel with a large rendered formula attempt.
+    """Render a formula panel as styled PIL text.
 
     For the MVP we don't bundle a TeX engine; we render formula as styled
     text using PIL with italics and a serif font fallback. (We tried to
     render KaTeX-equivalent via SVG here, but PIL-only rendering keeps the
     MVP dependency-free.)
+
+    Args:
+        output_path: PNG destination.
+        width: Output width in pixels.
+        height: Output height in pixels.
+        heading: Formula heading.
+        formula: Formula text, clipped after 30 characters.
+        note: Optional explanatory text below the formula.
+
+    Returns:
+        ``RenderResult`` for the written PNG.
+
     """
     img = Image.new("RGB", (width, height), color=(248, 250, 252))
     draw = ImageDraw.Draw(img)
@@ -540,7 +636,21 @@ def render_visual_plan(
     height: int,
     fallback_summary: str = "",
 ) -> RenderResult:
-    """Dispatch to the correct renderer based on plan_payload.visual_type."""
+    """Dispatch a validated-ish plan payload to its renderer.
+
+    Args:
+        plan_payload: Mapping with ``visual_type`` and renderer-specific fields.
+        output_path: PNG destination.
+        width: Exact output width in pixels.
+        height: Exact output height in pixels.
+        fallback_summary: Text used when a plan omits visible summary/body.
+
+    Returns:
+        The selected renderer's ``RenderResult``.  Invalid/missing visual types
+        fall back to a readable text slide rather than raising where possible;
+        structured diagram failures also degrade to text slides.
+
+    """
     vtype = plan_payload.get("visual_type") or VisualType.text_slide.value
     heading = plan_payload.get("heading") or ""
     if vtype == VisualType.title_slide.value:

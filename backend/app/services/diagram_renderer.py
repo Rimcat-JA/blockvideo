@@ -1,4 +1,4 @@
-"""Precise SICP-style diagram rendering.
+"""Precise SICP-style diagram rendering with PIL.
 
 Mermaid flowcharts cannot express box-and-pointer (cons cell) diagrams or
 environment-model diagrams — the two staples of SICP-style teaching
@@ -25,6 +25,17 @@ output is therefore **always exactly ``width`` x ``height``** on the theme
 background, which matters downstream: ffmpeg letterboxes anything that does
 not match the frame aspect, and an undersized diagram would otherwise be
 blur-upscaled between black bars.
+Imports:
+    ``math`` draws arrow geometry.
+    ``unicodedata`` measures East Asian display width.
+    Dataclasses/paths/types describe outputs and loose model-produced specs.
+    PIL creates canvases, text, fonts, and drawing primitives.
+    ``log`` is available for defensive renderer diagnostics.
+
+Module state:
+    Theme colors and layout constants below define the visual language and the
+    natural supersampled canvas size.  They are immutable conventions, not
+    per-request configuration.
 """
 from __future__ import annotations
 
@@ -40,7 +51,7 @@ from app.core.logging import log
 
 
 # --------------------------------------------------------------------------
-# Theme — matches the "落ち着いた大学講義風" global visual style.
+# Theme colors — match the "落ち着いた大学講義風" visual style.
 # --------------------------------------------------------------------------
 
 BG = (248, 250, 252)
@@ -70,7 +81,13 @@ LINE_W = 6
 
 @dataclass
 class DiagramResult:
-    """Path and dimensions produced by a structured diagram renderer."""
+    """Path and dimensions produced by a structured diagram renderer.
+
+    Attributes:
+        output_path: PNG destination written by the renderer.
+        width, height: Exact final canvas dimensions.
+
+    """
 
     output_path: Path
     width: int
@@ -96,7 +113,16 @@ _MONO_CANDIDATES = [
 
 
 def _font(size: int, mono: bool = False):
-    """Load a proportional or monospace font from the platform candidates."""
+    """Load the first usable proportional or monospace system font.
+
+    Args:
+        size: Requested point/pixel size passed to PIL.
+        mono: Select the monospace candidate list when true.
+
+    Returns:
+        A PIL font object; PIL's built-in default is the final fallback.
+
+    """
     for path in (_MONO_CANDIDATES if mono else _FONT_CANDIDATES):
         try:
             return ImageFont.truetype(path, size=size)
@@ -106,7 +132,7 @@ def _font(size: int, mono: bool = False):
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
-    """Measure text using PIL with a defensive font-size fallback."""
+    """Measure text using PIL and a defensive fallback estimate."""
     if not text:
         return (0, 0)
     try:
@@ -246,11 +272,23 @@ def _compose(content: Image.Image, width: int, height: int,
 
 def compose_on_canvas(content: Image.Image, *, width: int, height: int,
                       title: str = "", caption: str | None = None) -> Image.Image:
-    """Public wrapper around the canvas composer.
+    """Compose content onto an exact-size themed canvas.
 
     Used by the Mermaid path too: ``mmdc`` treats ``-w``/``-H`` as viewport
     hints, so it emits images at whatever size the graph happens to need.
     Composing them here guarantees a full-frame, correctly-padded slide.
+
+    Args:
+        content: Already-rendered RGBA/RGB image to fit.
+        width: Exact output width in pixels.
+        height: Exact output height in pixels.
+        title: Optional top heading.
+        caption: Optional bottom caption.
+
+    Returns:
+        New RGB image with the content scaled/centered and no more than 1x
+        enlarged.
+
     """
     return _compose(content, width, height, title, caption)
 
@@ -478,6 +516,20 @@ def render_verbatim_slide(
     a fixed line pitch, with leading spaces intact. The font is the largest
     that fits, which keeps a four-line sketch readable and still admits a
     thirty-line listing.
+
+    Args:
+        body: Author-authored monospaced slide content.
+        output_path: PNG destination.
+        width: Exact output canvas width in pixels.
+        height: Exact output canvas height in pixels.
+        title: Optional heading above the drawing.
+        caption: Optional explanatory caption below it.
+
+    Side Effects:
+        Creates the destination directory and writes a PNG.  Content is
+        rendered faithfully apart from tab expansion and common indentation
+        removal.
+
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     lines = (body or "").replace("\t", "    ").rstrip().splitlines() or [""]
@@ -532,7 +584,22 @@ def render_verbatim_slide(
 
 def render_pointer_diagram(spec: dict, output_path: Path, *, width: int,
                            height: int) -> DiagramResult:
-    """Render a box-and-pointer (cons cell) diagram to a fixed canvas."""
+    """Render a structured box-and-pointer diagram to a fixed canvas.
+
+    Args:
+        spec: Mapping containing ``groups`` or a compatible top-level ``cells``
+            list, optional roots/title/caption.
+        output_path: PNG destination.
+        width: Exact final canvas width in pixels.
+        height: Exact final canvas height in pixels.
+
+    Returns:
+        ``DiagramResult`` describing the written image.
+
+    Raises:
+        ValueError: If no cells exist or the measured layout is empty.
+
+    """
     groups = [g for g in (spec.get("groups") or []) if isinstance(g, dict)]
     if not groups:
         # tolerate a flat spec with cells at the top level
@@ -584,7 +651,22 @@ def _frame_height(frame: dict) -> int:
 
 def render_env_diagram(spec: dict, output_path: Path, *, width: int,
                        height: int) -> DiagramResult:
-    """Render an environment-model diagram (frames, bindings, procedures)."""
+    """Render an environment-model diagram of frames and procedures.
+
+    Args:
+        spec: Mapping containing non-empty ``frames`` and optional procedures,
+            title, and caption.
+        output_path: PNG destination.
+        width: Exact final canvas width in pixels.
+        height: Exact final canvas height in pixels.
+
+    Returns:
+        ``DiagramResult`` describing the written image.
+
+    Raises:
+        ValueError: If the specification has no identified frames.
+
+    """
     frames = [f for f in (spec.get("frames") or []) if isinstance(f, dict) and f.get("id")]
     if not frames:
         raise ValueError("env_diagram spec has no frames")

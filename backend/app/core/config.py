@@ -1,4 +1,16 @@
-"""Centralized configuration loaded from environment and .env file."""
+"""Environment-backed settings and executable/path resolution.
+
+Imports:
+    ``os`` reads optional executable overrides.
+    ``lru_cache`` keeps one ``Settings`` instance per process.
+    ``Path`` represents storage, sample, and executable configuration paths.
+    ``BaseSettings`` loads typed values from environment variables and the
+    backend ``.env`` file.
+
+The module-level roots are derived from this file's location.  Settings hold
+non-secret defaults and optional environment-level provider credentials;
+project-specific BYOK secrets belong in ``app.core.security.SecretStore``.
+"""
 from __future__ import annotations
 
 import os
@@ -8,17 +20,35 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# ``backend/`` directory containing the application package and ``.env``.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Customer project root containing storage and samples.
 REPO_ROOT = PROJECT_ROOT.parent
+# Default runtime artifact/database directory.
 STORAGE_ROOT = REPO_ROOT / "storage"
+# Sample scripts used by the demo and manual checks.
 SAMPLES_ROOT = REPO_ROOT / "samples"
 
 
 class Settings(BaseSettings):
-    """Application settings.
+    """Typed application settings loaded from environment and ``.env``.
 
-    Only stores non-secret configuration. API keys are BYOK and never persisted
-    to disk or logs.
+    Most values are safe defaults for a local instance.  API keys are optional
+    environment fallbacks and are never included in project JSON or logs;
+    request/project BYOK values are kept separately by ``SecretStore``.
+
+    Attributes:
+        app_name, app_version, environment: Identity and runtime mode.
+        storage_root, database_url: Local persistence locations.
+        api_host, api_port, cors_origins: HTTP listener and browser origins.
+        llm_* and image_*: Optional provider fallback configuration.
+        voicevox_*: Default VOICEVOX synthesis controls.
+        output_* and crossfade_seconds: Video frame/encoding defaults.
+        splitter_* and narration_*: LLM splitting and timing concurrency.
+        ffmpeg_path, ffprobe_path: Optional executable overrides.
+        mermaid_*: Optional Mermaid CLI renderer configuration.
+        subtitle_band_height: Pixels reserved for burned-in captions.
+
     """
 
     model_config = SettingsConfigDict(
@@ -118,7 +148,16 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Load and cache settings, creating the runtime storage directories."""
+    """Load the cached settings and ensure the runtime directories exist.
+
+    Returns:
+        The process-wide ``Settings`` instance.  Environment variables are
+        read only when the cache is first populated.
+
+    Side Effects:
+        Creates ``storage_root`` and its ``projects`` child when absent.
+
+    """
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     (settings.storage_root / "projects").mkdir(parents=True, exist_ok=True)
@@ -126,12 +165,25 @@ def get_settings() -> Settings:
 
 
 def reset_settings_cache() -> None:
-    """Reset cached settings (useful in tests)."""
+    """Clear the settings cache so the next call rereads configuration.
+
+    This function is primarily a test seam for changing environment variables
+    between cases; it does not delete storage directories.
+    """
     get_settings.cache_clear()
 
 
 def resolve_ffmpeg(settings: Settings | None = None) -> str:
-    """Resolve the FFmpeg executable from settings, environment, or PATH."""
+    """Resolve the FFmpeg executable from settings or ``FFMPEG_PATH``.
+
+    Args:
+        settings: Optional already-loaded settings object.
+
+    Returns:
+        Explicit ``Settings.ffmpeg_path``, then the ``FFMPEG_PATH`` environment
+        value, otherwise the bare ``"ffmpeg"`` name for PATH lookup.
+
+    """
     settings = settings or get_settings()
     if settings.ffmpeg_path:
         return settings.ffmpeg_path
@@ -143,7 +195,15 @@ def resolve_ffmpeg(settings: Settings | None = None) -> str:
 
 
 def resolve_ffprobe(settings: Settings | None = None) -> str:
-    """Resolve the FFprobe executable from settings, environment, or PATH."""
+    """Resolve FFprobe using settings, ``FFPROBE_PATH``, then PATH lookup.
+
+    Args:
+        settings: Optional already-loaded settings object.
+
+    Returns:
+        The configured executable name or path, defaulting to ``"ffprobe"``.
+
+    """
     settings = settings or get_settings()
     if settings.ffprobe_path:
         return settings.ffprobe_path
@@ -156,8 +216,14 @@ def resolve_ffprobe(settings: Settings | None = None) -> str:
 def resolve_mmdc(settings: Settings | None = None) -> str:
     """Resolve the mermaid-cli (mmdc) executable path.
 
-    Order: explicit ``mermaid_mmdc_path`` setting -> ``MERMAID_MMDC_PATH``
-    env var -> ``npx --yes mmdc`` (so it works without a global install).
+    Args:
+        settings: Optional already-loaded settings object.
+
+    Returns:
+        Explicit ``mermaid_mmdc_path`` -> ``MERMAID_MMDC_PATH`` -> the bare
+        ``"mmdc"`` executable name.  The renderer itself falls back to
+        ``npx --yes mmdc`` when that bare name is not on PATH.
+
     """
     settings = settings or get_settings()
     if settings.mermaid_mmdc_path:

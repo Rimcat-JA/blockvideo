@@ -1,4 +1,15 @@
-"""GenerationJob ORM model — tracks the long-running pipeline execution."""
+"""ORM row recording one asynchronous generation invocation.
+
+Imports:
+    ``enum`` defines durable job lifecycle values.
+    ``datetime`` records UTC start/finish/creation timestamps.
+    SQLAlchemy types declare progress, cancellation, error, and project-link
+    columns.
+
+Jobs are intentionally separate from ``Project.status``: a project describes
+the current aggregate output, while this table preserves each queued or
+completed invocation shown in the job history endpoint.
+"""
 from __future__ import annotations
 
 import enum
@@ -11,7 +22,7 @@ from app.db import Base
 
 
 class JobStatus(str, enum.Enum):
-    """Lifecycle states for a queued or running generation job."""
+    """Lifecycle states for one queued, running, or terminal job."""
 
     pending = "pending"
     running = "running"
@@ -21,7 +32,19 @@ class JobStatus(str, enum.Enum):
 
 
 class GenerationJob(Base):
-    """Persisted progress and cancellation state for one pipeline invocation."""
+    """Persisted progress, cancellation, timing, and error state.
+
+    Attributes:
+        id, project_id: Database identity and owning project.
+        current_stage: Human-readable stage or rerun selector.
+        status: Durable job lifecycle value.
+        progress, stage_progress: Overall and current-stage fractions.
+        cancel_requested: Durable cancellation flag polled by the worker.
+        started_at, finished_at, created_at: UTC job timestamps.
+        error_message: Truncated failure detail exposed to API clients.
+        project: SQLAlchemy relationship back to the owning project.
+
+    """
 
     __tablename__ = "generation_jobs"
 
@@ -52,7 +75,13 @@ class GenerationJob(Base):
     project: Mapped["Project"] = relationship("Project", back_populates="jobs")  # noqa: F821
 
     def to_summary(self) -> dict:
-        """Return the public job progress representation."""
+        """Return the JSON-compatible public progress representation.
+
+        Returns:
+            Job identity, owning project, stage, status, progress fractions,
+            ISO-8601 timestamps, and the optional truncated error message.
+
+        """
         return {
             "id": self.id,
             "project_id": self.project_id,

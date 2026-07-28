@@ -1,10 +1,16 @@
-"""Build configured LLM / Image / Voicevox instances for a project.
+"""Build configured LLM, image, and VOICEVOX clients for a project.
 
 Resolution order:
-    1. In-memory secrets stored per project (BYOK).
-    2. Environment-level fallback (only used if explicitly configured).
-    3. ``FakeLLMProvider`` / ``FakeImageProvider`` if the project has
-       ``use_fake_providers = True``.
+    1. ``use_fake_providers`` selects deterministic fake clients immediately.
+    2. For real clients, project-scoped in-memory BYOK values override
+       environment-level fallback settings.
+    3. Missing required LLM settings raise; image generation is optional and
+       becomes ``None`` when no image key is configured.
+
+Imports:
+    Dataclasses/types define the returned provider bundle.
+    Core settings/security modules provide global defaults and BYOK lookup.
+    Provider classes implement real and deterministic clients.
 """
 from __future__ import annotations
 
@@ -24,7 +30,17 @@ from app.providers.voicevox import FakeVoicevoxClient, VoicevoxClient, VoicevoxS
 
 @dataclass
 class ProviderBundle:
-    """All provider clients required by one pipeline execution."""
+    """All provider clients selected for one pipeline execution.
+
+    Attributes:
+        llm: Main text-generation provider used for splitting/style/title work.
+        image: Optional image provider; ``None`` means local visual rendering
+            must be used for the selected plan.
+        voicevox: Live or fake speech client.
+        use_fake: Whether deterministic offline providers were selected.
+        llm_planner: Optional cheaper/faster provider for per-block planning.
+
+    """
 
     llm: LLMProvider
     image: ImageProvider | None
@@ -36,12 +52,22 @@ class ProviderBundle:
 
     @property
     def planner(self) -> LLMProvider:
-        """Return the optional cheaper planner or the main LLM provider."""
+        """Return the planner override or fall back to the main LLM client."""
         return self.llm_planner or self.llm
 
 
 def _openrouter_headers(base_url: str, settings: Settings) -> dict[str, str]:
-    """OpenRouter attribution headers. No-op for other providers."""
+    """Build optional OpenRouter attribution headers.
+
+    Args:
+        base_url: Provider endpoint inspected case-insensitively.
+        settings: Global attribution values.
+
+    Returns:
+        ``HTTP-Referer`` and/or ``X-Title`` only when the endpoint contains
+        ``openrouter.ai``; otherwise an empty mapping.
+
+    """
     if "openrouter.ai" not in (base_url or "").lower():
         return {}
     headers: dict[str, str] = {}
@@ -53,12 +79,32 @@ def _openrouter_headers(base_url: str, settings: Settings) -> dict[str, str]:
 
 
 def get_settings_for(project: Project) -> Settings:
-    """Return global settings for a project; retained as a test seam."""
+    """Return global settings for a project-specific factory test seam.
+
+    The project argument documents the intended call boundary but is not used:
+    provider settings are global here, while secrets are resolved separately.
+    """
     return get_settings()
 
 
 def build_providers_for_project(project: Project) -> ProviderBundle:
-    """Build fake or real clients using project secrets and environment fallbacks."""
+    """Build the provider bundle selected by project flags and configuration.
+
+    Args:
+        project: Persisted project containing provider names, models, VOICEVOX
+            settings, and the fake-provider switch.
+
+    Returns:
+        A ``ProviderBundle`` containing fake clients or configured real clients.
+
+    Raises:
+        RuntimeError: If a real LLM lacks an API key, base URL, or model.
+
+    Side Effects:
+        Constructs async HTTP clients for real providers.  It does not call a
+        remote service; callers own the returned clients' eventual cleanup.
+
+    """
     secrets: SecretBundle | None = (
         secret_store.get(project.id) if not project.use_fake_providers else None
     )
@@ -126,7 +172,17 @@ def build_providers_for_project(project: Project) -> ProviderBundle:
 
 
 def build_voicevox_settings(project: Project, settings: Settings | None = None) -> VoicevoxSettings:
-    """Translate persisted project voice controls into client settings."""
+    """Translate persisted project controls into ``VoicevoxSettings``.
+
+    Args:
+        project: Project whose endpoint and synthesis values should be used.
+        settings: Optional global defaults used only when project values are
+            falsey/missing.
+
+    Returns:
+        A provider-specific settings dataclass ready for synthesis.
+
+    """
     s = settings or get_settings()
     return VoicevoxSettings(
         base_url=project.voicevox_url or s.voicevox_url,

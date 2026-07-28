@@ -18,7 +18,14 @@ from app.providers.llm import LLMProvider, LLMRequest, LLMResponse
 
 
 class FakeLLMProvider(LLMProvider):
-    """Deterministic offline LLM used by tests and the demo command."""
+    """Deterministic offline LLM used by tests and the demo command.
+
+    Attributes:
+        name: Stable fake-provider identifier.
+        calls: Records ``(purpose, prompt_hash, message_count)`` for assertions
+            without retaining full prompt text.
+
+    """
 
     name = "fake"
 
@@ -27,7 +34,19 @@ class FakeLLMProvider(LLMProvider):
         self.calls: list[tuple[str, str, int]] = []  # (purpose, hash, n_messages)
 
     async def chat(self, request: LLMRequest) -> LLMResponse:
-        """Infer the prompt purpose and return a deterministic JSON response."""
+        """Infer request purpose and return the matching fixture JSON.
+
+        Args:
+            request: Chat request whose latest user message identifies the
+                fake workflow.
+
+        Returns:
+            Deterministic ``LLMResponse`` with a JSON string and fake metadata.
+
+        Side Effects:
+            Appends a purpose/hash/message-count record to ``calls``.
+
+        """
         last_user = next(
             (m.content for m in reversed(request.messages) if m.role == "user"), ""
         )
@@ -51,7 +70,17 @@ class FakeLLMProvider(LLMProvider):
 
     @staticmethod
     def _detect_purpose(text: str) -> str:
-        """Classify a prompt using the markers used by the fake workflows."""
+        """Classify a prompt using the fake workflow marker precedence.
+
+        Args:
+            text: Latest user prompt.
+
+        Returns:
+            One of ``split``, ``visual_plan``, ``global_style``, ``title``, or
+            ``unknown``.  Visual-plan detection precedes global-style because
+            plan prompts quote the style field.
+
+        """
         # Order matters: the visual-plan prompt quotes the project's
         # global_visual_style, so it must be recognised before the
         # global-style prompt or every plan request is misrouted.
@@ -67,7 +96,7 @@ class FakeLLMProvider(LLMProvider):
 
     @staticmethod
     def _default_global_style() -> str:
-        """Return the stable visual style used by fake planning."""
+        """Return the stable global style fixture used by fake planning."""
         return (
             "大学講義用のシンプルなスライド。白または薄いグレー(%)の背景、"
             "青緑(#0F766E)をアクセント、等幅フォントでコード、"
@@ -79,10 +108,21 @@ class FakeLLMProvider(LLMProvider):
     def _split_text_into_blocks(
         text: str, *, target: int = 90, max_chars: int = 130, min_chars: int = 50
     ) -> list[str]:
-        """Deterministic punctuation-based splitter used as the fake output.
+        """Split text deterministically at punctuation and size boundaries.
 
         This is also the deterministic *fallback* used when the real LLM
         fails to produce a usable split.
+
+        Args:
+            text: Source text to normalize and split.
+            target: Preferred merged block length.
+            max_chars: Hard maximum used for final fallback slices.
+            min_chars: Threshold below which adjacent chunks may be merged.
+
+        Returns:
+            Ordered text chunks.  Empty or whitespace-only input returns an
+            empty list.
+
         """
         # Normalize whitespace: replace any whitespace run with a single space.
         normalized = re.sub(r"\s+", " ", text).strip()
@@ -130,7 +170,17 @@ class FakeLLMProvider(LLMProvider):
 
     @classmethod
     def _build_split_payload(cls, last_user: str) -> str:
-        """Extract a script from a split prompt and serialize fake blocks."""
+        """Extract the script from a split prompt and serialize fake blocks.
+
+        Args:
+            last_user: Prompt containing a fenced script or trailing script
+                paragraph.
+
+        Returns:
+            JSON text with ordered ``index``, ``source_text``, and ``tts_text``
+            fields.
+
+        """
         # Try to extract the script from the prompt heuristically.
         m = re.search(r"```(?:text|script)?\s*(.*?)```", last_user, flags=re.DOTALL)
         if m:
@@ -152,7 +202,15 @@ class FakeLLMProvider(LLMProvider):
 
     @staticmethod
     def _build_visual_plan(user_prompt: str) -> dict:
-        """Choose a small visual-plan fixture from narration keywords."""
+        """Choose a visual-plan fixture from narration keywords.
+
+        Args:
+            user_prompt: Prompt containing narration in Japanese quotes.
+
+        Returns:
+            A schema-shaped visual plan chosen by deterministic keyword rules.
+
+        """
         # Heuristic visual-plan selection based on TTS text. Returns the full
         # plan structure expected by Pydantic.
         text_match = re.search(r"「(.+?)」", user_prompt, flags=re.DOTALL)

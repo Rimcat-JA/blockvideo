@@ -1,11 +1,17 @@
-"""Mermaid diagram renderer via mermaid-cli (mmdc).
+"""Mermaid diagram renderer via Mermaid CLI (``mmdc``).
 
 Renders a Mermaid source string to a PNG by invoking ``mmdc`` as a subprocess
 with an argument array (never a shell string). The Mermaid source is written
 to a temporary ``.mmd`` file so no LLM-controlled text ever reaches a shell.
 
-When mmdc is unavailable or rendering fails, callers should fall back to the
-built-in PIL diagram renderer in :mod:`app.services.image_renderer`.
+When ``mmdc`` is unavailable or rendering fails, callers should fall back to
+the built-in PIL diagram renderer in :mod:`app.services.image_renderer`.
+
+Imports:
+    ``shutil`` checks ``mmdc``/``npx`` availability.
+    ``tempfile`` stores source outside shell arguments during rendering.
+    Dataclasses/paths describe the result and destination.
+    Configuration/logging modules resolve executables and record safe progress.
 """
 from __future__ import annotations
 
@@ -20,7 +26,13 @@ from app.core.logging import log
 
 @dataclass
 class MermaidRenderResult:
-    """Dimensions and output path returned by the async Mermaid wrapper."""
+    """Dimensions and output path returned by Mermaid rendering.
+
+    Attributes:
+        output_path: PNG written by Mermaid CLI.
+        width, height: Requested canvas dimensions reported to the caller.
+
+    """
 
     output_path: Path
     width: int
@@ -28,7 +40,14 @@ class MermaidRenderResult:
 
 
 def mmdc_available() -> bool:
-    """Return True if a usable mmdc executable is resolvable."""
+    """Return whether configured ``mmdc`` is discoverable.
+
+    Returns:
+        ``True`` for an explicit existing/path-resolvable executable or a
+        globally installed bare ``mmdc``.  This probe does not test whether
+        Puppeteer can launch successfully.
+
+    """
     exe = resolve_mmdc()
     if exe == "mmdc":
         return shutil.which("mmdc") is not None
@@ -36,7 +55,7 @@ def mmdc_available() -> bool:
 
 
 def _escape_subprocess_arg(value: str) -> str:
-    """Pass an argv element through without shell escaping.
+    """Return an argv element unchanged because no shell is used.
 
     No shell is involved; we pass argv elements verbatim. Kept as a hook
     so callers see that no shell escaping is needed here.
@@ -54,7 +73,25 @@ async def render_mermaid_to_png(
     background: str = "transparent",
     timeout: float | None = None,
 ) -> MermaidRenderResult:
-    """Async wrapper — delegates to :func:`render_mermaid_to_png_sync`."""
+    """Render Mermaid source without blocking the event loop.
+
+    Args:
+        source: Mermaid graph source.
+        output_path: PNG destination.
+        width: Requested CLI viewport width hint.
+        height: Requested CLI viewport height hint.
+        theme: Mermaid CLI theme name.
+        background: Mermaid CLI background value.
+        timeout: Optional per-process timeout override.
+
+    Returns:
+        ``MermaidRenderResult`` for the requested output path and dimensions.
+
+    Raises:
+        RuntimeError: Propagated from the synchronous renderer for missing
+            executables, process failure, timeout, or missing output.
+
+    """
     import asyncio
 
     loop = asyncio.get_event_loop()
@@ -85,10 +122,27 @@ def render_mermaid_to_png_sync(
 ) -> Path:
     """Render ``source`` (Mermaid) to ``output_path`` as a PNG synchronously.
 
+    Args:
+        source: Mermaid graph source written to a temporary ``.mmd`` file.
+        output_path: PNG destination.
+        width: Requested CLI viewport width hint.
+        height: Requested CLI viewport height hint.
+        theme: Mermaid CLI theme name.
+        background: Mermaid CLI background value.
+        timeout: Optional process timeout; otherwise settings default.
+
+    Returns:
+        The supplied ``output_path`` after CLI creation.
+
+    Raises:
+        RuntimeError: If source is empty, the executable cannot be resolved,
+            the subprocess times out/fails, or no output file is produced.
+
     Uses ``subprocess.run`` (argv array, ``shell=False``). Raises
     ``RuntimeError`` on any failure so the caller can fall back to the PIL
     diagram renderer. The Mermaid source is written to a temp ``.mmd`` file
     so no LLM-controlled text reaches a shell.
+
     """
     import subprocess
     import tempfile

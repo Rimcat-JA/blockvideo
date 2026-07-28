@@ -1,4 +1,15 @@
-"""Project CRUD and pipeline endpoints."""
+"""Project CRUD, artifact, and pipeline-control endpoints.
+
+Imports:
+    FastAPI/SQLAlchemy types define request dependencies and responses.
+    API utilities validate storage-relative paths before file serving.
+    ORM/schema modules translate persisted rows into public JSON.
+    Provider/path/planner/worker services create projects and enqueue work.
+
+All route functions use the request-scoped database dependency.  Long-running
+generation is queued through ``job_runner``; route handlers return job state
+instead of blocking until media encoding finishes.
+"""
 from __future__ import annotations
 
 
@@ -35,11 +46,20 @@ from app.workers.job_runner import (
 )
 
 
+# Mounted below the application-level ``/api`` prefix.
 router = APIRouter(prefix="/projects")
 
 
 def _project_summary(project: Project) -> ProjectSummary:
-    """Map an ORM project to the compact list-response schema."""
+    """Map an ORM project to the compact list-response schema.
+
+    Args:
+        project: Loaded project row, including blocks when block count is read.
+
+    Returns:
+        Public ``ProjectSummary`` without source/provider configuration.
+
+    """
     return ProjectSummary(
         id=project.id,
         title=project.title,
@@ -55,7 +75,16 @@ def _project_summary(project: Project) -> ProjectSummary:
 
 
 def _project_detail(project: Project) -> ProjectDetail:
-    """Map all user-visible project settings and state to API JSON."""
+    """Map user-visible project settings and state to API JSON.
+
+    Args:
+        project: Loaded ORM project row.
+
+    Returns:
+        ``ProjectDetail`` containing source, timing, subtitle, VOICEVOX, and
+        output settings.  Raw provider secrets are intentionally absent.
+
+    """
     return ProjectDetail(
         id=project.id,
         title=project.title,
@@ -93,7 +122,15 @@ def _project_detail(project: Project) -> ProjectDetail:
 
 
 def _block_summary(block: Block) -> BlockSummary:
-    """Map a block ORM row to the response schema and artifact URLs."""
+    """Map a block row to the response schema and artifact URLs.
+
+    Args:
+        block: Loaded ORM block row.
+
+    Returns:
+        ``BlockSummary`` with route URLs only when corresponding DB paths exist.
+
+    """
     project_id = block.project_id
     return BlockSummary(
         id=block.id,
@@ -119,7 +156,15 @@ def _block_summary(block: Block) -> BlockSummary:
 
 
 def _job_summary(job: GenerationJob) -> JobSummary:
-    """Map a persisted job row to its public progress schema."""
+    """Map a persisted job row to the public progress schema.
+
+    Args:
+        job: Loaded generation-job row.
+
+    Returns:
+        ``JobSummary`` with ISO timestamps and status/progress fields.
+
+    """
     return JobSummary(
         id=job.id,
         project_id=job.project_id,
@@ -134,7 +179,15 @@ def _job_summary(job: GenerationJob) -> JobSummary:
 
 
 def _provisional_title(script: str) -> str:
-    """Cheap title used until (or instead of) the LLM-generated one."""
+    """Derive a cheap title from the first non-empty script line.
+
+    Args:
+        script: Source script whose headings/markers should be stripped.
+
+    Returns:
+        First cleaned line truncated to 60 characters, or ``"無題の台本"``.
+
+    """
     for line in script.splitlines():
         stripped = line.strip().lstrip("#＃■・-— ").strip()
         if stripped:
@@ -148,10 +201,27 @@ async def quick_create(
 ) -> QuickCreateResponse:
     """Paste a script, get a video.
 
+    Args:
+        payload: Paste-and-go script, fake-provider flag, and optional pacing
+            overrides.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        ``QuickCreateResponse`` containing the committed project and queued job.
+
+    Raises:
+        HTTPException: Status 422 when the stripped script is empty.
+
+    Side Effects:
+        Creates the project/layout, stores no raw secrets, performs best-effort
+        title generation when no title was supplied, and queues full pipeline
+        execution.
+
     Creates the project with defaults, names it from the script, and starts
     the full pipeline in one call. Title generation is best-effort: a failed
     or slow title must never stop the video from being produced, so we fall
     back to the script's first line.
+
     """
     script = payload.source_script.strip()
     if not script:
@@ -202,7 +272,21 @@ async def quick_create(
 
 @router.post("", response_model=ProjectDetail, status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectDetail:
-    """Create a configured project without enqueueing its pipeline."""
+    """Create a configured project without enqueueing its pipeline.
+
+    Args:
+        payload: Full validated project settings and optional BYOK values.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        The persisted ``ProjectDetail`` response.
+
+    Side Effects:
+        Commits the project, stores supplied BYOK values in the process-local
+        secret store, and creates its storage directory tree.  No generation
+        job is queued.
+
+    """
     project = Project(
         title=payload.title,
         source_script=payload.source_script,
@@ -248,14 +332,34 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
 
 @router.get("", response_model=list[ProjectSummary])
 def list_projects(db: Session = Depends(get_db)) -> list[ProjectSummary]:
-    """Return projects newest first for the project-list screen."""
+    """Return projects newest first for the project-list screen.
+
+    Args:
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        List of compact summaries ordered by descending creation timestamp.
+
+    """
     projects = db.execute(select(Project).order_by(Project.created_at.desc())).scalars().all()
     return [_project_summary(p) for p in projects]
 
 
 @router.get("/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail:
-    """Return one project or a 404 response when it does not exist."""
+    """Return one project's detail or a 404 response.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        ``ProjectDetail`` for the requested row.
+
+    Raises:
+        HTTPException: Status 404 when no project has that ID.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -264,7 +368,23 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
 
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
-    """Delete a project, its temporary secrets, database rows, and files."""
+    """Delete project data, temporary secrets, rows, and storage files.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        Empty HTTP 204 response.
+
+    Raises:
+        HTTPException: Status 404 when the project does not exist.
+
+    Side Effects:
+        Drops process-local secrets, cascades ORM child deletion, commits the
+        transaction, and best-effort removes the project's storage directory.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -288,7 +408,24 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
 def patch_project(
     project_id: int, payload: ProjectPatch, db: Session = Depends(get_db)
 ) -> ProjectDetail:
-    """Apply supplied project settings and return the refreshed project."""
+    """Apply supplied project settings and return the refreshed project.
+
+    Args:
+        project_id: Database primary key.
+        payload: Partial validated settings; unset fields are not changed.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        Updated ``ProjectDetail``.
+
+    Raises:
+        HTTPException: Status 404 when the project does not exist.
+
+    Side Effects:
+        Commits all supplied ORM field changes.  It does not enqueue a rerun;
+        callers choose an explicit regenerate endpoint afterward.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -301,7 +438,19 @@ def patch_project(
 
 @router.get("/{project_id}/blocks", response_model=list[BlockSummary])
 def list_blocks(project_id: int, db: Session = Depends(get_db)) -> list[BlockSummary]:
-    """Return a project's blocks in script order."""
+    """Return a project's blocks in script order.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        Block summaries sorted by zero-based ``index``.
+
+    Raises:
+        HTTPException: Status 404 when the project does not exist.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -310,7 +459,19 @@ def list_blocks(project_id: int, db: Session = Depends(get_db)) -> list[BlockSum
 
 @router.get("/{project_id}/jobs", response_model=list[JobSummary])
 def list_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobSummary]:
-    """Return the latest twenty jobs for a project."""
+    """Return the latest twenty jobs for a project.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        At most 20 job summaries ordered by descending job ID.
+
+    Raises:
+        HTTPException: Status 404 when the project does not exist.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -325,7 +486,19 @@ def list_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobSummary
 
 @router.post("/{project_id}/generate-all", response_model=GenerateAllResponse, status_code=202)
 async def generate_all(project_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
-    """Ensure project storage exists and queue a complete pipeline run."""
+    """Ensure storage exists and queue a complete pipeline run.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped session used for existence and job refresh.
+
+    Returns:
+        HTTP-202 ``GenerateAllResponse`` containing the queued job.
+
+    Raises:
+        HTTPException: Status 404 when the project does not exist.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -339,7 +512,21 @@ async def generate_all(project_id: int, db: Session = Depends(get_db)) -> Genera
 
 @router.post("/{project_id}/cancel", status_code=200)
 def cancel_project(project_id: int, db: Session = Depends(get_db)) -> dict[str, int]:
-    """Cancel any active job for the project."""
+    """Request cancellation for active project jobs.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        Mapping containing the count of jobs whose live process task accepted
+        the cancellation signal.
+
+    Side Effects:
+        Sets durable ``cancel_requested`` flags and signals process-local tasks
+        through ``job_registry``.  Stages observe cancellation cooperatively.
+
+    """
     cancelled: list[int] = []
     jobs = db.execute(
         select(GenerationJob).where(
@@ -357,7 +544,20 @@ def cancel_project(project_id: int, db: Session = Depends(get_db)) -> dict[str, 
 
 @router.post("/{project_id}/rerender", response_model=GenerateAllResponse, status_code=202)
 async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
-    """Queue a render-only job when the project already has blocks."""
+    """Queue a render-only job for an existing block set.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        HTTP-202 response containing the queued rerender job.
+
+    Raises:
+        HTTPException: Status 404 when the project is absent; status 400 when
+            splitting has not produced any blocks.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -371,7 +571,21 @@ async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAl
 
 @router.get("/{project_id}/artifacts/image/{block_index}")
 def artifact_image(project_id: int, block_index: int, db: Session = Depends(get_db)):
-    """Serve a block image after checking its database path and file presence."""
+    """Serve a block image after validating ownership and disk presence.
+
+    Args:
+        project_id: Owning project primary key.
+        block_index: Zero-based block index.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        PNG ``FileResponse`` for the validated artifact.
+
+    Raises:
+        HTTPException: Status 404 for missing project/block/path/file; status
+            400 when the stored path escapes storage.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -386,7 +600,21 @@ def artifact_image(project_id: int, block_index: int, db: Session = Depends(get_
 
 @router.get("/{project_id}/artifacts/audio/{block_index}")
 def artifact_audio(project_id: int, block_index: int, db: Session = Depends(get_db)):
-    """Serve a block WAV file after validating its storage-relative path."""
+    """Serve a block WAV after validating its storage-relative path.
+
+    Args:
+        project_id: Owning project primary key.
+        block_index: Zero-based block index.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        WAV ``FileResponse`` for the validated artifact.
+
+    Raises:
+        HTTPException: Status 404 for missing project/block/path/file; status
+            400 for a path outside storage.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -401,7 +629,21 @@ def artifact_audio(project_id: int, block_index: int, db: Session = Depends(get_
 
 @router.get("/{project_id}/artifacts/video/{block_index}")
 def artifact_video_block(project_id: int, block_index: int, db: Session = Depends(get_db)):
-    """Serve one block MP4 after validating ownership and disk presence."""
+    """Serve one block MP4 after validating ownership and disk presence.
+
+    Args:
+        project_id: Owning project primary key.
+        block_index: Zero-based block index.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        MP4 ``FileResponse`` for the validated artifact.
+
+    Raises:
+        HTTPException: Status 404 for missing project/block/path/file; status
+            400 for a path outside storage.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -416,7 +658,20 @@ def artifact_video_block(project_id: int, block_index: int, db: Session = Depend
 
 @router.get("/{project_id}/download")
 def download_video(project_id: int, db: Session = Depends(get_db)):
-    """Serve the completed project MP4 with a stable download filename."""
+    """Serve the completed project MP4 with a stable download filename.
+
+    Args:
+        project_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        MP4 ``FileResponse`` named ``blockvideo_<project_id>.mp4``.
+
+    Raises:
+        HTTPException: Status 404 when the project/output/path/file is absent;
+            status 400 when the stored output path escapes storage.
+
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")

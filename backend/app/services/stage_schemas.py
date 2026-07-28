@@ -1,4 +1,13 @@
-"""Stage schemas for validation of LLM outputs."""
+"""Pydantic contracts for structured LLM stage outputs.
+
+Imports:
+    Pydantic classes validate and reject unknown fields at the model boundary.
+    ``Any`` represents renderer-specific JSON dictionaries.
+    ``VisualType`` constrains the visual dispatcher to known renderers.
+
+These models protect the database and renderers from malformed provider JSON;
+they do not call an LLM or perform filesystem/network work.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -9,7 +18,15 @@ from app.models.block import VisualType
 
 
 class SplitBlock(BaseModel):
-    """Validated block text returned by the script-splitting stage."""
+    """Validated text pair returned by the script-splitting stage.
+
+    Attributes:
+        index: Zero-based position expected to match list order.
+        source_text: Original/display text for the block.
+        tts_text: Narration text; it may be empty for code-only input before a
+            later fallback cue is inserted.
+
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,7 +39,12 @@ class SplitBlock(BaseModel):
 
 
 class SplitPayload(BaseModel):
-    """Validated ordered collection of split blocks."""
+    """Validated ordered collection of split blocks.
+
+    Attributes:
+        blocks: One to 500 source-preserving ``SplitBlock`` values.
+
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -31,7 +53,18 @@ class SplitPayload(BaseModel):
     @field_validator("blocks")
     @classmethod
     def _validate_indices(cls, blocks: list[SplitBlock]) -> list[SplitBlock]:
-        """Require model indices to match the returned list order."""
+        """Require each model index to equal its list position.
+
+        Args:
+            blocks: Already field-validated split blocks.
+
+        Returns:
+            The unchanged list when indices are contiguous and ordered.
+
+        Raises:
+            ValueError: If a model omitted, duplicated, or reordered an index.
+
+        """
         for i, block in enumerate(blocks):
             if block.index != i:
                 raise ValueError(
@@ -41,7 +74,17 @@ class SplitPayload(BaseModel):
 
 
 class VisualPlan(BaseModel):
-    """Validated visual choice and renderer-specific payload for one block."""
+    """Validated visual choice and renderer-specific payload for one block.
+
+    Attributes:
+        visual_type: Dispatcher value from ``VisualType``.
+        heading, visual_summary: Short visible label and explanatory fallback.
+        image_prompt, code, verbatim, language, formula, diagram: Optional
+            renderer payloads for the corresponding visual types.
+        pointer_diagram, env_diagram: Structured diagram specifications.
+        left_panel, right_panel: Sanitized comparison-panel mappings.
+
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -68,7 +111,22 @@ class VisualPlan(BaseModel):
     @field_validator("left_panel", "right_panel")
     @classmethod
     def _restrict_panels(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Keep comparison panels limited to title and content strings."""
+        """Keep comparison panels limited to title/content strings.
+
+        Args:
+            value: Optional model-produced panel mapping.
+
+        Returns:
+            The same mapping after unknown keys are removed.
+
+        Raises:
+            ValueError: If supplied title/content values are not strings.
+
+        Side Effects:
+            Mutates the supplied dictionary by removing unknown keys.  This is
+            intentional normalization before rendering.
+
+        """
         if value is None:
             return value
         # Reject unknown / unwanted keys explicitly.
@@ -84,7 +142,12 @@ class VisualPlan(BaseModel):
 
 
 class VisualPlanPayload(BaseModel):
-    """Envelope used when validating an LLM visual-plan response."""
+    """Strict envelope used for an LLM visual-plan response.
+
+    Attributes:
+        plan: One validated ``VisualPlan`` value.
+
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -92,7 +155,12 @@ class VisualPlanPayload(BaseModel):
 
 
 class GlobalVisualStylePayload(BaseModel):
-    """Validated project-wide style returned by the planning stage."""
+    """Validated project-wide visual style returned by planning.
+
+    Attributes:
+        global_visual_style: Human-readable style prompt shared by block plans.
+
+    """
 
     model_config = ConfigDict(extra="forbid")
 

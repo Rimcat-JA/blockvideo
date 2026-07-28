@@ -1,4 +1,11 @@
-"""Block-level endpoints — rerun visual / audio / render for one block."""
+"""Block lookup, editing, and targeted regeneration endpoints.
+
+Imports:
+    FastAPI/SQLAlchemy types define the HTTP and database boundaries.
+    ``_block_summary`` reuses project-route serialization.
+    Worker enqueue functions schedule visual, audio, or project-render work.
+    Pydantic schemas define editable fields and queued-job responses.
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,12 +23,25 @@ from app.workers.job_runner import (
 )
 
 
+# Mounted below the application-level ``/api`` prefix.
 router = APIRouter(prefix="/blocks")
 
 
 @router.get("/{block_id}", response_model=BlockSummary)
 def get_block(block_id: int, db: Session = Depends(get_db)) -> BlockSummary:
-    """Return one block's current state and artifact URLs."""
+    """Return one block's current state and artifact URLs.
+
+    Args:
+        block_id: Database primary key.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        ``BlockSummary`` for the row.
+
+    Raises:
+        HTTPException: Status 404 when the block does not exist.
+
+    """
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -30,7 +50,24 @@ def get_block(block_id: int, db: Session = Depends(get_db)) -> BlockSummary:
 
 @router.patch("/{block_id}", response_model=BlockSummary)
 def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db)) -> BlockSummary:
-    """Apply editable block fields and return the refreshed block."""
+    """Apply supplied editable fields and return the refreshed block.
+
+    Args:
+        block_id: Database primary key.
+        payload: Validated source/TTS/visual-plan patch.
+        db: Request-scoped SQLAlchemy session.
+
+    Returns:
+        Updated ``BlockSummary``.
+
+    Raises:
+        HTTPException: Status 404 when the block does not exist.
+
+    Side Effects:
+        Mutates and commits the block row; it does not automatically enqueue a
+        regeneration job.
+
+    """
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -43,7 +80,19 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
 
 @router.post("/{block_id}/regenerate-visual", response_model=GenerateAllResponse, status_code=202)
 async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
-    """Queue visual regeneration for the block's project/index pair."""
+    """Queue visual regeneration for one project/block pair.
+
+    Args:
+        block_id: Database primary key.
+        db: Request-scoped session used to verify ownership and refresh the job.
+
+    Returns:
+        ``GenerateAllResponse`` with an HTTP-202 queued job.
+
+    Raises:
+        HTTPException: Status 404 when the block or owning project is absent.
+
+    """
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -70,7 +119,19 @@ async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> Gen
 
 @router.post("/{block_id}/regenerate-audio", response_model=GenerateAllResponse, status_code=202)
 async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
-    """Queue audio regeneration for the block's project/index pair."""
+    """Queue audio regeneration for one project/block pair.
+
+    Args:
+        block_id: Database primary key.
+        db: Request-scoped session used to verify ownership and refresh the job.
+
+    Returns:
+        ``GenerateAllResponse`` with an HTTP-202 queued job.
+
+    Raises:
+        HTTPException: Status 404 when the block or owning project is absent.
+
+    """
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -97,7 +158,22 @@ async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> Gene
 
 @router.post("/{block_id}/rerender", response_model=GenerateAllResponse, status_code=202)
 async def rerender_block(block_id: int, db: Session = Depends(get_db)) -> GenerateAllResponse:
-    """Queue a project render because final concat is project-wide."""
+    """Queue a project-wide render requested from one block.
+
+    Args:
+        block_id: Database primary key used to find the owning project.
+        db: Request-scoped session.
+
+    Returns:
+        ``GenerateAllResponse`` with an HTTP-202 project rerender job.
+
+    Raises:
+        HTTPException: Status 404 when the block or project is absent.
+
+    The final MP4 is project-wide, so this endpoint intentionally schedules a
+    complete render rather than encoding only one block.
+
+    """
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")

@@ -1,8 +1,13 @@
-"""Subtitle (ASS) writer.
+"""Subtitle wrapping, timing, ASS, and WebVTT serialization.
 
 Generates an Advanced SubStation Alpha file with one cue per block. Source
 text is wrapped to ``subtitle_max_chars_per_line`` after breaking at
 natural Japanese punctuation if possible.
+
+Imports:
+    ``dataclass`` stores cue/layout records.
+    ``Path`` identifies subtitle output files.
+    ``Callable`` types optional narration time interpolation.
 """
 from __future__ import annotations
 
@@ -13,7 +18,14 @@ from typing import Callable
 
 @dataclass
 class SubtitleCue:
-    """One timed subtitle cue and its optional per-cue vertical margin."""
+    r"""One timed subtitle cue and optional vertical margin.
+
+    Attributes:
+        start_ms, end_ms: Half-open cue interval in the relevant timeline.
+        text: ASS/WebVTT-ready text; ASS line breaks use ``\\N``.
+        margin_v: Optional per-cue vertical margin overriding the style value.
+
+    """
 
     start_ms: int
     end_ms: int
@@ -25,7 +37,11 @@ class SubtitleCue:
 
 # Colors -> ASS &HBBGGRR& form.
 def _rgb_to_ass(hex_color: str) -> str:
-    """Convert a CSS-style RGB color into ASS's BGR color notation."""
+    """Convert CSS-style RGB text into ASS ``&HBBGGRR&`` notation.
+
+    Invalid-length values return opaque white rather than raising, preserving
+    subtitle generation for malformed user color input.
+    """
     h = hex_color.lstrip("#")
     if len(h) == 3:
         h = "".join(c * 2 for c in h)
@@ -43,7 +59,7 @@ _NO_LEAD = "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮーヽ�
 
 
 def _is_hiragana(ch: str) -> bool:
-    """Return whether a character belongs to the Hiragana Unicode block."""
+    """Return whether one character belongs to the Hiragana block."""
     return "ぁ" <= ch <= "ゟ"
 
 
@@ -128,7 +144,14 @@ LINE_HEIGHT_RATIO = 1.25
 
 @dataclass
 class BandFit:
-    """A subtitle laid out to fit inside the burned-in band."""
+    """A subtitle layout selected to fit inside the burned-in band.
+
+    Attributes:
+        lines: Wrapped display lines without ASS join markers.
+        font_size: Shared font size selected for the cue.
+        margin_v: Vertical margin that centers the lines in the band.
+
+    """
 
     lines: list[str]
     font_size: int
@@ -136,7 +159,7 @@ class BandFit:
 
     @property
     def text(self) -> str:
-        """Return wrapped lines using ASS's explicit line-break marker."""
+        r"""Return wrapped lines joined with ASS's explicit ``\N`` marker."""
         return "\\N".join(self.lines)
 
 
@@ -158,8 +181,19 @@ def fit_text_to_band(
     until the wrapped text fits — a smaller font also fits more characters
     per line, so line count drops faster than size does.
 
-    Returns the wrapped lines, the font size to use, and the vertical margin
-    that centres the block inside the band.
+    Args:
+        text: Caption body to wrap.
+        band_height: Available caption-band height in pixels.
+        base_font_size: Preferred starting font size.
+        base_max_chars: Preferred characters per line.
+        min_font_size: Smallest permitted fallback font size.
+        pad: Minimum interior padding around the text.
+
+    Returns:
+        A ``BandFit`` whose line/font combination fits when possible; the
+        smallest attempted layout is returned when the text cannot fit even at
+        the minimum size.
+
     """
     body = (text or "").strip()
     usable = max(1, band_height - pad * 2)
@@ -228,6 +262,14 @@ def chunk_narration(text: str, *, chars_per_cue: int) -> list[str]:
     should not: a long block shown as a single cue has to shrink to a size
     that is hard to read. Chunking lets the caption advance underneath a
     stationary slide, one or two sentences at a time.
+
+    Args:
+        text: Narration body to chunk.
+        chars_per_cue: Target upper bound before wrapping/layout checks.
+
+    Returns:
+        Ordered caption-sized chunks.  Empty input returns an empty list.
+
     """
     body = (text or "").strip()
     if not body:
@@ -281,6 +323,24 @@ def build_band_cues(
     A single font is used for the whole block: cues change while the slide
     does not, so a caption that resized between sentences would draw the eye
     for no reason.
+
+    Args:
+        text: Narration to show as timed cues.
+        duration_ms: Total audio/narration interval.
+        band_height: Available subtitle-band height in pixels.
+        base_font_size: Preferred shared font size.
+        base_max_chars: Preferred characters per line.
+        min_cue_ms: Minimum readable cue duration before merging.
+        char_time: Optional measured offset-to-time function.
+        band_height: Burn-in band height.
+        base_font_size, base_max_chars: Preferred layout settings.
+        min_cue_ms: Minimum readable cue duration before merge attempts.
+        char_time: Optional measured character-to-time mapping.
+
+    Returns:
+        ``(cues, font_size)`` where cue intervals cover the supplied duration
+        and all cues use one shared font size.
+
     """
     body = (text or "").strip()
     if not body or duration_ms <= 0:
@@ -380,14 +440,14 @@ def build_band_cues(
 
 
 def _escape_ass(text: str) -> str:
-    """Escape characters that have special meaning in ASS."""
+    """Escape line and override characters before writing an ASS event."""
     # Newlines inside a cue become \N
     text = text.replace("\r", "").replace("\n", "\\N")
     return text.replace("{", "(").replace("}", ")")
 
 
 def ms_to_ass_time(ms: int) -> str:
-    """Format milliseconds as the centisecond timestamp used by ASS."""
+    """Format milliseconds as ASS's ``H:MM:SS.cc`` timestamp."""
     h, rem = divmod(ms, 3_600_000)
     m, rem = divmod(rem, 60_000)
     s, x = divmod(rem, 1_000)
@@ -399,7 +459,17 @@ def build_subtitle_cues(
     *,
     max_chars_per_line: int = 36,
 ) -> list[SubtitleCue]:
-    """Convert absolute block intervals into wrapped project-level cues."""
+    r"""Convert absolute block intervals into wrapped project-level cues.
+
+    Args:
+        blocks: ``(index, start_ms, end_ms, source_text)`` rows in timeline
+            order.  ``index`` is accepted for caller symmetry but not emitted.
+        max_chars_per_line: Maximum characters passed to the Japanese wrapper.
+
+    Returns:
+        One ``SubtitleCue`` per input row with ``\\N``-joined text.
+
+    """
     cues: list[SubtitleCue] = []
     for idx, start_ms, end_ms, text in blocks:
         wrapped = _wrap_japanese(text or "", max_chars_per_line)
@@ -428,6 +498,26 @@ def render_ass(
     bottom edge for bottom-aligned subtitles). Used by per-block burn-in
     so subtitles land inside the burned-in band rather than overlapping the
     slide. When ``None``, the margin is derived from ``position``.
+
+    Args:
+        cues: Timed cues to serialize.
+        output_path: ASS destination.
+        width: Script resolution width in pixels.
+        height: Script resolution height in pixels.
+        font_size: Default style font size.
+        position: Default top/middle/bottom alignment.
+        text_color: CSS-style primary text color.
+        outline_color: CSS-style outline color.
+        background: Whether the subtitle background is translucent.
+        font_name: Font family name consumed by libass.
+        margin_v_override: Optional fixed vertical margin for all cues.
+
+    Returns:
+        Number of dialogue cues written.
+
+    Side Effects:
+        Creates the parent directory and overwrites the output file as UTF-8.
+
     """
     if margin_v_override is not None:
         margin_v = margin_v_override
@@ -483,7 +573,7 @@ def render_ass(
 
 
 def build_vtt_time(ms: int) -> str:
-    """Format milliseconds as the millisecond timestamp used by WebVTT."""
+    """Format milliseconds as WebVTT's ``HH:MM:SS.mmm`` timestamp."""
     h, rem = divmod(ms, 3_600_000)
     m, rem = divmod(rem, 60_000)
     s, x = divmod(rem, 1_000)
@@ -491,7 +581,19 @@ def build_vtt_time(ms: int) -> str:
 
 
 def render_vtt(cues: list[SubtitleCue], output_path: Path) -> int:
-    """Write cues as a WebVTT file and return the number of cues written."""
+    """Write cues as WebVTT and return the number of cues written.
+
+    Args:
+        cues: Timed cues in display order.
+        output_path: WebVTT destination.
+
+    Returns:
+        Number of cues serialized.
+
+    Side Effects:
+        Creates the parent directory and overwrites ``output_path``.
+
+    """
     body = ["WEBVTT", ""]
     for i, c in enumerate(cues, 1):
         body.append(str(i))

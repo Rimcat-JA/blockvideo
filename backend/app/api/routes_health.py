@@ -1,4 +1,11 @@
-"""Health and provider-discovery endpoints."""
+"""Health and VOICEVOX speaker-discovery endpoints.
+
+Imports:
+    FastAPI router/exception types define HTTP behavior.
+    Version/settings expose backend identity and the default VOICEVOX URL.
+    Provider/FFmpeg helpers perform external-health probes.
+    Pydantic schemas shape stable JSON responses.
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -11,12 +18,20 @@ from app.schemas import HealthResponse, SpeakersEnvelope
 from app.services.ffmpeg_runner import ffmpeg_available, ffprobe_available
 
 
+# Health routes are mounted under the application-level ``/api`` prefix.
 router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Report application version and whether FFmpeg tools are available."""
+    """Report version and media-tool availability.
+
+    Returns:
+        ``HealthResponse`` with ``status="ok"``, backend version, and PATH/
+        configuration probes for FFmpeg and FFprobe.  The endpoint does not
+        invoke either executable.
+
+    """
     return HealthResponse(
         status="ok",
         version=__version__,
@@ -29,8 +44,19 @@ def health() -> HealthResponse:
 async def voicevox_speakers(url: str | None = None) -> SpeakersEnvelope:
     """Fetch speakers from a running VOICEVOX Engine.
 
+    Args:
+        url: Optional HTTP(S) engine URL overriding the configured default.
+
+    Returns:
+        ``SpeakersEnvelope`` with the normalized queried URL and speaker list.
+
+    Raises:
+        HTTPException: Status 503 when VOICEVOX cannot be reached or returns an
+            error response.
+
     The ``url`` query param overrides the project default; useful when the
     user wants to test a different engine instance.
+
     """
     settings = get_settings()
     base_url = (url or settings.voicevox_url).rstrip("/")

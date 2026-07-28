@@ -1,4 +1,4 @@
-"""Script splitter.
+"""Source-preserving script splitting and narration sanitization.
 
 Strategy:
     1. Ask the LLM to split ``source_script`` into ordered chunks of
@@ -8,6 +8,14 @@ Strategy:
        the concatenation matches the original script.
     3. Retry up to ``splitter_max_attempts`` times with stricter guidance
        before falling back to a deterministic punctuation-based split.
+
+Imports:
+    ``json`` validates/serializes provider payloads.
+    ``re`` normalizes whitespace, masks fences, and detects narration markers.
+    ``dataclass`` stores split diagnostics.
+    ``Iterable`` types lightweight block iterables.
+    Pydantic validates the structured split response.
+    Settings/provider/schema modules provide configuration and LLM contracts.
 """
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ from app.providers.llm import LLMProvider, LLMRequest, LLMMessage
 from app.services.stage_schemas import SplitBlock, SplitPayload
 
 
+# System instruction shared by every source-preserving split attempt.
 SPLIT_SYSTEM_PROMPT = (
     "あなたは日本語台本の編集者です。"
     "ユーザーの台本を意味のまとまりで区切り、JSONだけを返してください。"
@@ -32,7 +41,15 @@ SPLIT_SYSTEM_PROMPT = (
 
 @dataclass
 class SplitResult:
-    """Split output plus fallback diagnostics for one script or segment."""
+    """Split output plus fallback diagnostics for one script or segment.
+
+    Attributes:
+        blocks: Ordered validated source/narration pairs.
+        used_fallback: Whether deterministic local splitting was required.
+        attempts: Maximum/last attempt count reported by the segment(s).
+        issues: Human-readable validation/recovery diagnostics.
+
+    """
 
     blocks: list[SplitBlock]
     used_fallback: bool
@@ -43,8 +60,17 @@ class SplitResult:
 def normalize_for_comparison(text: str) -> str:
     """Whitespace normalization used for join-equality checks.
 
+    Args:
+        text: Text to normalize.
+
+    Returns:
+        Any run of whitespace (including newlines) collapsed to a single
+        space, with surrounding whitespace stripped.  This form is for
+        equality diagnostics, not database storage.
+
     Any run of whitespace (including newlines) collapses to a single space;
     surrounding whitespace is stripped.
+
     """
     return re.sub(r"\s+", " ", text).strip()
 
@@ -56,8 +82,17 @@ def normalize_kept(text: str) -> str:
     spacing: collapsing runs turns ``│   table   │`` into ``│ table │``, and
     since the renderer draws exactly what it is given, the box reaches the
     screen with its right-hand wall sitting inside itself.
+
+    Args:
+        text: Source script containing prose and optional fenced code.
+
+    Returns:
+        Normalized text with ordinary spaces collapsed while fenced blocks are
+        copied verbatim and line structure is preserved.
+
     """
     def collapse(part: str) -> str:
+        """Collapse horizontal whitespace outside a protected code fence."""
         return re.sub(r"[ \t　]+", " ", part)
 
     out: list[str] = []
@@ -71,7 +106,15 @@ def normalize_kept(text: str) -> str:
 
 
 def split_joined_source(blocks: list[SplitBlock]) -> str:
-    """Concatenate model block source fields for equality diagnostics."""
+    """Concatenate model block source fields for equality diagnostics.
+
+    Args:
+        blocks: Ordered split blocks.
+
+    Returns:
+        Direct concatenation of ``source_text`` values without separators.
+
+    """
     return "".join(b.source_text for b in blocks)
 
 
@@ -92,8 +135,18 @@ def realign_to_source(
     construction. ``tts_text`` is left as the model wrote it — that one is
     meant to differ, since it carries reading aids.
 
+    Args:
+        original: Text the provider was asked to split.
+        blocks: Provider-returned boundaries/content.
+
+    Returns:
+        New ``SplitBlock`` values sliced from ``original`` while preserving the
+        provider's ``tts_text``; ``None`` when non-whitespace content is added,
+        dropped, reordered, or no usable blocks remain.
+
     Returns ``None`` when the blocks genuinely diverge from the script (text
     added, dropped or reordered), which is a real error the caller must retry.
+
     """
     keep_idx = [i for i, ch in enumerate(original) if not ch.isspace()]
     stripped = "".join(original[i] for i in keep_idx)
@@ -141,10 +194,19 @@ def mask_code_blocks(text: str) -> tuple[str, list[str]]:
     string* reliably produces malformed JSON — unescaped control characters,
     truncated strings — or silently empties the block. Masking keeps the code
     out of the model's output entirely; it is restored verbatim afterwards.
+
+    Args:
+        text: Source text containing zero or more fenced blocks.
+
+    Returns:
+        ``(masked_text, blocks)`` where each fence is replaced by a numbered
+        token and ``blocks`` preserves the exact original fence text.
+
     """
     blocks: list[str] = []
 
     def _replace(match: re.Match[str]) -> str:
+        """Capture one fence and return its numbered placeholder token."""
         blocks.append(match.group(0))
         return _CODE_TOKEN.format(n=len(blocks))
 
@@ -187,6 +249,14 @@ def sanitize_for_narration(text: str) -> str:
     become gibberish — VOICEVOX will happily pronounce ``**``, ``---`` and
     ``┌───┬───┐`` — and they bloat the subtitle, which is generated from this
     narration text.
+
+    Args:
+        text: Source/narration text potentially containing display-only syntax.
+
+    Returns:
+        Whitespace-normalized prose with code fences, diagrams, Markdown
+        markers, and detected stage directions removed or converted.
+
     """
     body = text or ""
     body = _CODE_FENCE_RX.sub(" ", body)
@@ -238,6 +308,15 @@ def narration_has_gaps(tts_text: str, source_text: str) -> bool:
     Only blocks that actually contained a fence can have holes, so that is
     required first — it keeps the patterns from firing on prose that merely
     happens to use a lot of commas.
+
+    Args:
+        tts_text: Sanitized narration candidate.
+        source_text: Original block text, used to require a code fence.
+
+    Returns:
+        ``True`` only when code was present and one of the dangling-clause
+        heuristics matches the narration.
+
     """
     if "```" not in (source_text or ""):
         return False
@@ -254,7 +333,17 @@ _REPAIR_SCHEMA = {
 
 
 def _build_repair_prompt(source_text: str, narration: str) -> LLMRequest:
-    """Build the constrained request used to repair code-induced speech gaps."""
+    """Build the constrained request used to repair code-induced speech gaps.
+
+    Args:
+        source_text: Original block including code context.
+        narration: Current sanitized narration with the detected gap.
+
+    Returns:
+        JSON-schema-constrained ``LLMRequest`` asking for one repaired
+        ``narration`` string.
+
+    """
     return LLMRequest(
         messages=[
             LLMMessage(
@@ -301,8 +390,19 @@ async def repair_narration_gaps(
 ) -> int:
     """Rewrite narration that lost its meaning when the code was removed.
 
+    Args:
+        blocks: Mutable split blocks whose narration may need repair.
+        provider: LLM used for constrained repair requests.
+        settings: Repair concurrency and prompt settings.
+
+    Returns:
+        Number of blocks whose ``tts_text`` was replaced with an accepted
+        repaired value.  Failures are non-fatal: a block keeps its original
+        narration.
+
     Returns the number of blocks repaired. Failures are non-fatal: a block
     keeps its original narration, which is no worse than before.
+
     """
     import asyncio
 
@@ -313,6 +413,7 @@ async def repair_narration_gaps(
     sem = asyncio.Semaphore(max(1, settings.narration_repair_concurrency))
 
     async def repair(block: SplitBlock) -> tuple[SplitBlock, str | None]:
+        """Attempt one block repair under the shared concurrency semaphore."""
         async with sem:
             try:
                 data = await provider.chat_json(
@@ -347,8 +448,19 @@ async def repair_narration_gaps(
 
 
 def unmask_code_blocks(text: str, blocks: list[str]) -> str:
-    """Restore masked fenced blocks. Unknown tokens are dropped."""
+    """Restore masked fenced blocks in provider text.
+
+    Args:
+        text: Text containing ``〔コードN〕`` placeholders.
+        blocks: Original fence strings in one-based token order.
+
+    Returns:
+        Text with known tokens replaced verbatim; unknown/out-of-range tokens
+        are removed.
+
+    """
     def _replace(match: re.Match[str]) -> str:
+        """Return the captured fence or an empty string for an invalid index."""
         idx = int(match.group(1)) - 1
         return blocks[idx] if 0 <= idx < len(blocks) else ""
 
@@ -358,7 +470,17 @@ def unmask_code_blocks(text: str, blocks: list[str]) -> str:
 def _build_split_prompt(
     script: str, settings: Settings, *, attempt: int = 1
 ) -> LLMRequest:
-    """Build the source-preserving JSON request for one split attempt."""
+    """Build the source-preserving JSON request for one split attempt.
+
+    Args:
+        script: Normalized/masked text to split.
+        settings: Character limits and retry/token settings.
+        attempt: One-based attempt number used for stricter retry guidance.
+
+    Returns:
+        A JSON-schema-constrained ``LLMRequest``.
+
+    """
     user_prompt = (
         "次の日本語台本を意味のまとまりで分割してください。\n"
         f"目安: 1ブロックあたり {settings.splitter_min_chars}〜{settings.splitter_max_chars} "
@@ -425,7 +547,17 @@ def _build_split_prompt(
 
 
 def _deterministic_split(text: str, settings: Settings) -> list[SplitBlock]:
-    """Split text locally at punctuation when LLM splitting is unusable."""
+    """Split text locally at punctuation when LLM output is unusable.
+
+    Args:
+        text: Normalized/masked source text.
+        settings: Configured minimum, target, and maximum block sizes.
+
+    Returns:
+        Ordered ``SplitBlock`` values whose source and narration are identical
+        before later narration sanitization.
+
+    """
     # Use the same routine as the FakeLLMProvider's split function but applied
     # with the configured sizing parameters.
     normalized = re.sub(r"\s+", " ", text).strip()
@@ -480,6 +612,15 @@ def segment_script(script: str, *, max_chars: int) -> list[str]:
     thing — slow, and prone to truncation. Segmenting keeps every call small
     and lets them run concurrently; boundaries land on sentence ends so no
     segment starts mid-thought.
+
+    Args:
+        script: Normalized/masked full script.
+        max_chars: Maximum segment length before sentence-boundary splitting.
+
+    Returns:
+        Non-empty segments, hard-slicing only when an individual sentence is
+        longer than the configured maximum.
+
     """
     text = script.strip()
     if not text:
@@ -520,10 +661,25 @@ async def split_segment(
 ) -> SplitResult:
     """Split one LLM-sized segment.
 
+    Args:
+        script: One LLM-sized segment, optionally already masked.
+        provider: LLM implementation used for split attempts.
+        settings: Split limits and retry configuration.
+        code_blocks: Optional shared fence list when the caller masked the
+            complete script before segmentation.
+
+    Returns:
+        ``SplitResult`` containing a validated provider split or an always-
+        available deterministic fallback.
+
+    Raises:
+        ValueError: If the normalized segment is empty.
+
     ``code_blocks`` is supplied when the caller has already masked fenced
     code across the whole script (so segment boundaries never land inside a
     fence); ``script`` is then the masked text and the list is used to
     restore it. When omitted, this masks and restores on its own.
+
     """
     normalized_script = normalize_kept(script)
     if not normalized_script:
@@ -607,7 +763,15 @@ async def split_segment(
 
 
 def chunks_to_block_texts(blocks: Iterable[SplitBlock]) -> list[str]:
-    """Extract source text from split blocks for callers needing plain chunks."""
+    """Extract source text from split blocks.
+
+    Args:
+        blocks: Any iterable of validated split blocks.
+
+    Returns:
+        Source text values in iteration order.
+
+    """
     return [b.source_text for b in blocks]
 
 
@@ -625,6 +789,16 @@ def merge_small_blocks(
     Length is measured on narration (``tts_text``) rather than ``source_text``
     because that is what determines a block's on-screen duration — a block
     holding a large code listing still only takes as long as its narration.
+
+    Args:
+        blocks: Ordered split blocks to merge.
+        min_chars: Narration length below which a neighboring merge is allowed.
+        max_chars: Maximum combined narration length for a merge.
+
+    Returns:
+        Reindexed blocks after adjacent eligible blocks are combined.  Empty
+        input is returned unchanged.
+
     """
     if not blocks:
         return blocks
@@ -662,6 +836,19 @@ async def split_script(
     Segments are independent, so they are split concurrently and their block
     lists concatenated. A segment that falls back to the deterministic
     splitter only degrades its own span instead of the entire script.
+
+    Args:
+        script: Full source script.
+        provider: LLM implementation used for each segment.
+        settings: Segment/split/retry configuration.
+
+    Returns:
+        Combined ``SplitResult`` with blocks reindexed and any bare code-only
+        narration given a spoken fallback cue.
+
+    Raises:
+        ValueError: If the normalized full script is empty.
+
     """
     import asyncio
 
@@ -684,6 +871,7 @@ async def split_script(
     sem = asyncio.Semaphore(max(1, settings.splitter_concurrency))
 
     async def run(segment: str) -> SplitResult:
+        """Split one segment while honoring the global concurrency limit."""
         async with sem:
             return await split_segment(
                 segment, provider, settings, code_blocks=code_blocks

@@ -1,4 +1,4 @@
-"""Check a script before feeding it to BlockVideo.
+"""Check an authored script before feeding it to BlockVideo.
 
 Reports the mistakes that reach the screen silently: a ```slide box whose
 inner lines do not match its border (the renderer draws exactly what is
@@ -6,6 +6,12 @@ written, so a ragged box stays ragged), a sentence too long for one caption,
 and identifiers spelled in katakana.
 
     uv run python ../scripts/lint_script.py ../script.txt
+
+Imports:
+    ``io`` wraps stdout with UTF-8 for Japanese diagnostics.
+    ``re`` removes fences and separates paragraphs/sentences.
+    ``sys`` handles the command-line entry point and backend import path.
+    ``Path`` identifies the source script.
 """
 from __future__ import annotations
 
@@ -23,12 +29,25 @@ from app.services.visual_planner import (  # noqa: E402
     slide_alignment_issues,
 )
 
+# Shared preflight limits and pronunciation markers.
 MAX_SENTENCE_CHARS = 72
 KATAKANA_IDENTIFIERS = ("アソック", "クッダー", "コンス", "セット・クッダー", "ラムダ")
 
 
 def main(path: Path) -> int:
-    """Validate authored slides, narration lengths, and common pronunciations."""
+    """Validate authored slides, narration lengths, and pronunciations.
+
+    Args:
+        path: UTF-8 script file to inspect.
+
+    Returns:
+        ``0`` when no problems are found, otherwise ``1``.
+
+    Side Effects:
+        Reads the script and prints one diagnostic per detected issue plus a
+        summary of slide/paragraph counts.
+
+    """
     text = path.read_text(encoding="utf-8")
     problems = 0
 

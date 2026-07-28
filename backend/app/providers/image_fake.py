@@ -1,4 +1,11 @@
-"""Fake image provider — draws a stylised placeholder PNG using PIL."""
+"""Deterministic offline image provider used by tests and demos.
+
+Imports:
+    ``hashlib`` derives a stable short label from the prompt.
+    ``Path`` identifies the output artifact.
+    PIL creates the placeholder image and selects a system font.
+    ``ImageProvider`` supplies the application-facing interface.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +17,13 @@ from app.providers.image import ImageProvider
 
 
 class FakeImageProvider(ImageProvider):
-    """Draw deterministic placeholder slides without a network request."""
+    """Draw deterministic placeholder slides without network access.
+
+    Attributes:
+        name: Stable fake-provider identifier.
+        calls: Test-visible ``(prompt, width, height, hash)`` request records.
+
+    """
 
     name = "fake"
 
@@ -21,7 +34,22 @@ class FakeImageProvider(ImageProvider):
     async def generate_image(
         self, prompt: str, width: int, height: int, output_path: Path
     ) -> Path:
-        """Render a labeled placeholder image derived from the prompt hash."""
+        """Render and save a labeled placeholder derived from the prompt.
+
+        Args:
+            prompt: Text shown in the footer and hashed into the label.
+            width: Output canvas width in pixels.
+            height: Output canvas height in pixels.
+            output_path: PNG path to create.
+
+        Returns:
+            The created output path.
+
+        Side Effects:
+            Creates parent directories, appends a call record, and writes a
+            PNG.  No network or provider credential is used.
+
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         h = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:6]
         self.calls.append((prompt, width, height, h))
@@ -61,6 +89,7 @@ class FakeImageProvider(ImageProvider):
 
     @staticmethod
     def _pick_font(size: int) -> ImageFont.ImageFont:
+        """Return the first usable system font for the requested size."""
         candidates = [
             "C:/Windows/Fonts/msgothic.ttc",
             "C:/Windows/Fonts/meiryo.ttc",

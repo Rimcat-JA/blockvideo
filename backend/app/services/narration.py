@@ -17,6 +17,13 @@ know where every sentence boundary falls.
 
 Splitting the query per sentence also gives us the one place to lengthen the
 gap at each ``。`` into a breath.
+
+Imports:
+    ``asyncio`` bounds concurrent ``/audio_query`` requests.
+    ``copy`` prevents mutations to provider-returned query objects.
+    ``json`` persists measured spans beside each audio file.
+    Dataclasses/types describe spans and callback signatures.
+    ``VoicevoxClient`` and settings provide the live synthesis boundary.
 """
 from __future__ import annotations
 
@@ -37,7 +44,14 @@ SENTENCE_END_CHARS = "。！？!?"
 
 @dataclass
 class SentenceSpan:
-    """One sentence of narration, located in both the text and the audio."""
+    """One sentence located in both source text and synthesized audio.
+
+    Attributes:
+        text: Exact sentence fragment used for the query.
+        char_start, char_end: Half-open character offsets in the block text.
+        start_ms, end_ms: Predicted or rescaled audio interval in milliseconds.
+
+    """
 
     text: str
     char_start: int
@@ -46,7 +60,7 @@ class SentenceSpan:
     end_ms: int
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize this span for the block's narration JSON file."""
+        """Serialize the span into JSON-compatible primitive values."""
         return {
             "text": self.text,
             "char_start": self.char_start,
@@ -57,7 +71,15 @@ class SentenceSpan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SentenceSpan":
-        """Reconstruct a span while applying safe primitive conversions."""
+        """Reconstruct a span with defensive primitive conversions.
+
+        Args:
+            data: Mapping read from a narration JSON file.
+
+        Returns:
+            A ``SentenceSpan`` with missing values defaulted to empty/zero.
+
+        """
         return cls(
             text=str(data.get("text", "")),
             char_start=int(data.get("char_start", 0)),
@@ -69,7 +91,14 @@ class SentenceSpan:
 
 @dataclass
 class NarrationPlan:
-    """A ready-to-synthesise query plus where each sentence lands in it."""
+    """A tuned query plus the predicted location of each sentence.
+
+    Attributes:
+        query: Combined VOICEVOX query ready for ``synthesis``.
+        spans: Sentence offsets and predicted time ranges.
+        predicted_ms: Total duration estimated from mora lengths and margins.
+
+    """
 
     query: dict[str, Any]
     spans: list[SentenceSpan]
@@ -78,7 +107,11 @@ class NarrationPlan:
 
 @dataclass
 class _Piece:
-    """Internal sentence fragment with source-text character offsets."""
+    """Internal sentence fragment with source-text character offsets.
+
+    It is kept separate from ``SentenceSpan`` because it exists before a live
+    engine supplies timing information.
+    """
 
     text: str
     char_start: int
@@ -91,6 +124,14 @@ def split_sentences_with_offsets(text: str) -> list[_Piece]:
     The offsets are what let a caption's character position be converted into
     a time, so the pieces must tile the string exactly — nothing dropped,
     nothing overlapping.
+
+    Args:
+        text: Block narration to split at ``SENTENCE_END_CHARS``.
+
+    Returns:
+        Ordered pieces whose half-open offsets tile the input text, including
+        trailing non-sentence text and folded whitespace-only tails.
+
     """
     pieces: list[_Piece] = []
     start = 0
@@ -114,7 +155,15 @@ def split_sentences_with_offsets(text: str) -> list[_Piece]:
 
 
 def _phrase_seconds(phrase: dict[str, Any]) -> float:
-    """Sum the voiced and pause mora durations in one accent phrase."""
+    """Sum voiced and pause mora durations in one accent phrase.
+
+    Args:
+        phrase: VOICEVOX accent-phrase mapping.
+
+    Returns:
+        Duration in seconds, treating missing/null lengths as zero.
+
+    """
     total = 0.0
     for mora in phrase.get("moras") or []:
         total += (mora.get("consonant_length") or 0.0) + (mora.get("vowel_length") or 0.0)
@@ -125,7 +174,15 @@ def _phrase_seconds(phrase: dict[str, Any]) -> float:
 
 
 def _breath_mora(seconds: float) -> dict[str, Any]:
-    """Build a silent mora used as the pause between two sentences."""
+    """Build a silent pause mora lasting ``seconds``.
+
+    Args:
+        seconds: Desired non-negative pause length.
+
+    Returns:
+        VOICEVOX-compatible pause-mora mapping.
+
+    """
     return {
         "text": "、",
         "consonant": None,
@@ -146,10 +203,22 @@ async def build_narration_plan(
 ) -> NarrationPlan | None:
     """Query VOICEVOX per sentence and assemble one query for the block.
 
+    Args:
+        text: Block narration text.
+        settings: Speaker and query tuning values.
+        client: Live VOICEVOX client; fake clients intentionally skip planning.
+        sentence_pause_seconds: Extra pause inserted between sentence queries.
+        concurrency: Maximum simultaneous audio-query requests.
+
+    Returns:
+        A combined ``NarrationPlan`` or ``None`` when the plan cannot be built
+        (no live engine, empty text, or unusable provider responses).
+
     Returns ``None`` when the plan cannot be built (no live engine, empty
     text, an engine that answered with nothing usable). Callers fall back to
     synthesising the whole text in one go, which is what happened before this
     module existed.
+
     """
     body = (text or "").strip()
     if not body:
@@ -230,6 +299,16 @@ def rescale_spans(
     VOICEVOX's own prediction lands within a few tenths of a percent, but the
     subtitle file has to agree with the audio file exactly or the last cue
     ends early.
+
+    Args:
+        spans: Predicted sentence spans.
+        predicted_ms: Duration used to calculate those spans.
+        actual_ms: Measured duration of the written audio file.
+
+    Returns:
+        New spans scaled by ``actual_ms / predicted_ms``; the input sequence is
+        not mutated.  Invalid/non-positive durations return a shallow list copy.
+
     """
     if predicted_ms <= 0 or actual_ms <= 0:
         return list(spans)
@@ -253,6 +332,15 @@ def write_spans(path: Path, spans: Sequence[SentenceSpan], *, duration_ms: int) 
     which may run much later (``rerender`` re-runs render alone). Keeping them
     as a file next to ``audio.wav`` matches the rest of the block layout and
     needs no schema change.
+
+    Args:
+        path: JSON destination beside the block audio.
+        spans: Sentence timing records to serialize.
+        duration_ms: Audio duration stored alongside the spans.
+
+    Side Effects:
+        Creates the parent directory and overwrites ``path`` with UTF-8 JSON.
+
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"duration_ms": int(duration_ms), "spans": [s.to_dict() for s in spans]}
@@ -264,6 +352,14 @@ def read_spans(path: Path) -> list[SentenceSpan]:
 
     Projects generated before this existed simply have no file, and the
     caller falls back to character-proportional timing.
+
+    Args:
+        path: JSON file written by ``write_spans``.
+
+    Returns:
+        Parsed spans, or an empty list when the file is absent, unreadable, or
+        contains invalid JSON.  The duration metadata is intentionally ignored.
+
     """
     if not path.exists():
         return []
@@ -290,7 +386,15 @@ _MORA_WEIGHTS = (
 
 
 def _mora_weight(text: str) -> float:
-    """Estimate Japanese speaking weight for offsets inside one sentence."""
+    """Estimate Japanese speaking weight for an intra-sentence offset.
+
+    Args:
+        text: Text fragment whose approximate mora weight is required.
+
+    Returns:
+        Positive weighted length used only for proportional interpolation.
+
+    """
     total = 0.0
     for ch in text:
         for matches, weight in _MORA_WEIGHTS:
@@ -305,13 +409,22 @@ def _mora_weight(text: str) -> float:
 def char_time_fn(
     spans: Sequence[SentenceSpan], *, total_ms: int
 ) -> Callable[[int], float] | None:
-    """Map a character offset in the narration to a time in milliseconds.
+    """Build a character-offset-to-time interpolation function.
 
     Piecewise linear over the measured sentences: exact at every sentence
     boundary. Inside a sentence — where a caption had to break because the
     sentence alone overflows the band — there is nothing measured to anchor
     to, so the position is estimated by mora weight rather than by character
     count, which is the same mistake at smaller scale.
+
+    Args:
+        spans: Measured sentence spans.
+        total_ms: Full audio duration used for the final clamp.
+
+    Returns:
+        A callable accepting a character offset and returning milliseconds, or
+        ``None`` when no usable span exists.
+
     """
     usable = [s for s in spans if s.char_end > s.char_start]
     if not usable:

@@ -1,7 +1,15 @@
-"""End-to-end pipeline orchestrator.
+"""End-to-end split-to-video pipeline orchestration.
 
-Each stage is independent and idempotent: it inspects ``content_hash`` and
-the artifact status to decide whether to skip or rerun.
+Each stage owns one type of artifact and commits its status/results before the
+next stage runs.  Existing artifacts/statuses are used as skip signals where
+implemented; the full pipeline itself is rerunnable, but this module does not
+provide a universal content-hash cache for every stage.
+
+Imports:
+    SQLAlchemy loads and persists projects/blocks.
+    Configuration/logging/model modules provide runtime settings and state.
+    Provider/path/splitter/narration/render modules implement each stage.
+    ``Any`` describes timeline JSON payloads.
 """
 from __future__ import annotations
 
@@ -57,12 +65,23 @@ from app.services.visual_planner import (
 )
 
 
+# Callback shape: ``stage``, overall progress fraction, optional user message.
 ProgressCallback = Callable[[str, float, str | None], Awaitable[None]]
 
 
 @dataclass
 class StageContext:
-    """Shared project, provider, settings, and cancellation state for stages."""
+    """Shared runtime dependencies passed to stage functions.
+
+    Attributes:
+        project: SQLAlchemy project row and its loaded block relationship.
+        settings: Global runtime/rendering settings.
+        bundle: Real or fake LLM/image/VOICEVOX clients.
+        voicevox_settings: Project-specific synthesis controls.
+        progress_cb: Optional worker callback for stage progress.
+        is_cancelled: Pollable cancellation predicate, false by default.
+
+    """
 
     project: Project
     settings: Settings
@@ -72,13 +91,36 @@ class StageContext:
     is_cancelled: Callable[[], bool] = lambda: False
 
     async def report(self, stage: str, progress: float, message: str | None = None) -> None:
-        """Forward stage progress to the optional worker callback."""
+        """Forward stage progress to the optional worker callback.
+
+        Args:
+            stage: Stable stage name such as ``split`` or ``render``.
+            progress: Overall pipeline progress fraction.
+            message: Optional human-readable progress detail.
+
+        Side Effects:
+            Invokes ``progress_cb`` when configured; otherwise does nothing.
+
+        """
         if self.progress_cb:
             await self.progress_cb(stage, progress, message)
 
 
 async def ensure_global_style(ctx: StageContext, db: Session) -> str:
-    """Load a persisted global style or generate and save it once."""
+    """Load a saved project style or generate and persist one.
+
+    Args:
+        ctx: Stage dependencies and project row.
+        db: Active SQLAlchemy session.
+
+    Returns:
+        Existing or newly generated global visual-style text.
+
+    Side Effects:
+        Calls the LLM only when the project has no style, then commits and
+        refreshes the project row.
+
+    """
     if ctx.project.global_visual_style:
         return ctx.project.global_visual_style
     style = await generate_global_style(ctx.bundle.llm, project_title=ctx.project.title)
@@ -90,7 +132,21 @@ async def ensure_global_style(ctx: StageContext, db: Session) -> str:
 
 
 async def run_split_stage(ctx: StageContext, db: Session) -> list[Block]:
-    """Split the source script, repair narration, and synchronize block rows."""
+    """Split source text, repair narration, and synchronize block rows.
+
+    Args:
+        ctx: Project, provider, settings, and cancellation dependencies.
+        db: Active session used to create/update/delete ``Block`` rows.
+
+    Returns:
+        Blocks corresponding exactly to the current split result, in source
+        order.
+
+    Side Effects:
+        May call the LLM, delete rows beyond the new split count, update source
+        and TTS text, and commit the synchronized block set.
+
+    """
     script = normalize_kept(ctx.project.source_script)
     result = await split_script(script, ctx.bundle.llm, ctx.settings)
     log.info(
@@ -151,6 +207,19 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
     The calls are independent, so they run concurrently under a bounded
     semaphore; results are applied to the session afterwards, in index order,
     because the SQLAlchemy Session is not safe to touch from concurrent tasks.
+
+    Args:
+        ctx: Project, planner provider, settings, and cancellation state.
+        db: Active session used after concurrent planning completes.
+
+    Returns:
+        Number of visual plans completed during this invocation, including
+        blocks already marked complete before the call.
+
+    Raises:
+        RuntimeError: If every block fails to obtain a usable plan while the
+            stage is not cancelled.
+
     """
     import asyncio
 
@@ -256,7 +325,16 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
 
 
 async def run_image_stage(ctx: StageContext, db: Session) -> int:
-    """Render every pending block image while honoring cancellation."""
+    """Render every pending block image while honoring cancellation.
+
+    Args:
+        ctx: Project, render settings, providers, and cancellation predicate.
+        db: Session used by the per-block renderer to commit statuses.
+
+    Returns:
+        Number of blocks already or newly marked image-complete.
+
+    """
     count = 0
     style = ctx.project.global_visual_style or ""
     for block in sorted(ctx.project.blocks, key=lambda b: b.index):
@@ -273,7 +351,19 @@ async def run_image_stage(ctx: StageContext, db: Session) -> int:
 async def _render_block_image(
     ctx: StageContext, block: Block, style: str, db: Session
 ) -> None:
-    """Render one block's primary and additional slide images."""
+    """Render one block's primary and additional slide images.
+
+    Args:
+        ctx: Project/runtime dependencies.
+        block: Block row whose plan and status are updated.
+        style: Persisted global visual style used for remote image prompts.
+        db: Session committed after success or failure.
+
+    Side Effects:
+        Creates/removes block image files, updates image status/path/error, and
+        commits the block.  Errors are recorded and re-raised.
+
+    """
     ensure_project_layout(ctx.project.id)
     plan = block.visual_plan_json or {}
     output = block_image_path(ctx.project.id, block.index)
@@ -332,7 +422,16 @@ async def _render_block_image(
 
 
 async def run_audio_stage(ctx: StageContext, db: Session) -> int:
-    """Synthesize every pending block and persist durations and spans."""
+    """Synthesize every pending block and persist durations/spans.
+
+    Args:
+        ctx: Project/runtime dependencies and VOICEVOX settings.
+        db: Session used to commit each block's audio result.
+
+    Returns:
+        Number of blocks already or newly marked audio-complete.
+
+    """
     count = 0
     ensure_project_layout(ctx.project.id)
     for block in sorted(ctx.project.blocks, key=lambda b: b.index):
@@ -349,7 +448,18 @@ async def run_audio_stage(ctx: StageContext, db: Session) -> int:
 async def _render_block_audio(
     ctx: StageContext, block: Block, db: Session
 ) -> None:
-    """Synthesize one block and save its audio timing metadata."""
+    """Synthesize one block and save its timing metadata.
+
+    Args:
+        ctx: Project/runtime dependencies.
+        block: Block row whose audio fields/status are updated.
+        db: Session committed after success or failure.
+
+    Side Effects:
+        Writes WAV and narration JSON files, computes display duration, updates
+        database state, and re-raises failures after recording them.
+
+    """
     output = block_audio_path(ctx.project.id, block.index)
     block.status_audio = BlockStatus.running
     block.error_message = None
@@ -387,7 +497,25 @@ async def _render_block_audio(
 
 
 async def run_render_stage(ctx: StageContext, db: Session) -> Path:
-    """Encode block videos, concatenate them, and write project metadata."""
+    """Encode blocks, concatenate the project video, and write metadata.
+
+    Args:
+        ctx: Project, settings, providers, and cancellation state.
+        db: Session used to persist block/project render paths and statuses.
+
+    Returns:
+        Final project MP4 path.
+
+    Raises:
+        RuntimeError: If there are no blocks, required artifacts are absent, or
+            cancellation occurs before concatenation.
+        ProviderError: If FFmpeg/FFprobe execution fails.
+
+    Side Effects:
+        Writes per-block ASS/MP4 files, concat list, final MP4, project ASS,
+        timeline JSON, project JSON, and corresponding database fields.
+
+    """
     ensure_project_layout(ctx.project.id)
     settings = ctx.settings
 
@@ -551,6 +679,7 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
     return final
 
 
+# Minimum readable lifetime for each slide in a multi-slide block.
 MIN_SLIDE_MS = 2000
 
 
@@ -565,6 +694,16 @@ def _snap_to_boundaries(
     before the narrator has. Boundaries that are already taken, or that would
     leave a slide shorter than ``MIN_SLIDE_MS``, are skipped; when none is
     usable the ideal point is kept rather than dropping the slide.
+
+    Args:
+        ideal_ms: Desired ordered cut positions.
+        boundaries: Candidate narration/caption boundaries.
+        total_ms: Total block duration.
+
+    Returns:
+        Ordered cuts snapped to unused candidate boundaries when they preserve
+        the minimum slide duration; otherwise the ideal cuts.
+
     """
     cuts: list[int] = []
     previous = 0
@@ -604,6 +743,19 @@ def _block_slides(
     Slides past the cap are dropped from the end, keeping the planner's chosen
     visual first and the rest in the order the script introduces them, which
     is the order the narration talks about them.
+
+    Args:
+        project_id: Owning project identifier.
+        index: Block index.
+        primary: Primary image path produced by the image stage.
+        duration_ms: Total block display duration.
+        boundaries_ms: Optional sentence/caption boundaries for snapping.
+        max_slides: Project-level slide cap.
+
+    Returns:
+        Ordered ``(image_path, duration_ms)`` pairs whose durations sum to the
+        block duration.  Missing extra images stop discovery.
+
     """
     images = [primary]
     for slot in range(1, 9):
@@ -650,6 +802,22 @@ def _write_block_ass(
 
     The returned boundaries are where a slide may change without cutting into
     a sentence.
+
+    Args:
+        ass_path: Per-block ASS destination.
+        text: Narration text.
+        duration_ms: Audio/narration interval for cue generation.
+        settings: Global output/band settings.
+        project: Project subtitle preferences.
+        spans: Optional measured sentence spans.
+
+    Returns:
+        End times of every cue except the final cue; these are safe slide-change
+        boundaries within the block.
+
+    Side Effects:
+        Writes a per-block ASS file and may create its parent directory.
+
     """
     cues, font_size = subtitles.build_band_cues(
         text,
@@ -676,7 +844,17 @@ def _write_block_ass(
 
 
 def _project_json_payload(project: Project, timeline: list[dict[str, Any]]) -> str:
-    """Serialize project settings and its timeline as human-readable JSON."""
+    """Serialize project settings and timeline as formatted JSON text.
+
+    Args:
+        project: Persisted project settings and output paths.
+        timeline: Already-built per-block absolute timeline rows.
+
+    Returns:
+        UTF-8-compatible JSON string with project, subtitle, VOICEVOX, and
+        block timeline data.
+
+    """
     import json
 
     payload = {
@@ -708,7 +886,15 @@ def _project_json_payload(project: Project, timeline: list[dict[str, Any]]) -> s
 
 
 def _timeline_json_payload(timeline: list[dict[str, Any]]) -> str:
-    """Serialize only timeline rows for consumers that do not need settings."""
+    """Serialize only timeline rows as formatted JSON text.
+
+    Args:
+        timeline: Per-block absolute timeline rows.
+
+    Returns:
+        JSON string without project/provider settings.
+
+    """
     import json
 
     return json.dumps(timeline, ensure_ascii=False, indent=2)
@@ -723,7 +909,23 @@ async def run_full_pipeline(
     progress_cb: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> None:
-    """Run every stage for ``project_id``. Idempotent across stages."""
+    """Run split, plan, image, audio, and render stages for one project.
+
+    Args:
+        project_id: Existing project database identifier.
+        progress_cb: Optional callback receiving stage/progress updates.
+        cancel_check: Optional predicate polled by stages and worker code.
+
+    Raises:
+        RuntimeError: If the project does not exist or a stage fails.
+        ProviderError: If configured external providers/media tools fail.
+
+    Side Effects:
+        Creates provider clients, mutates project/block/job-related database
+        state, writes all media/metadata artifacts, and closes its session.
+        Failures mark the project failed or cancelled before re-raising.
+
+    """
     from app.db import get_session_factory
 
     factory = get_session_factory()
@@ -792,7 +994,18 @@ async def run_full_pipeline(
 async def rerun_block_visual(
     project_id: int, block_index: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
-    """Re-render one block's image while preserving its audio and plan."""
+    """Re-render one block's image while preserving audio and plan.
+
+    Args:
+        project_id: Existing project identifier.
+        block_index: Zero-based block index to render.
+        progress_cb: Optional callback retained for API symmetry.
+
+    Raises:
+        RuntimeError: If the project or block does not exist, or rendering
+            fails.
+
+    """
     from app.db import get_session_factory
 
     factory = get_session_factory()
@@ -832,7 +1045,17 @@ async def rerun_block_visual(
 async def rerun_block_audio(
     project_id: int, block_index: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
-    """Re-synthesize one block's audio and refresh its timing metadata."""
+    """Re-synthesize one block and refresh timing metadata.
+
+    Args:
+        project_id: Existing project identifier.
+        block_index: Zero-based block index to synthesize.
+        progress_cb: Optional callback retained for API symmetry.
+
+    Raises:
+        RuntimeError: If the project/block is missing or synthesis fails.
+
+    """
     from app.db import get_session_factory
 
     factory = get_session_factory()
@@ -868,7 +1091,21 @@ async def rerun_block_audio(
 async def rerender_project(
     project_id: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
-    """Delete stale video artifacts and rebuild only the project render stage."""
+    """Delete stale video artifacts and rebuild only the render stage.
+
+    Args:
+        project_id: Existing project identifier.
+        progress_cb: Optional callback retained for stage-reporting symmetry.
+
+    Raises:
+        RuntimeError: If the project does not exist or required render inputs
+            are unavailable.
+
+    Side Effects:
+        Marks block render states pending, removes per-block/final MP4 files,
+        reruns concatenation/subtitle metadata, and marks the project complete.
+
+    """
     from app.db import get_session_factory
 
     factory = get_session_factory()

@@ -1,4 +1,4 @@
-"""End-to-end demo runner.
+"""End-to-end local demo runner for the BlockVideo HTTP API.
 
 Reads ``samples/compose_multiplatform_intro.txt`` and POSTs it to a locally-running
 BlockVideo backend, then polls until the project reaches the ``completed`` state
@@ -10,6 +10,14 @@ Requires:
 
 Usage:
     python scripts/demo_run.py
+
+Imports:
+    ``json`` encodes request bodies and decodes API responses.
+    ``os`` reads the optional backend base URL.
+    ``sys`` reports errors and returns process exit codes.
+    ``time`` implements monotonic polling deadlines.
+    ``urllib`` performs dependency-free HTTP requests.
+    ``Path`` locates the bundled sample script.
 """
 from __future__ import annotations
 
@@ -21,8 +29,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Backend origin; override with BLOCKVIDEO_API for a non-default local server.
 API_BASE = os.environ.get("BLOCKVIDEO_API", "http://127.0.0.1:8000")
+# Sample script submitted by the offline fake-provider demo.
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "samples" / "compose_multiplatform_intro.txt"
+# Polling cadence and overall demo deadline.
 POLL_INTERVAL_SEC = 1.0
 TIMEOUT_SEC = 180.0
 
@@ -30,7 +41,23 @@ TIMEOUT_SEC = 180.0
 def _request(
     method: str, path: str, payload: dict | None = None
 ) -> tuple[int, dict | str]:
-    """Send one JSON request to the local backend and decode its response."""
+    """Send one HTTP request and decode JSON or text response content.
+
+    Args:
+        method: HTTP method such as ``GET`` or ``POST``.
+        path: API path appended to ``API_BASE``.
+        payload: Optional JSON-serializable request mapping.
+
+    Returns:
+        ``(status_code, decoded_body)`` where the body is a mapping when JSON
+        decoding succeeds and a string otherwise.  HTTP errors are returned in
+        the same tuple shape instead of being raised.
+
+    Raises:
+        urllib.error.URLError: For network/DNS failures that are not HTTP
+            responses.
+
+    """
     url = f"{API_BASE}{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json"} if payload is not None else {}
@@ -51,7 +78,20 @@ def _request(
 
 
 def _wait_for_status(project_id: int, target: set[str], timeout: float) -> dict:
-    """Poll a project until a target status or timeout/failure is reached."""
+    """Poll a project until a target status, failure, or timeout.
+
+    Args:
+        project_id: Project primary key returned by creation.
+        target: Terminal statuses that should return the last project body.
+        timeout: Maximum monotonic seconds to wait.
+
+    Returns:
+        Last decoded project mapping when one of ``target`` is reached.
+
+    Raises:
+        SystemExit: If the project reports ``failed`` or the deadline expires.
+
+    """
     deadline = time.monotonic() + timeout
     last: dict = {}
     while time.monotonic() < deadline:
@@ -74,7 +114,16 @@ def _wait_for_status(project_id: int, target: set[str], timeout: float) -> dict:
 
 
 def main() -> int:
-    """Run the offline sample project and print its generated artifact paths."""
+    """Run the fake-provider sample and print generated artifact paths.
+
+    Returns:
+        ``0`` on a completed demo, ``1`` for a missing sample or HTTP failure.
+
+    Side Effects:
+        Reads the sample file, creates a project through the backend, queues
+        generation, polls status, and prints block/output information.
+
+    """
     if not SCRIPT_PATH.exists():
         print(f"sample script not found: {SCRIPT_PATH}", file=sys.stderr)
         return 1

@@ -1,8 +1,13 @@
-"""VOICEVOX Engine client.
+"""VOICEVOX Engine HTTP client and deterministic offline substitute.
 
 Talks to a running VOICEVOX Engine over HTTP. The engine is a separate
 service that the user is expected to launch themselves; we never bake
 secrets into requests because the engine does not need them.
+Imports:
+    ``dataclass`` defines synthesis settings and normalized speaker records.
+    ``Any`` describes VOICEVOX's JSON query payloads.
+    ``httpx`` performs asynchronous requests to a running engine.
+    ``ProviderError`` converts transport/protocol failures into safe errors.
 """
 from __future__ import annotations
 
@@ -16,7 +21,17 @@ from app.providers.llm import ProviderError
 
 @dataclass
 class VoicevoxSettings:
-    """VOICEVOX synthesis parameters copied from project settings."""
+    """VOICEVOX synthesis parameters copied from project settings.
+
+    Attributes:
+        base_url: Running engine root URL.
+        speaker_id: VOICEVOX speaker/style identifier.
+        speed_scale, pitch_scale, intonation_scale, volume_scale: Engine
+            prosody controls forwarded into the query.
+        pre_phoneme_length, post_phoneme_length: Silence around synthesized
+            audio, in seconds.
+
+    """
 
     base_url: str = "http://127.0.0.1:50021"
     speaker_id: int = 1
@@ -30,7 +45,14 @@ class VoicevoxSettings:
 
 @dataclass
 class Speaker:
-    """Normalized VOICEVOX speaker metadata."""
+    """Normalized speaker metadata returned to API clients.
+
+    Attributes:
+        speaker_id: Numeric VOICEVOX speaker identifier.
+        name: Human-readable speaker name.
+        styles: Raw style dictionaries supplied by the engine.
+
+    """
 
     speaker_id: int
     name: str
@@ -38,10 +60,22 @@ class Speaker:
 
 
 class VoicevoxClient:
-    """Async HTTP client for a running VOICEVOX Engine instance."""
+    """Async HTTP client for a running VOICEVOX Engine instance.
+
+    Attributes:
+        base_url: Normalized engine URL without a trailing slash.
+        _client: Owned ``httpx.AsyncClient`` connection pool.
+
+    """
 
     def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
-        """Create a client pointed at one VOICEVOX base URL."""
+        """Create a client pointed at one VOICEVOX base URL.
+
+        Args:
+            base_url: Engine URL; trailing slashes are removed.
+            timeout: Per-request HTTP timeout in seconds.
+
+        """
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=timeout)
 
@@ -50,7 +84,12 @@ class VoicevoxClient:
         await self._client.aclose()
 
     async def health(self) -> bool:
-        """Return whether the engine answers its version endpoint."""
+        """Return whether the engine answers ``GET /version`` with 200.
+
+        Returns:
+            ``False`` for network errors or non-200 status codes.
+
+        """
         try:
             r = await self._client.get(f"{self.base_url}/version")
             return r.status_code == 200
@@ -58,7 +97,16 @@ class VoicevoxClient:
             return False
 
     async def speakers(self) -> list[Speaker]:
-        """Fetch and normalize all available speakers and styles."""
+        """Fetch and normalize all available speakers and styles.
+
+        Returns:
+            A list of normalized ``Speaker`` objects.
+
+        Raises:
+            ProviderError: When the engine cannot be reached or returns an
+                HTTP error status.
+
+        """
         try:
             r = await self._client.get(f"{self.base_url}/speakers")
         except httpx.HTTPError as exc:
@@ -83,7 +131,20 @@ class VoicevoxClient:
         ]
 
     async def audio_query(self, text: str, speaker_id: int) -> dict[str, Any]:
-        """Ask VOICEVOX for a synthesis query for one text fragment."""
+        """Ask VOICEVOX for a synthesis query for one text fragment.
+
+        Args:
+            text: Narration fragment submitted as the ``text`` query parameter.
+            speaker_id: Speaker/style identifier.
+
+        Returns:
+            Raw VOICEVOX audio-query JSON mapping.
+
+        Raises:
+            ProviderError: For transport errors, unknown speakers, or other
+                HTTP error responses.
+
+        """
         url = f"{self.base_url}/audio_query"
         params = {"text": text, "speaker": speaker_id}
         try:
@@ -107,7 +168,21 @@ class VoicevoxClient:
         return r.json()
 
     async def synthesis(self, query: dict[str, Any], speaker_id: int) -> bytes:
-        """Synthesize a prepared query and return the WAV response bytes."""
+        """Synthesize a prepared query and return WAV response bytes.
+
+        Args:
+            query: VOICEVOX audio-query mapping, optionally tuned by
+                ``apply_settings``.
+            speaker_id: Speaker/style identifier accepted by the engine.
+
+        Returns:
+            Raw WAV bytes from ``POST /synthesis``.
+
+        Raises:
+            ProviderError: For transport errors, unknown speakers, or HTTP
+                failures.
+
+        """
         url = f"{self.base_url}/synthesis"
         params = {"speaker": speaker_id}
         try:
@@ -133,7 +208,19 @@ class VoicevoxClient:
         return r.content
 
     def apply_settings(self, query: dict[str, Any], settings: VoicevoxSettings) -> dict[str, Any]:
-        """Mutate a query dict with the user-configured tuning."""
+        """Apply project tuning values in place and return ``query``.
+
+        Args:
+            query: Mutable VOICEVOX query mapping.
+            settings: User/project synthesis controls.
+
+        Returns:
+            The same mapping after all supported controls are overwritten.
+
+        Side Effects:
+            Mutates the supplied dictionary; it does not copy the query.
+
+        """
         query.setdefault("speedScale", settings.speed_scale)
         query["speedScale"] = settings.speed_scale
         query["pitchScale"] = settings.pitch_scale
@@ -146,7 +233,13 @@ class VoicevoxClient:
     async def synthesize_text(
         self, text: str, settings: VoicevoxSettings
     ) -> tuple[bytes, dict[str, Any]]:
-        """Build, tune, and synthesize a query for complete text."""
+        """Build, tune, and synthesize one complete text fragment.
+
+        Returns:
+            ``(wav_bytes, tuned_query)`` so callers can persist audio and,
+            when needed, inspect the exact query used by the engine.
+
+        """
         query = await self.audio_query(text, settings.speaker_id)
         self.apply_settings(query, settings)
         audio = await self.synthesis(query, settings.speaker_id)
@@ -160,6 +253,11 @@ class FakeVoicevoxClient:
     number of characters in the input (≈50 ms per char, clamped). This is
     enough to exercise the rest of the pipeline without needing a live
     engine.
+
+    Attributes:
+        speaker_id: Default fake speaker ID used by the fixture.
+        calls: ``(text, speaker_id)`` records for test assertions.
+
     """
 
     def __init__(self) -> None:
@@ -179,7 +277,17 @@ class FakeVoicevoxClient:
         ]
 
     async def synthesize_text(self, text: str, settings: VoicevoxSettings) -> tuple[bytes, dict]:
-        """Return deterministic low-amplitude WAV bytes sized by text length."""
+        """Return deterministic low-amplitude WAV bytes sized by text length.
+
+        Args:
+            text: Text whose character count controls fake duration.
+            settings: Settings object; only ``speaker_id`` is recorded by the
+                fake implementation.
+
+        Returns:
+            ``(wav_bytes, metadata)`` with a deterministic mono 24 kHz WAV.
+
+        """
         self.calls.append((text, settings.speaker_id))
         import math
         import struct

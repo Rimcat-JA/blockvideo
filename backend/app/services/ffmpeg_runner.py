@@ -1,7 +1,18 @@
-"""FFmpeg runner — builds and executes ffmpeg commands as argument arrays.
+"""FFmpeg/FFprobe command construction and asynchronous execution.
 
 We *never* assemble shell strings; everything goes through subprocess with a
 list of arguments to prevent shell-injection from LLM-controlled fields.
+Imports:
+    ``asyncio`` runs subprocesses without blocking the event loop.
+    ``json`` parses FFprobe's duration response.
+    ``shutil`` checks executable availability.
+    ``time`` measures command duration.
+    Dataclasses/paths represent clip inputs and output files.
+
+All subprocesses receive argument arrays with ``shell=False`` semantics.  The
+module does not implement a crossfade despite accepting the configuration
+value: positive ``crossfade_seconds`` currently follows the same concat-copy
+path as zero, and the function documentation makes that limitation explicit.
 """
 from __future__ import annotations
 
@@ -25,7 +36,16 @@ SLIDE_BG_HEX = "0xF8FAFC"
 
 @dataclass
 class BlockClip:
-    """Description of a block media clip used by FFmpeg callers."""
+    """Description of one block's media inputs and output.
+
+    Attributes:
+        image_path: Primary slide image.
+        audio_path: Narration WAV input.
+        duration_ms: Target encoded clip duration.
+        output_path: Destination MP4 path.
+        subtitle_path: Optional per-block ASS file to burn in.
+
+    """
 
     image_path: Path
     audio_path: Path
@@ -40,6 +60,16 @@ def _slide_fit_chain(width: int, height: int, band_height: int) -> str:
     With a subtitle band the slide occupies the upper
     ``height - band_height`` region and the lower band is left black for the
     burned-in captions; without one the slide fills the frame.
+
+    Args:
+        width: Final video frame width in pixels.
+        height: Final video frame height in pixels.
+        band_height: Caption band height; non-positive means no reserved band.
+
+    Returns:
+        A single FFmpeg video-filter expression that scales and letterboxes a
+        slide, optionally reserving a black subtitle region.
+
     """
     if band_height > 0:
         slide_h = max(120, height - band_height)
@@ -84,6 +114,26 @@ def build_block_video_args(
 
     We never assemble shell strings — filter graphs are single argv elements
     and the subtitle path is escaped for the libass filter only.
+
+    Args:
+        image: Single-slide shorthand used when ``slides`` is absent.
+        audio: Narration input path.
+        duration_ms: Target clip length, including trailing hold.
+        output: Destination MP4 path.
+        ffmpeg: Executable name/path.
+        width: Output video width in pixels.
+        height: Output video height in pixels.
+        fps: Output frame rate.
+        subtitle_path: Optional existing ASS file.
+        subtitle_band_height: Reserved lower-frame height when subtitles exist.
+        slides: Ordered ``(image, duration_ms)`` pairs for multi-slide blocks.
+
+    Returns:
+        FFmpeg argv suitable for ``asyncio.create_subprocess_exec``.
+
+    Raises:
+        ValueError: If neither ``image`` nor ``slides`` supplies an input.
+
     """
     duration_seconds = max(0.1, duration_ms / 1000.0)
     if not slides:
@@ -150,16 +200,36 @@ def _escape_sub_path(path: Path) -> str:
     quotes (libass treats them literally). Forward slashes are used in place
     of backslashes. This is filter-syntax escaping only — no shell is
     involved (the whole ``-vf`` value is one argv element).
+
+    Args:
+        path: ASS path embedded in the libass filter value.
+
+    Returns:
+        Filter-syntax escaped path, with forward slashes and escaped drive
+        colon.  It is not shell escaping because no shell is used.
+
     """
     p = str(path).replace("\\", "/").replace(":", "\\:")
     return f"'{p}'"
 
 
 def build_concat_args(*, list_file: Path, output: Path, ffmpeg: str, crossfade_seconds: float) -> list[str]:
-    """Build ffmpeg argv that concatenates block .mp4s with optional crossfade.
+    """Build FFmpeg argv that concatenates block MP4s.
 
-    With crossfade_seconds == 0 we use the concat demuxer (lossless).
-    With > 0 we use acrossfade filter graphs which require re-encoding.
+    With ``crossfade_seconds == 0`` the concat demuxer copies streams without
+    re-encoding.  Positive values are accepted for API compatibility but are
+    currently ignored and use the same concat-copy command; no crossfade is
+    emitted by this implementation.
+
+    Args:
+        list_file: FFmpeg concat-demuxer file.
+        output: Final output path.
+        ffmpeg: Executable name/path.
+        crossfade_seconds: Reserved future crossfade setting.
+
+    Returns:
+        FFmpeg argv for the current concat-copy implementation.
+
     """
     if crossfade_seconds <= 0:
         return [
@@ -189,7 +259,19 @@ def build_concat_args(*, list_file: Path, output: Path, ffmpeg: str, crossfade_s
 async def run_ffmpeg(args: list[str], *, log_path: Path | None = None) -> None:
     """Execute ffmpeg, writing the log to ``log_path`` if provided.
 
-    Raises ProviderError("ffmpegが見つかりません") if the binary is missing.
+    Args:
+        args: Complete FFmpeg argv; ``args[0]`` is the executable.
+        log_path: Optional combined stdout/stderr file, defaulting to
+            ``.ffmpeg.log`` in the current directory.
+
+    Raises:
+        ProviderError: If the executable is unavailable, the process times
+            out, or exits non-zero.
+
+    Side Effects:
+        Creates the log directory/file and writes the encoded output selected
+        by the supplied command.
+
     """
     exe = args[0]
     if not shutil.which(exe) and not Path(exe).exists():
@@ -222,7 +304,19 @@ async def run_ffmpeg(args: list[str], *, log_path: Path | None = None) -> None:
 
 
 async def ffprobe_duration_ms(path: Path) -> int:
-    """Run FFprobe and return the media duration in milliseconds."""
+    """Run FFprobe and return a media duration in milliseconds.
+
+    Args:
+        path: Audio/video file passed to FFprobe.
+
+    Returns:
+        Rounded duration from FFprobe's ``format.duration`` field.
+
+    Raises:
+        ProviderError: If FFprobe is unavailable or returns a non-zero status.
+        json.JSONDecodeError: If FFprobe emits invalid JSON.
+
+    """
     ffprobe = resolve_ffprobe()
     if not shutil.which(ffprobe) and not Path(ffprobe).exists():
         raise ProviderError(
@@ -250,19 +344,29 @@ async def ffprobe_duration_ms(path: Path) -> int:
 
 
 def ffprobe_available() -> bool:
-    """Return whether the configured FFprobe executable can be found."""
+    """Return whether the configured FFprobe executable is discoverable."""
     ffprobe = resolve_ffprobe()
     return bool(shutil.which(ffprobe)) or Path(ffprobe).exists()
 
 
 def ffmpeg_available() -> bool:
-    """Return whether the configured FFmpeg executable can be found."""
+    """Return whether the configured FFmpeg executable is discoverable."""
     ffmpeg = resolve_ffmpeg()
     return bool(shutil.which(ffmpeg)) or Path(ffmpeg).exists()
 
 
 def write_concat_list(items: list[Path], list_file: Path) -> None:
-    """Write absolute media paths in FFmpeg concat-demuxer syntax."""
+    """Write absolute media paths in concat-demuxer syntax.
+
+    Args:
+        items: Ordered media files to concatenate.
+        list_file: Destination list file.
+
+    Side Effects:
+        Creates the destination directory and writes one escaped ``file`` line
+        per input.  The order is preserved exactly.
+
+    """
     list_file.parent.mkdir(parents=True, exist_ok=True)
     with list_file.open("w", encoding="utf-8") as fp:
         for item in items:

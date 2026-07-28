@@ -1,8 +1,15 @@
-"""Background job runner.
+"""Process-local asynchronous job runner.
 
 For the MVP we use an asyncio task tracker with cancellation tokens,
 rather than Redis/RQ. The architecture is deliberately abstracted so
 that an RQ/ARQ swap-in only requires re-implementing this module.
+
+Imports:
+    ``asyncio`` owns task/event lifecycle.
+    Collections/types describe coroutine factories and callbacks.
+    ``datetime`` stamps durable job transitions in UTC.
+    SQLAlchemy queries and commits job rows.
+    Pipeline entry points perform the actual media work.
 """
 from __future__ import annotations
 
@@ -25,7 +32,17 @@ from app.services.pipeline import (
 
 
 class JobRegistry:
-    """Track process-local asyncio tasks and their cancellation events."""
+    """Track process-local tasks and their cooperative cancellation events.
+
+    Attributes:
+        _tasks: Live ``job_id -> asyncio.Task`` mapping.
+        _cancel_flags: Live ``job_id -> asyncio.Event`` mapping checked by
+            pipeline callbacks.
+
+    The registry is not a durable queue.  Durable ``GenerationJob`` rows retain
+    state, but tasks disappear when the process exits.
+
+    """
 
     def __init__(self) -> None:
         """Create empty task and cancellation registries."""
@@ -37,7 +54,22 @@ class JobRegistry:
         job_id: int,
         coro_factory: Callable[[], Awaitable[Any]],
     ) -> asyncio.Task:
-        """Start a job task that owns status commits and final cleanup."""
+        """Start a task that owns status commits and cleanup.
+
+        Args:
+            job_id: Persisted generation-job primary key.
+            coro_factory: Callable receiving a cancellation predicate and
+                returning the pipeline coroutine to await.
+
+        Returns:
+            The newly scheduled ``asyncio.Task``.
+
+        Side Effects:
+            Adds live task/cancellation entries, marks the job running, awaits
+            the pipeline, commits completed/failed/cancelled state, closes its
+            private session, and removes registry entries.
+
+        """
         cancel = asyncio.Event()
         self._cancel_flags[job_id] = cancel
 
@@ -82,7 +114,20 @@ class JobRegistry:
         return task
 
     def request_cancel(self, job_id: int) -> bool:
-        """Signal a live task or mark a not-yet-running job for cancellation."""
+        """Signal a live task or persist cancellation for a pending job.
+
+        Args:
+            job_id: Job primary key to cancel.
+
+        Returns:
+            ``True`` when a live event was signaled or a row was found and
+            marked; ``False`` when no such job exists.
+
+        Side Effects:
+            Sets an in-memory event for live tasks, or commits the durable
+            ``cancel_requested`` flag for jobs not currently tracked here.
+
+        """
         ev = self._cancel_flags.get(job_id)
         if ev is not None:
             ev.set()
@@ -104,23 +149,53 @@ class JobRegistry:
             db.close()
 
     def is_running(self, job_id: int) -> bool:
-        """Return whether this process currently tracks the job's task."""
+        """Return whether this process currently tracks a live task.
+
+        Args:
+            job_id: Job primary key.
+
+        Returns:
+            ``True`` only while ``submit`` has a task in ``_tasks``.
+
+        """
         return job_id in self._tasks
 
     def _is_cancel_requested(self, job_id: int, db) -> bool:
-        """Read the durable cancellation flag for a job."""
+        """Read the durable cancellation flag for a job.
+
+        Args:
+            job_id: Job primary key.
+            db: Session owned by the running task.
+
+        Returns:
+            Boolean value of the row's ``cancel_requested`` field, or ``False``
+            when the row no longer exists.
+
+        """
         job = db.execute(
             select(GenerationJob).where(GenerationJob.id == job_id)
         ).scalar_one_or_none()
         return bool(job and job.cancel_requested)
 
 
-# Process-wide singleton.
+# Process-wide singleton used by route handlers to signal live tasks.
 job_registry = JobRegistry()
 
 
 async def enqueue_full_pipeline(project_id: int) -> GenerationJob:
-    """Create and submit a full split-to-MP4 generation job."""
+    """Create and submit a full split-to-MP4 generation job.
+
+    Args:
+        project_id: Existing project database identifier.
+
+    Returns:
+        Newly committed pending ``GenerationJob`` row.
+
+    Side Effects:
+        Inserts a job row, schedules ``run_full_pipeline``, and closes the
+        enqueueing session.  The returned ORM object is detached afterward.
+
+    """
     factory = get_session_factory()
     db = factory()
     try:
@@ -142,7 +217,19 @@ async def enqueue_full_pipeline(project_id: int) -> GenerationJob:
 
 
 async def enqueue_rerender(project_id: int) -> GenerationJob:
-    """Create and submit a render-only project job."""
+    """Create and submit a render-only project job.
+
+    Args:
+        project_id: Existing project database identifier.
+
+    Returns:
+        Newly committed pending rerender job.
+
+    Side Effects:
+        Inserts the job and schedules ``rerender_project`` in the process-local
+        registry.
+
+    """
     factory = get_session_factory()
     db = factory()
     try:
@@ -161,7 +248,16 @@ async def enqueue_rerender(project_id: int) -> GenerationJob:
 
 
 async def enqueue_block_visual_rerun(project_id: int, block_index: int) -> GenerationJob:
-    """Create and submit a one-block visual regeneration job."""
+    """Create and submit a one-block visual regeneration job.
+
+    Args:
+        project_id: Owning project identifier.
+        block_index: Zero-based block index.
+
+    Returns:
+        Newly committed pending job whose current stage identifies the block.
+
+    """
     factory = get_session_factory()
     db = factory()
     try:
@@ -182,7 +278,16 @@ async def enqueue_block_visual_rerun(project_id: int, block_index: int) -> Gener
 
 
 async def enqueue_block_audio_rerun(project_id: int, block_index: int) -> GenerationJob:
-    """Create and submit a one-block audio regeneration job."""
+    """Create and submit a one-block audio regeneration job.
+
+    Args:
+        project_id: Owning project identifier.
+        block_index: Zero-based block index.
+
+    Returns:
+        Newly committed pending job whose current stage identifies the block.
+
+    """
     factory = get_session_factory()
     db = factory()
     try:

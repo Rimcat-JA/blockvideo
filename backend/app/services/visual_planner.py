@@ -1,4 +1,4 @@
-"""Visual plan generation.
+"""LLM visual-plan selection and server-side normalization.
 
 The planner decides, per block, what should be on screen. The important
 judgement it makes is *which* visual form fits the narration:
@@ -12,6 +12,13 @@ judgement it makes is *which* visual form fits the narration:
   and was a recurring failure mode, so both the prompt and a server-side
   guard steer it back to a slide.
 - Only genuine process/branch flows stay as Mermaid ``diagram``.
+
+Imports:
+    ``json`` parses/serializes provider payloads.
+    ``re`` detects authored fences and code-like text.
+    ``unicodedata`` measures authored slide alignment.
+    Pydantic validates normalized plans.
+    Provider/model/schema modules define the LLM boundary and allowed values.
 """
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from app.providers.llm import LLMProvider, LLMRequest, LLMMessage
 from app.services.stage_schemas import GlobalVisualStylePayload, VisualPlan, VisualPlanPayload
 
 
+# Shared system prompt for global style, visual choice, and structured diagrams.
 VISUAL_PLAN_SYSTEM = (
     "あなたは日本語の計算機科学教材（SICP系）の映像ディレクター兼作図者です。"
     "ナレーション1ブロックに対して、理解を最も助ける画面を1つだけ設計し、"
@@ -46,6 +54,7 @@ _SLOT_SCHEMA = {
     "additionalProperties": False,
 }
 
+# JSON schema for the second-pass structured pointer-diagram request.
 POINTER_DIAGRAM_SCHEMA = {
     "type": ["object", "null"],
     "properties": {
@@ -95,6 +104,7 @@ POINTER_DIAGRAM_SCHEMA = {
 # Anthropic's structured outputs reject any 'object' that does not set
 # additionalProperties explicitly to false, so the comparison panels need a
 # declared shape rather than a bare {"type": "object"}.
+# Strict comparison-panel shape required by constrained-output providers.
 PANEL_SCHEMA = {
     "type": ["object", "null"],
     "properties": {
@@ -105,6 +115,7 @@ PANEL_SCHEMA = {
     "additionalProperties": False,
 }
 
+# JSON schema for the second-pass structured environment-diagram request.
 ENV_DIAGRAM_SCHEMA = {
     "type": ["object", "null"],
     "properties": {
@@ -159,7 +170,20 @@ ENV_DIAGRAM_SCHEMA = {
 async def generate_global_style(
     provider: LLMProvider, *, project_title: str
 ) -> str:
-    """Ask the LLM for one style description shared by all project blocks."""
+    """Ask the LLM for one style description shared by project blocks.
+
+    Args:
+        provider: LLM implementation used for the planning request.
+        project_title: Title included as context for the style prompt.
+
+    Returns:
+        Validated style string suitable for subsequent block prompts.
+
+    Raises:
+        ProviderError/ValidationError: If the provider fails or returns a
+            malformed/too-short style payload.
+
+    """
     request = LLMRequest(
         messages=[
             LLMMessage(role="system", content=VISUAL_PLAN_SYSTEM),
@@ -195,7 +219,20 @@ async def generate_global_style(
 
 
 async def generate_title(provider: LLMProvider, *, script: str) -> str:
-    """Derive a short video title from the script (Quick Generate flow)."""
+    """Derive a short video title from the script for quick creation.
+
+    Args:
+        provider: LLM implementation used for the title request.
+        script: Source script; only its first 3000 characters are sent.
+
+    Returns:
+        A non-empty title truncated to 255 characters.
+
+    Raises:
+        RuntimeError: If the provider returns an empty title.
+        ProviderError/JSON errors: If the upstream request or response fails.
+
+    """
     excerpt = script.strip()[:3000]
     request = LLMRequest(
         messages=[
@@ -242,7 +279,7 @@ _CODE_MARKERS = re.compile(
 
 
 def _looks_like_code(text: str) -> bool:
-    """Return whether a 'diagram' body is really a code listing.
+    """Return whether a ``diagram`` body is really a code listing.
 
     Mermaid sources always start with a graph directive; anything that opens
     with S-expressions or statements is code the model mislabelled.
@@ -259,13 +296,22 @@ def _looks_like_code(text: str) -> bool:
 
 
 def _normalize_plan_payload(data: object) -> object:
-    """Repair the two shapes models reach for instead of the schema.
+    """Repair two common model payload shapes before Pydantic validation.
 
     ``diagram`` is the Mermaid *source string*; the structured pointer/env
     specs come from a separate call. Models that pick ``pointer_diagram``
     frequently write the spec object straight into ``diagram`` — or hang it
     off the top level next to ``plan`` — which fails validation and costs the
     block its visual. Both are unambiguous, so move them rather than retry.
+
+    Args:
+        data: Raw provider-decoded JSON object.
+
+    Returns:
+        The original non-mapping payload, or a normalized ``{"plan": ...}``
+        mapping for recognized misplaced structured fields.  The mapping may
+        be mutated in place when it is a dictionary.
+
     """
     if not isinstance(data, dict):
         return data
@@ -300,7 +346,7 @@ _SLIDE_FENCE_RX = re.compile(r"```slide[ \t]*([^\n]*)\n([\s\S]*?)```")
 
 
 def extract_authored_slide(source_text: str) -> tuple[str, str] | None:
-    """Return ``(heading, body)`` for a slide the script author drew, if any.
+    """Return ``(heading, body)`` for an author-drawn slide fence, if any.
 
     A block carrying one of these needs no visual planning: the author has
     already said exactly what the slide shows, so the model is not asked to
@@ -324,7 +370,7 @@ def _cell_width(line: str) -> int:
 
 
 def slide_alignment_issues(body: str) -> list[str]:
-    """Lines whose box does not close where its border says it should.
+    """Return lines whose box width differs from its matched border.
 
     Models write ``│ table │`` under a ``┌───────────┐`` and miscount the
     padding, so the right-hand wall lands inside the box. The renderer is
@@ -353,7 +399,16 @@ def slide_alignment_issues(body: str) -> list[str]:
 
 
 def authored_plan(heading: str, body: str) -> VisualPlan:
-    """Build an author-drawn slide plan locally without an LLM call."""
+    """Build an author-drawn plan locally without an LLM call.
+
+    Args:
+        heading: Optional authored slide heading.
+        body: Exact authored slide body.
+
+    Returns:
+        ``VisualPlan`` using the ``verbatim_slide`` renderer.
+
+    """
     return VisualPlan(
         visual_type=VisualType.verbatim_slide,
         heading=heading or None,
@@ -362,7 +417,7 @@ def authored_plan(heading: str, body: str) -> VisualPlan:
 
 
 def extract_code_block(source_text: str) -> tuple[str, str] | None:
-    """Return ``(code, language)`` for the first real code fence, if any.
+    """Return the first code-like fence as ``(body, language)``, if any.
 
     Fences holding hand-drawn ASCII diagrams (```` ```text ```` with box
     characters) are not code and must not become code slides — those belong
@@ -379,7 +434,7 @@ def extract_code_block(source_text: str) -> tuple[str, str] | None:
 
 
 def extract_all_fences(source_text: str) -> list[tuple[str, str]]:
-    """Every fenced block in document order, as ``(body, language)``.
+    """Return every non-empty fenced block in document order.
 
     Includes hand-drawn ``text`` fences: they were drawn to be looked at, and
     a monospaced slide is a faithful way to show them. Used to build the
@@ -398,12 +453,22 @@ def extract_all_fences(source_text: str) -> list[tuple[str, str]]:
 def build_slide_sequence(
     plan_payload: dict, source_text: str, *, max_slides: int = 6
 ) -> list[dict]:
-    """Plans for every slide a block should show, in order.
+    """Build the ordered slide sequence shown for one block.
 
     The planner describes the block's narration with one visual; the script
     may additionally contain listings and diagrams that deserve screen time.
     This pairs the planner's choice with the leftover fences without spending
     another LLM call on each.
+
+    Args:
+        plan_payload: Primary visual plan mapping.
+        source_text: Original block text containing optional extra fences.
+        max_slides: Maximum number of images to retain.
+
+    Returns:
+        A list beginning with the primary plan and optionally followed by
+        distinct code-fence plans, capped at ``max_slides``.
+
     """
     primary = dict(plan_payload or {})
     sequence = [primary]
@@ -434,7 +499,17 @@ def build_slide_sequence(
 def _enforce_visual_type(
     plan: VisualPlan, *, block_index: int, source_text: str = ""
 ) -> VisualPlan:
-    """Server-side guard for the choices models most often get wrong."""
+    """Apply server-side guards to a model-selected visual plan.
+
+    Args:
+        plan: Validated model plan to normalize in place.
+        block_index: Index used for diagnostic logs.
+        source_text: Original block text used to detect code fences.
+
+    Returns:
+        The same plan object after code/structured-spec downgrades or fixes.
+
+    """
     vt = plan.visual_type.value
     if vt == VisualType.verbatim_slide.value:
         return plan  # authored, not chosen — nothing to second-guess
@@ -562,12 +637,26 @@ async def _design_diagram(
     source_text: str,
     heading: str,
 ) -> dict | None:
-    """Second planning call: design one structured diagram.
+    """Run the second planning call for one structured diagram.
 
     Kept separate from the visual-type choice because Anthropic's constrained
     decoding rejects the combined schema outright ("the compiled grammar is
     too large"). Splitting also lets the diagram prompt be specific instead of
     one clause inside a menu, which measurably improves the layouts.
+
+    Args:
+        provider: LLM implementation used for the diagram request.
+        kind: ``pointer_diagram`` or ``env_diagram``.
+        schema: JSON schema for the chosen structured diagram.
+        block_index: Diagnostic block index.
+        tts_text: Narration context for the model.
+        source_text: Original source context for the model.
+        heading: Previously selected visual heading.
+
+    Returns:
+        Decoded diagram mapping after at most two attempts, or ``None`` when
+        both attempts fail.  The caller downgrades missing specs safely.
+
     """
     # The spec is nullable at the top level for the combined schema; here it
     # is the whole response, so require the object.
@@ -617,7 +706,23 @@ async def generate_visual_plan(
     source_text: str,
     global_style: str,
 ) -> VisualPlan:
-    """Choose the visual for one block, then design it if it is a diagram."""
+    """Choose and validate one block visual, then design structured diagrams.
+
+    Args:
+        provider: LLM implementation used for one or two planning requests.
+        block_index: Stable block number included in prompts/logs.
+        tts_text: Narration shown to the planner.
+        source_text: Original source used for code/authored-slide guards.
+        global_style: Project-wide style description.
+
+    Returns:
+        A validated and server-normalized ``VisualPlan``.
+
+    Raises:
+        RuntimeError: If both primary plan validation attempts fail.
+        ProviderError/JSON errors: If the provider request cannot be completed.
+
+    """
     schema = {
         "type": "object",
         "properties": {
