@@ -1,0 +1,5 @@
+{
+  "comment": "Optional. Point executablePath at an installed Chrome/Edge to avoid puppeteer downloading its own Chromium. Leave commented/blank to use puppeteer's bundled Chromium (the npm install will download it).",
+  "executablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "args": ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+}

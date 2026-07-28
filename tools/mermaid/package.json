@@ -1,0 +1,9 @@
+{
+  "name": "blockvideo-mermaid-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mermaid CLI (mmdc) used by BlockVideo to render diagram blocks. Optional: when absent, the app falls back to the built-in PIL diagram renderer.",
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.0"
+  }
+}

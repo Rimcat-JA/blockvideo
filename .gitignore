@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+.pnpm-store/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+
+# Project artifacts (never commit). Generated media all lands under storage/,
+# so the extension rules are scoped there rather than globally — docs/ needs to
+# carry example screenshots.
+storage/
+tools/mermaid/node_modules/
+**/*.mp4
+**/*.wav
+**/*.ass
+**/*.log
+!docs/**
+
+# Secrets
+.env
+.env.local
+.env.*.local
+# Personal helper that reads local key files — not for distribution.
+scripts/run_blvd.py
+*.tsbuildinfo

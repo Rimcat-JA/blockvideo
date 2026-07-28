@@ -1,0 +1,7 @@
+おはようございます。今日はCompose Multiplatformの基本について紹介します。
+Compose Multiplatformを使うと、KotlinだけでデスクトップやiOS、AndroidのUIを作ることができます。
+従来のViewやSwiftUIと比較すると、コードの量と学習コストを大幅に下げられます。
+プロジェクトを作るには、まず共通モジュールに依存を追加します。
+依存を追加したら、共通Composable関数を一つ書いてみます。
+ビルドツールはGradleを使い、共通コードはcommonMainに配置します。
+ここまでで、画面表示までの最小構成が完成します。
