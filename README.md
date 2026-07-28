@@ -312,5 +312,5 @@ VOICEVOX で合成した音声を公開する場合は、各キャラクター�
 
 ## About Contributors
 
-- [Karin](https://github.com/Rimcat-JA): Project Manager
-- [Thérèse](https://github.com/FidesTherese): Main Developer
+- [Karin](https://github.com/Rimcat-JA): Project Manager + Developer
+- [Thérèse](https://github.com/FidesTherese): Developer
