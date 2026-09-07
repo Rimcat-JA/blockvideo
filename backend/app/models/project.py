@@ -13,7 +13,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Enum, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -105,6 +105,21 @@ class Project(Base):
     subtitle_outline_color: Mapped[str] = mapped_column(default="#000000", nullable=False)
     subtitle_background: Mapped[bool] = mapped_column(default=True, nullable=False)
     subtitle_max_chars_per_line: Mapped[int] = mapped_column(default=36, nullable=False)
+
+    # New projects use the quality preset. Server defaults deliberately preserve
+    # previous behavior when these columns are added to an existing database.
+    visual_focus_enabled: Mapped[bool] = mapped_column(
+        default=True, nullable=False, server_default=text("0")
+    )
+    subtitle_mode: Mapped[str] = mapped_column(
+        String(16), default="sentence", nullable=False, server_default=text("'packed'")
+    )
+    narration_pacing_mode: Mapped[str] = mapped_column(
+        String(16), default="adaptive", nullable=False, server_default=text("'fixed'")
+    )
+    pronunciation_overrides: Mapped[list[dict]] = mapped_column(
+        JSON, default=list, nullable=False, server_default=text("'[]'")
+    )
 
     # Pacing. The silence held at each 。 — VOICEVOX's own gap is about 0.4s,
     # which reads as rushed. Lives on the project rather than in server config

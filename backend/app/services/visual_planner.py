@@ -381,8 +381,8 @@ def slide_alignment_issues(body: str) -> list[str]:
     """
     lines = (body or "").splitlines()
     borders = [
-        i for i, l in enumerate(lines)
-        if any(c in _BORDER_CHARS for c in l) and "─" in l
+        i for i, line in enumerate(lines)
+        if any(c in _BORDER_CHARS for c in line) and "─" in line
     ]
     issues: list[str] = []
     for top, bottom in zip(borders, borders[1:]):

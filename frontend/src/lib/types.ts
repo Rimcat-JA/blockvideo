@@ -13,6 +13,19 @@ export type ProjectStatus =
 /** Per-stage block status values. */
 export type BlockStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 
+export interface PronunciationOverride {
+  surface: string;
+  reading: string;
+  accent: number | null;
+}
+
+export interface OutputQualitySettings {
+  visual_focus_enabled: boolean;
+  subtitle_mode: 'sentence' | 'packed';
+  narration_pacing_mode: 'adaptive' | 'fixed';
+  pronunciation_overrides: PronunciationOverride[];
+}
+
 /** Visual renderer values returned by the backend planner. */
 export type VisualType =
   | 'ai_image'
@@ -38,7 +51,7 @@ export interface ProjectSummary {
 }
 
 /** Full project state returned by the detail and quick-create endpoints. */
-export interface ProjectDetail extends ProjectSummary {
+export interface ProjectDetail extends ProjectSummary, OutputQualitySettings {
   source_script: string;
   global_visual_style: string | null;
   voicevox_url: string;
@@ -57,6 +70,8 @@ export interface ProjectDetail extends ProjectSummary {
   pre_margin_seconds: number;
   post_margin_seconds: number;
   min_display_seconds: number;
+  narration_sentence_pause_seconds: number;
+  max_slides_per_block: number;
   use_fake_providers: boolean;
   output_subtitle_path: string | null;
 }
@@ -98,7 +113,7 @@ export interface JobSummary {
 }
 
 /** Full form payload for the detailed project-creation screen. */
-export interface CreateProjectInput {
+export interface CreateProjectInput extends OutputQualitySettings {
   title: string;
   source_script: string;
   voicevox_url: string;
@@ -117,6 +132,8 @@ export interface CreateProjectInput {
   pre_margin_seconds: number;
   post_margin_seconds: number;
   min_display_seconds: number;
+  narration_sentence_pause_seconds: number;
+  max_slides_per_block: number;
   use_fake_providers: boolean;
   providers: {
     llm_api_key?: string;
@@ -141,7 +158,7 @@ export interface SpeakersEnvelope {
   speakers: SpeakerInfo[];
 }
 /** Minimal quick-create payload; omitted pacing values use server defaults. */
-export interface QuickCreateInput {
+export interface QuickCreateInput extends Partial<OutputQualitySettings> {
   source_script: string;
   title?: string;
   voicevox_url?: string;

@@ -1,6 +1,5 @@
 /** Detailed block card with artifacts, stage state, and regeneration actions. */
 import { useRegenerateBlockAudio, useRegenerateBlockVisual, useRerender } from '@/api/hooks';
-import { api } from '@/api/client';
 import type { BlockSummary } from '@/lib/types';
 import { StatusBadge } from './StatusBadge';
 

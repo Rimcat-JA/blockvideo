@@ -167,6 +167,27 @@ class VoicevoxClient:
             )
         return r.json()
 
+    async def mora_data(
+        self, accent_phrases: list[dict[str, Any]], speaker_id: int
+    ) -> list[dict[str, Any]]:
+        """Recalculate mora duration and pitch after project-local accent edits."""
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/mora_data",
+                params={"speaker": speaker_id},
+                json=accent_phrases,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError("VOICEVOXアクセント調整に失敗しました", safe=True, original=exc) from exc
+        if response.status_code >= 400:
+            raise ProviderError(
+                f"VOICEVOXアクセント調整失敗 (status {response.status_code})", safe=True
+            )
+        result = response.json()
+        if not isinstance(result, list) or len(result) != len(accent_phrases):
+            raise ProviderError("VOICEVOXアクセント調整の応答が不正です", safe=True)
+        return result
+
     async def synthesis(self, query: dict[str, Any], speaker_id: int) -> bytes:
         """Synthesize a prepared query and return WAV response bytes.
 

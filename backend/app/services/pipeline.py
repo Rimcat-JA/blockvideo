@@ -26,11 +26,12 @@ from app.core.logging import log
 from app.models.block import Block, BlockStatus, VisualType
 from app.models.project import Project, ProjectStatus
 from app.providers.voicevox import VoicevoxSettings
-from app.services import ffmpeg_runner, image_renderer, subtitles
+from app.services import ffmpeg_runner, image_renderer, subtitles, presentation
 from app.services.hashing import short_hash
 from app.services.paths import (
     block_audio_path,
     block_image_path,
+    block_focus_dir,
     block_narration_path,
     block_subtitle_path,
     block_video_path,
@@ -104,6 +105,15 @@ class StageContext:
         """
         if self.progress_cb:
             await self.progress_cb(stage, progress, message)
+
+
+@dataclass
+class RenderContext:
+    """Local rendering needs persisted media and settings, without API clients."""
+
+    project: Project
+    settings: Settings
+    is_cancelled: Callable[[], bool] = lambda: False
 
 
 async def ensure_global_style(ctx: StageContext, db: Session) -> str:
@@ -184,6 +194,13 @@ async def run_split_stage(ctx: StageContext, db: Session) -> list[Block]:
             )
             db.add(block)
         else:
+            if block.source_text != sb.source_text:
+                block.status_visual_plan = BlockStatus.pending
+                block.status_image = BlockStatus.pending
+                block.status_render = BlockStatus.pending
+            if block.tts_text != sb.tts_text:
+                block.status_audio = BlockStatus.pending
+                block.status_render = BlockStatus.pending
             block.source_text = sb.source_text
             block.tts_text = sb.tts_text
         block.status_split = (
@@ -294,8 +311,7 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
         plan = outcome
         block.visual_type = VisualType(plan.visual_type.value)
         block.visual_plan_json = plan.model_dump()
-        if plan.visual_type == VisualType.ai_image:
-            block.image_prompt = plan.image_prompt
+        block.image_prompt = plan.image_prompt if plan.visual_type == VisualType.ai_image else None
         block.content_hash = short_hash(
             block.source_text,
             block.tts_text,
@@ -412,6 +428,7 @@ async def _render_block_image(
                 )
         block.image_path = relpath_for_db(output)
         block.status_image = BlockStatus.completed
+        block.status_render = BlockStatus.pending
         block.error_message = None
         db.commit()
     except Exception as exc:
@@ -471,6 +488,9 @@ async def _render_block_audio(
             client=ctx.bundle.voicevox,
             sentence_pause_seconds=ctx.project.narration_sentence_pause_seconds,
             plan_concurrency=ctx.settings.narration_query_concurrency,
+            pacing_mode=ctx.project.narration_pacing_mode,
+            pronunciation_overrides=ctx.project.pronunciation_overrides,
+            focus_terms=_narration_focus_terms(block),
         )
         # Sentence timings are what the render stage times captions and slide
         # changes against, and rerender runs long after this — persist them.
@@ -488,6 +508,7 @@ async def _render_block_audio(
             min_seconds=ctx.project.min_display_seconds,
         )
         block.status_audio = BlockStatus.completed
+        block.status_render = BlockStatus.pending
         db.commit()
     except Exception as exc:
         block.status_audio = BlockStatus.failed
@@ -496,7 +517,15 @@ async def _render_block_audio(
         raise
 
 
-async def run_render_stage(ctx: StageContext, db: Session) -> Path:
+def _narration_focus_terms(block: Block) -> list[tuple[str, ...]]:
+    """Match visible labels per sentence for adaptive pauses and emphasis."""
+    from app.services.visual_focus import focus_terms
+
+    return [focus_terms(block.visual_plan_json or {}, piece.text)
+            for piece in narration.split_sentences_with_offsets(block.tts_text)]
+
+
+async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Path:
     """Encode blocks, concatenate the project video, and write metadata.
 
     Args:
@@ -522,18 +551,32 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
     blocks = sorted(ctx.project.blocks, key=lambda b: b.index)
     if not blocks:
         raise RuntimeError("レンダリング対象のブロックがありません")
+    # Validate every block before replacing even the first block MP4. Existing
+    # paths may still point to the last successful media after settings changed.
+    from app.services.invalidation import stale_media_message
+
+    stale = stale_media_message(blocks)
+    if stale:
+        raise RuntimeError(stale)
 
     # Render per-block videos if any are missing.
     settings = ctx.settings
     storage_root = settings.storage_root.resolve()
     per_block_videos: list[Path] = []
     cues: list[subtitles.SubtitleCue] = []
+    external_font_size = ctx.project.subtitle_font_size
     timeline: list[dict[str, Any]] = []
     cursor_ms = 0
     for block in blocks:
         if ctx.is_cancelled():
             break
         db.refresh(block)
+        if block.duration_ms:
+            block.display_duration_ms = compute_display_duration_ms(
+                block.duration_ms, pre_seconds=ctx.project.pre_margin_seconds,
+                post_seconds=ctx.project.post_margin_seconds,
+                min_seconds=ctx.project.min_display_seconds,
+            )
         if not block.image_path or not block.audio_path or not block.display_duration_ms:
             raise RuntimeError(
                 f"ブロック {block.index} の素材が揃っていません "
@@ -547,7 +590,7 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
                 f"(image={image}, audio={audio})"
             )
         output = block_video_path(ctx.project.id, block.index)
-        if not output.exists():
+        if not output.exists() or block.status_render != BlockStatus.completed:
             # Per-block burn-in subtitle (.ass with start=0). Subtitles land
             # in the lower band so they never overlap the slide.
             spans = narration.read_spans(
@@ -581,11 +624,23 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
                 boundaries_ms=sorted(set(boundaries)),
                 max_slides=ctx.project.max_slides_per_block,
             )
+            if ctx.project.visual_focus_enabled and len(slides) == 1:
+                slide_height = settings.output_height
+                if ctx.project.subtitle_enabled:
+                    slide_height = max(120, slide_height - settings.subtitle_band_height)
+                slides = presentation.focus_slides(
+                    plan=block.visual_plan_json or {}, text=block.tts_text,
+                    measured=spans, audio_ms=block.duration_ms or 0,
+                    display_ms=block.display_duration_ms, primary=image,
+                    directory=block_focus_dir(ctx.project.id, block.index),
+                    width=settings.output_width, height=slide_height,
+                )
+            candidate = output.with_name("video.pending.mp4")
             args = ffmpeg_runner.build_block_video_args(
                 slides=slides,
                 audio=audio,
                 duration_ms=block.display_duration_ms,
-                output=output,
+                output=candidate,
                 ffmpeg=settings.ffmpeg_path or "ffmpeg",
                 width=settings.output_width,
                 height=settings.output_height,
@@ -599,24 +654,29 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
                 args,
                 log_path=project_dir(ctx.project.id) / "logs" / f"block_{block.index:04d}.log",
             )
+            candidate.replace(output)
             block.video_path = relpath_for_db(output)
             db.commit()
         per_block_videos.append(output)
         # timeline / subtitle cues (whole-project .ass uses tts_text)
         start = cursor_ms
         end = cursor_ms + (block.duration_ms or 0)
-        cues.append(
-            subtitles.SubtitleCue(
-                start_ms=start,
-                end_ms=end,
-                text=block.tts_text,
-            )
+        block_cues, block_font_size = _make_block_cues(
+            text=block.tts_text, duration_ms=block.duration_ms or 0,
+            settings=settings, project=ctx.project,
+            spans=narration.read_spans(block_narration_path(ctx.project.id, block.index)),
         )
+        external_font_size = min(external_font_size, block_font_size)
+        cues.extend(subtitles.SubtitleCue(
+            start_ms=start + cue.start_ms, end_ms=start + cue.end_ms,
+            text=cue.text, margin_v=cue.margin_v,
+        ) for cue in block_cues)
         timeline.append(
             {
                 "index": block.index,
                 "start_ms": start,
-                "end_ms": end,
+                "end_ms": start + block.display_duration_ms,
+                "audio_end_ms": end,
                 "duration_ms": block.duration_ms,
                 "display_duration_ms": block.display_duration_ms,
                 "image_path": block.image_path,
@@ -627,7 +687,7 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
                 "visual_type": block.visual_type.value if block.visual_type else None,
             }
         )
-        cursor_ms = end
+        cursor_ms += block.display_duration_ms
         block.status_render = BlockStatus.completed
         db.commit()
 
@@ -638,9 +698,10 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
     list_file = concat_list_path(ctx.project.id)
     ffmpeg_runner.write_concat_list(per_block_videos, list_file)
     final = output_video_path(ctx.project.id)
+    candidate_final = final.with_name("video.pending.mp4")
     args = ffmpeg_runner.build_concat_args(
         list_file=list_file,
-        output=final,
+        output=candidate_final,
         ffmpeg=settings.ffmpeg_path or "ffmpeg",
         crossfade_seconds=settings.crossfade_seconds,
     )
@@ -648,6 +709,7 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
         args,
         log_path=project_dir(ctx.project.id) / "logs" / "concat.log",
     )
+    candidate_final.replace(final)
     ctx.project.output_video_path = relpath_for_db(final)
 
     # subtitles (whole-project .ass for external players; absolute timeline)
@@ -658,7 +720,7 @@ async def run_render_stage(ctx: StageContext, db: Session) -> Path:
             ass_path,
             width=settings.output_width,
             height=settings.output_height,
-            font_size=ctx.project.subtitle_font_size,
+            font_size=external_font_size,
             position=ctx.project.subtitle_position,
             text_color=ctx.project.subtitle_text_color,
             outline_color=ctx.project.subtitle_outline_color,
@@ -783,6 +845,27 @@ def _block_slides(
     return slides
 
 
+def _make_block_cues(
+    *, text: str, duration_ms: int, settings: Settings, project: Project,
+    spans: list[narration.SentenceSpan] | None = None,
+) -> tuple[list[subtitles.SubtitleCue], int]:
+    """Share identical caption timing between burn-in and external subtitles."""
+    if getattr(project, "subtitle_mode", "packed") == "sentence":
+        return presentation.sentence_cues(
+            text, duration_ms=duration_ms, measured=spans or [],
+            band_height=settings.subtitle_band_height,
+            font_size=project.subtitle_font_size,
+            max_chars=project.subtitle_max_chars_per_line,
+        )
+    return subtitles.build_band_cues(
+        text, duration_ms=max(1, duration_ms),
+        band_height=settings.subtitle_band_height,
+        base_font_size=project.subtitle_font_size,
+        base_max_chars=project.subtitle_max_chars_per_line,
+        char_time=narration.char_time_fn(spans, total_ms=duration_ms) if spans else None,
+    )
+
+
 def _write_block_ass(
     ass_path: Path,
     *,
@@ -819,13 +902,9 @@ def _write_block_ass(
         Writes a per-block ASS file and may create its parent directory.
 
     """
-    cues, font_size = subtitles.build_band_cues(
-        text,
-        duration_ms=max(1, duration_ms),
-        band_height=settings.subtitle_band_height,
-        base_font_size=project.subtitle_font_size,
-        base_max_chars=project.subtitle_max_chars_per_line,
-        char_time=narration.char_time_fn(spans, total_ms=duration_ms) if spans else None,
+    cues, font_size = _make_block_cues(
+        text=text, duration_ms=duration_ms, settings=settings,
+        project=project, spans=spans,
     )
     if not cues:
         cues = [subtitles.SubtitleCue(start_ms=0, end_ms=max(1, duration_ms), text="")]
@@ -880,6 +959,12 @@ def _project_json_payload(project: Project, timeline: list[dict[str, Any]]) -> s
             "pitch_scale": project.voicevox_pitch_scale,
             "intonation_scale": project.voicevox_intonation_scale,
             "volume_scale": project.voicevox_volume_scale,
+        },
+        "presentation": {
+            "visual_focus_enabled": project.visual_focus_enabled,
+            "subtitle_mode": project.subtitle_mode,
+            "narration_pacing_mode": project.narration_pacing_mode,
+            "pronunciation_overrides": project.pronunciation_overrides,
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -1091,7 +1176,7 @@ async def rerun_block_audio(
 async def rerender_project(
     project_id: int, *, progress_cb: ProgressCallback | None = None
 ) -> None:
-    """Delete stale video artifacts and rebuild only the render stage.
+    """Rebuild local video output, keeping the last successful MP4 on failure.
 
     Args:
         project_id: Existing project identifier.
@@ -1102,8 +1187,8 @@ async def rerender_project(
             are unavailable.
 
     Side Effects:
-        Marks block render states pending, removes per-block/final MP4 files,
-        reruns concatenation/subtitle metadata, and marks the project complete.
+        Marks block render states pending and atomically replaces successful
+        outputs. No API keys or live synthesis providers are required.
 
     """
     from app.db import get_session_factory
@@ -1119,33 +1204,21 @@ async def rerender_project(
         # mark every block render as pending
         for b in project.blocks:
             b.status_render = BlockStatus.pending
-        # Remove block videos + final video to force re-render. ``video_path``
-        # is stored relative to the storage root (``projects/0007/...``), so it
-        # must be joined to that, not to the project directory — joining to the
-        # project dir produced a path that never existed, and the silent
-        # missing_ok unlink meant rerender only ever re-concatenated the stale
-        # block videos instead of rebuilding them.
-        storage_root = get_settings().storage_root
-        for b in project.blocks:
-            if not b.video_path:
-                continue
-            vp = (storage_root / b.video_path).resolve()
-            vp.unlink(missing_ok=True)
-        final = output_video_path(project_id)
-        if final.exists():
-            final.unlink(missing_ok=True)
-        project.output_video_path = None
+        project.status = ProjectStatus.rendering
+        project.error_message = None
         db.commit()
-        bundle = build_providers_for_project(project)
-        ctx = StageContext(
-            project=project,
-            settings=get_settings(),
-            bundle=bundle,
-            voicevox_settings=build_voicevox_settings(project),
-            progress_cb=progress_cb,
-        )
-        await run_render_stage(ctx, db)
-        project.status = ProjectStatus.completed
-        db.commit()
+        try:
+            if progress_cb:
+                await progress_cb("render", 0.0, None)
+            await run_render_stage(RenderContext(project, get_settings()), db)
+            project.status = ProjectStatus.completed
+            project.progress = 1.0
+            project.current_stage = "done"
+        except Exception as exc:
+            project.status = ProjectStatus.failed
+            project.error_message = f"{exc.__class__.__name__}: {str(exc)[:300]}"
+            raise
+        finally:
+            db.commit()
     finally:
         db.close()

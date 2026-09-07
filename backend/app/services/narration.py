@@ -30,12 +30,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from app.core.logging import log
 from app.providers.voicevox import VoicevoxClient, VoicevoxSettings
+from app.services.pronunciation import Pronunciation, normalize_overrides, pronunciation_query
 
 # Same enders the subtitle chunker breaks on, so cue boundaries and sentence
 # spans line up exactly instead of nearly.
@@ -47,7 +50,7 @@ class SentenceSpan:
     """One sentence located in both source text and synthesized audio.
 
     Attributes:
-        text: Exact sentence fragment used for the query.
+        text: Exact source sentence for captions, before speech-only replacements.
         char_start, char_end: Half-open character offsets in the block text.
         start_ms, end_ms: Predicted or rescaled audio interval in milliseconds.
 
@@ -118,6 +121,28 @@ class _Piece:
     char_end: int
 
 
+def _is_identifier_suffix(text: str, index: int) -> bool:
+    """Keep Scheme/Ruby-style ``insert!``/``empty?`` inside their sentence.
+
+    The identifier must continue directly into another identifier character or
+    a Japanese particle. A capitalized English exclamation such as ``Hello!``
+    keeps its ordinary boundary, including before a Japanese greeting.
+    """
+    if text[index] not in "!?" or index == 0 or index + 1 >= len(text):
+        return False
+    identifier = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", text[:index])
+    if identifier is None:
+        return False
+    next_text = text[index + 1:]
+    if re.match(r"[A-Za-z0-9_]", next_text):
+        return True
+    word = identifier.group()
+    if word[0].isupper() and not word.isupper():
+        return False
+    # Closing quotes are common around a function name: 「insert!」を使う。
+    return bool(re.match(r"[」』`\"')\]]*(?:[をがはにへとも]|で|から|まで)", next_text))
+
+
 def split_sentences_with_offsets(text: str) -> list[_Piece]:
     """Split *text* into sentences, keeping each one's character offsets.
 
@@ -136,7 +161,7 @@ def split_sentences_with_offsets(text: str) -> list[_Piece]:
     pieces: list[_Piece] = []
     start = 0
     for i, ch in enumerate(text):
-        if ch in SENTENCE_END_CHARS:
+        if ch in SENTENCE_END_CHARS and not _is_identifier_suffix(text, i):
             pieces.append(_Piece(text[start : i + 1], start, i + 1))
             start = i + 1
     if start < len(text):
@@ -193,6 +218,42 @@ def _breath_mora(seconds: float) -> dict[str, Any]:
     }
 
 
+def sentence_pause_for(
+    text: str,
+    *,
+    pacing_mode: str,
+    fixed_seconds: float,
+    next_text: str = "",
+    focus_terms: Sequence[str] = (),
+    next_focus_terms: Sequence[str] = (),
+) -> float:
+    """Choose a wall-clock reading hold after a sentence, before the next one.
+
+    Adaptive defaults are 0.6 s for explanation, 1.0 s for a visual change,
+    and 1.5 s for a dense sentence or an explicitly signposted key point.
+    Fixed mode retains the existing project setting exactly.
+    """
+    if pacing_mode == "fixed":
+        return max(0.0, fixed_seconds)
+    if pacing_mode != "adaptive":
+        raise ValueError(f"Unknown narration pacing mode: {pacing_mode}")
+    compact = re.sub(r"\s", "", text)
+    if (
+        len(compact) >= 60
+        or (len(compact) >= 30 and compact.count("、") >= 3)
+        or len(set(focus_terms)) >= 3
+        or any(marker in compact for marker in ("重要なのは", "ポイントは", "覚えて", "要点は", "まとめると"))
+    ):
+        return 1.5
+    if (
+        any(marker in compact for marker in ("図", "矢印", "注目", "見て", "切り替", "次に", "続いて"))
+        or next_text.lstrip().startswith(("次に", "続いて", "では、", "一方", "最後に"))
+        or (bool(focus_terms or next_focus_terms) and set(focus_terms) != set(next_focus_terms))
+    ):
+        return 1.0
+    return 0.6
+
+
 async def build_narration_plan(
     text: str,
     settings: VoicevoxSettings,
@@ -200,6 +261,9 @@ async def build_narration_plan(
     *,
     sentence_pause_seconds: float,
     concurrency: int = 4,
+    pacing_mode: str = "fixed",
+    pronunciation_overrides: Sequence[Mapping[str, Any] | Pronunciation] | None = None,
+    focus_terms: Sequence[Sequence[str]] | None = None,
 ) -> NarrationPlan | None:
     """Query VOICEVOX per sentence and assemble one query for the block.
 
@@ -207,8 +271,11 @@ async def build_narration_plan(
         text: Block narration text.
         settings: Speaker and query tuning values.
         client: Live VOICEVOX client; fake clients intentionally skip planning.
-        sentence_pause_seconds: Extra pause inserted between sentence queries.
+        sentence_pause_seconds: Wall-clock gap between sentences in fixed mode.
         concurrency: Maximum simultaneous audio-query requests.
+        pacing_mode: ``adaptive`` for sentence-specific holds, otherwise ``fixed``.
+        pronunciation_overrides: Project-local readings and optional accent indices.
+        focus_terms: Diagram focus labels for each source sentence, in order.
 
     Returns:
         A combined ``NarrationPlan`` or ``None`` when the plan cannot be built
@@ -220,9 +287,12 @@ async def build_narration_plan(
     module existed.
 
     """
-    body = (text or "").strip()
-    if not body:
+    body = text or ""
+    if not body.strip():
         return None
+    overrides = normalize_overrides(pronunciation_overrides)
+    if pacing_mode not in {"fixed", "adaptive"}:
+        raise ValueError(f"Unknown narration pacing mode: {pacing_mode}")
     if not isinstance(client, VoicevoxClient):
         # Fake client (tests, demo mode) has no audio_query.
         return None
@@ -235,7 +305,7 @@ async def build_narration_plan(
 
     async def query_one(piece: _Piece) -> dict[str, Any]:
         async with semaphore:
-            return await client.audio_query(piece.text, settings.speaker_id)
+            return await pronunciation_query(piece.text, settings.speaker_id, client, overrides)
 
     try:
         queries = await asyncio.gather(*(query_one(p) for p in pieces))
@@ -249,9 +319,13 @@ async def build_narration_plan(
     merged = copy.deepcopy(queries[0])
     client.apply_settings(merged, settings)
     speed = max(0.1, float(merged.get("speedScale") or 1.0))
-    # vowel_length is divided by speedScale at synthesis, so scale the breath
-    # up to keep the setting meaning wall-clock seconds.
-    breath = _breath_mora(max(0.0, sentence_pause_seconds) * speed)
+    # Newer engines expose global pause overrides. Clear them so per-sentence
+    # holds remain accurate and keep the value in wall-clock seconds at any speed.
+    merged["pauseLength"] = None
+    merged["pauseLengthScale"] = 1.0
+
+    def terms(index: int) -> Sequence[str]:
+        return focus_terms[index] if focus_terms and index < len(focus_terms) else ()
 
     phrases: list[dict[str, Any]] = []
     ranges: list[tuple[int, int]] = []
@@ -260,7 +334,15 @@ async def build_narration_plan(
         if own and i < len(queries) - 1:
             # A sentence queried on its own carries no trailing pause, so this
             # sets the gap rather than adding to one.
-            own[-1]["pause_mora"] = copy.deepcopy(breath)
+            pause_seconds = sentence_pause_for(
+                pieces[i].text,
+                pacing_mode=pacing_mode,
+                fixed_seconds=sentence_pause_seconds,
+                next_text=pieces[i + 1].text,
+                focus_terms=terms(i),
+                next_focus_terms=terms(i + 1),
+            )
+            own[-1]["pause_mora"] = _breath_mora(pause_seconds * speed)
         start = len(phrases)
         phrases.extend(own)
         ranges.append((start, len(phrases)))

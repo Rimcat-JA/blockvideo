@@ -6,6 +6,7 @@ import { ProgressBar } from '@/components/ProgressBar';
 import { StatusBadge } from '@/components/StatusBadge';
 import { DEFAULT_PACING, PacingSettings, type Pacing } from '@/components/PacingSettings';
 import { useLiveProject, useQuickCreate } from '@/api/hooks';
+import { qualitySettingsSchema } from '@/lib/validation';
 
 const STAGE_LABELS: Record<string, string> = {
   split: '台本を分割中',
@@ -32,9 +33,10 @@ export function QuickGeneratePage() {
 
   const running = projectId != null && project?.status !== 'completed' && project?.status !== 'failed';
   const done = project?.status === 'completed' && Boolean(project?.output_video_path);
+  const qualityValid = qualitySettingsSchema.safeParse(pacing).success;
 
   const start = () => {
-    if (!script.trim()) return;
+    if (!script.trim() || !qualityValid) return;
     quick.mutate(
       { source_script: script, ...pacing },
       { onSuccess: (res) => setProjectId(res.project.id) },
@@ -76,7 +78,7 @@ export function QuickGeneratePage() {
             <button
               className="btn-primary px-6 py-3 text-base disabled:cursor-not-allowed disabled:opacity-50"
               onClick={start}
-              disabled={!script.trim() || quick.isPending}
+              disabled={!script.trim() || !qualityValid || quick.isPending}
             >
               {quick.isPending ? '開始しています…' : '⚡ クイック生成'}
             </button>

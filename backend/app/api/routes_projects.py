@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.utils import validate_artifact_path
+from app.api.utils import ensure_project_idle, ensure_render_assets_ready, validate_artifact_path
 from app.core.logging import log
 from app.core.security import SecretBundle, secret_store
 from app.db import get_db
@@ -37,6 +37,7 @@ from app.schemas import (
     QuickCreateResponse,
 )
 from app.services.paths import ensure_project_layout, project_dir
+from app.services.invalidation import invalidate_project_settings
 from app.services.provider_factory import build_providers_for_project
 from app.services.visual_planner import generate_title
 from app.workers.job_runner import (
@@ -116,6 +117,10 @@ def _project_detail(project: Project) -> ProjectDetail:
         min_display_seconds=project.min_display_seconds,
         narration_sentence_pause_seconds=project.narration_sentence_pause_seconds,
         max_slides_per_block=project.max_slides_per_block,
+        visual_focus_enabled=project.visual_focus_enabled,
+        subtitle_mode=project.subtitle_mode,
+        narration_pacing_mode=project.narration_pacing_mode,
+        pronunciation_overrides=project.pronunciation_overrides,
         use_fake_providers=project.use_fake_providers,
         output_subtitle_path=project.output_subtitle_path,
     )
@@ -233,6 +238,10 @@ async def quick_create(
         voicevox_url=payload.voicevox_url,
         voicevox_speaker_id=payload.voicevox_speaker_id,
         use_fake_providers=payload.use_fake_providers,
+        visual_focus_enabled=payload.visual_focus_enabled,
+        subtitle_mode=payload.subtitle_mode,
+        narration_pacing_mode=payload.narration_pacing_mode,
+        pronunciation_overrides=[entry.model_dump() for entry in payload.pronunciation_overrides],
     )
     # Only the pacing the caller actually set; the rest keeps the model default.
     for field in (
@@ -307,6 +316,10 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         post_margin_seconds=payload.post_margin_seconds,
         narration_sentence_pause_seconds=payload.narration_sentence_pause_seconds,
         max_slides_per_block=payload.max_slides_per_block,
+        visual_focus_enabled=payload.visual_focus_enabled,
+        subtitle_mode=payload.subtitle_mode,
+        narration_pacing_mode=payload.narration_pacing_mode,
+        pronunciation_overrides=[entry.model_dump() for entry in payload.pronunciation_overrides],
         min_display_seconds=payload.min_display_seconds,
         use_fake_providers=payload.use_fake_providers,
     )
@@ -429,8 +442,12 @@ def patch_project(
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    ensure_project_idle(project_id, db)
+    updates = payload.model_dump(exclude_unset=True)
+    changed_fields = {field for field, value in updates.items() if getattr(project, field) != value}
+    for field, value in updates.items():
         setattr(project, field, value)
+    invalidate_project_settings(project, changed_fields)
     db.commit()
     db.refresh(project)
     return _project_detail(project)
@@ -502,6 +519,7 @@ async def generate_all(project_id: int, db: Session = Depends(get_db)) -> Genera
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
+    ensure_project_idle(project_id, db)
     ensure_project_layout(project_id)
     job = await enqueue_full_pipeline(project_id)
     # enqueue_* closes its own session; re-fetch from the request session.
@@ -563,6 +581,8 @@ async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAl
         raise HTTPException(status_code=404, detail="project not found")
     if not project.blocks:
         raise HTTPException(status_code=400, detail="まだブロックが生成されていません")
+    ensure_project_idle(project_id, db)
+    ensure_render_assets_ready(project)
     job = await enqueue_rerender(project_id)
     fresh = db.get(GenerationJob, job.id)
     summary_source = fresh if fresh is not None else job

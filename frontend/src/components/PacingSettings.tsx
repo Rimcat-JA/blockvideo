@@ -1,8 +1,11 @@
 /** Per-project narration, slide, subtitle, and speaker controls. */
 import { useSpeakers } from '@/api/hooks';
+import { QualitySettingsFields } from '@/components/QualitySettingsFields';
+import { DEFAULT_QUALITY } from '@/lib/validation';
+import type { OutputQualitySettings } from '@/lib/types';
 
 /** The tempo knobs a viewer actually feels, and their defaults. */
-export interface Pacing {
+export interface Pacing extends OutputQualitySettings {
   narration_sentence_pause_seconds: number;
   voicevox_speed_scale: number;
   post_margin_seconds: number;
@@ -12,6 +15,7 @@ export interface Pacing {
 }
 
 export const DEFAULT_PACING: Pacing = {
+  ...DEFAULT_QUALITY,
   narration_sentence_pause_seconds: 1.5,
   voicevox_speed_scale: 1.0,
   post_margin_seconds: 1.5,
@@ -83,7 +87,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
   const set = <K extends keyof Pacing>(key: K, next: Pacing[K]) =>
     onChange({ ...value, [key]: next });
   const isDefault = (Object.keys(DEFAULT_PACING) as Array<keyof Pacing>).every(
-    (k) => Math.abs(value[k] - DEFAULT_PACING[k]) < 1e-9,
+    (key) => JSON.stringify(value[key]) === JSON.stringify(DEFAULT_PACING[key]),
   );
 
   return (
@@ -96,13 +100,14 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
       </summary>
 
       <div className="space-y-5 border-t border-slate-100 px-4 py-4">
+        <QualitySettingsFields value={value} onChange={(quality) => onChange({ ...value, ...quality })} disabled={disabled} />
         <Slider
           label="文末の息継ぎ"
           hint="「。」ごとに置く間。長いほど落ち着いた印象になります（0 で VOICEVOX 標準の約0.4秒）。"
           value={value.narration_sentence_pause_seconds}
           min={0} max={3} step={0.1} unit="秒"
           fallback={DEFAULT_PACING.narration_sentence_pause_seconds}
-          disabled={disabled}
+          disabled={disabled || value.narration_pacing_mode !== 'fixed'}
           onChange={(v) => set('narration_sentence_pause_seconds', v)}
         />
         <Slider

@@ -25,12 +25,15 @@ from app.core.logging import log
 from app.models.block import VisualType
 from app.services.diagram_renderer import (
     BG as DIAGRAM_BG,
+    _composition_area,
     compose_on_canvas,
     render_env_diagram,
     render_pointer_diagram,
     render_verbatim_slide,
+    render_grid_content,
 )
 from app.services.mermaid_renderer import mmdc_available, render_mermaid_to_png_sync
+from app.services.visual_focus import literal_ranges, matching_terms
 
 
 @dataclass
@@ -114,6 +117,7 @@ def render_text_slide(
     bg_color: tuple[int, int, int] = (248, 250, 252),
     accent: tuple[int, int, int] = (15, 118, 110),
     fg: tuple[int, int, int] = (15, 23, 42),
+    focus_text: str | None = None,
 ) -> RenderResult:
     """Render a heading and wrapped explanatory body as a light slide.
 
@@ -122,7 +126,7 @@ def render_text_slide(
         width: Output width in pixels.
         height: Output height in pixels.
         heading: Main visible heading.
-        body: Explanatory text, limited to the first eight wrapped lines.
+        body: Explanatory text, fitted without dropping wrapped lines.
         bg_color: RGB background color before the shared fill.
         accent: RGB color for the accent bar.
         fg: RGB color for heading text.
@@ -131,25 +135,39 @@ def render_text_slide(
         ``RenderResult`` for the written PNG.
 
     """
-    img = Image.new("RGB", (width, height), color=bg_color)
-    draw = ImageDraw.Draw(img)
-    _fill_background(img, draw)
-    # accent bar
-    draw.rectangle([(80, 140), (260, 200)], fill=accent)
-    # heading
-    h_font = _pick_font(88)
-    h_lines = _wrap_lines(draw, heading or "", h_font, width - 320)
-    y = 220
-    for line in h_lines[:3]:
-        draw.text((80, y), line, fill=fg, font=h_font)
-        y += 110
-    # body
-    b_font = _pick_font(56)
-    b_lines = _wrap_lines(draw, body or "", b_font, width - 320)
-    yy = y + 30
-    for line in b_lines[:8]:
-        draw.text((120, yy), line, fill=(51, 65, 85), font=b_font)
-        yy += 80
+    _, _, area_w, area_h = _composition_area(width, height, heading, None)
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    body = body or ""
+    # Fit all body lines before drawing; the old fixed font/line cap silently
+    # lost content on dense slides and put text below short video canvases.
+    for size in range(72, 11, -2):
+        b_font = _pick_font(size)
+        b_lines = _wrap_lines(probe, body, b_font, area_w - 8)
+        pitch = max(size + 4, round(size * 1.5))
+        if pitch * len(b_lines) <= area_h:
+            break
+    content = Image.new("RGBA", (area_w, max(1, pitch * len(b_lines))), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(content)
+    terms = matching_terms(body, focus_text)
+    ranges = [span for term in terms for span in literal_ranges(body, term)]
+    source_pos = 0
+    for row, line in enumerate(b_lines):
+        # Wrapping preserves characters; retain source offsets so a matching
+        # label that crosses a wrap is highlighted on both display lines.
+        start = body.find(line, source_pos) if line else source_pos
+        start = max(source_pos, start)
+        end = start + len(line)
+        y = row * pitch
+        for first, last in ranges:
+            a, b = max(first, start), min(last, end)
+            if a < b:
+                left = 4 + draw.textlength(line[:a - start], font=b_font)
+                right = 4 + draw.textlength(line[:b - start], font=b_font)
+                draw.rectangle((left, y, right, y + pitch - 1), fill=(204, 233, 233))
+        draw.text((4, y + max(1, size // 8)), line, fill=fg, font=b_font, anchor="lt")
+        source_pos = end
+    img = compose_on_canvas(content, width=width, height=height, title=heading,
+                            background=bg_color, title_color=accent)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, format="PNG")
     return RenderResult(output_path=output_path, width=width, height=height)
@@ -282,6 +300,7 @@ def render_code_slide(
     heading: str,
     code: str,
     language: str = "text",
+    focus_text: str | None = None,
 ) -> RenderResult:
     """Render syntax-neutral code with line numbers and a language tag.
 
@@ -290,72 +309,25 @@ def render_code_slide(
         width: Output width in pixels.
         height: Output height in pixels.
         heading: Visible code-slide heading.
-        code: Source text to display; long output is clipped to the canvas.
+        code: Source text to display; fitted as one grid without clipping.
         language: Optional uppercase language badge.
 
     Returns:
         ``RenderResult`` for the written PNG.
 
     """
-    img = Image.new("RGB", (width, height), color=(15, 23, 42))
-    draw = ImageDraw.Draw(img)
-    # heading
-    hfont = _pick_font(64)
-    draw.text((80, 60), heading or "コード", fill=(226, 232, 240), font=hfont)
-    # language tag
-    if language:
-        tag = f"  {language.upper()}  "
-        lfont = _pick_font(36)
-        bbox = draw.textbbox((0, 0), tag, font=lfont)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        draw.rectangle(
-            [(width - tw - 80 - 30, 60), (width - 80, 60 + th + 24)],
-            fill=(15, 118, 110),
-        )
-        draw.text((width - tw - 80 - 12, 60 + 12), tag.strip(), fill=(255, 255, 255), font=lfont)
-    # code block
-    code_font = _pick_font(46)
-    code = code or ""
-    code_area_y = 200
-    code_area_x = 80
-    code_area_w = width - 160
-    line_height = 64
-    max_lines = (height - code_area_y - 80) // line_height
-    lines = code.splitlines() or [""]
-    # line numbers gutter
-    n_lines = min(len(lines), max_lines)
-    gfont = _pick_font(36)
-    draw.text((code_area_x, code_area_y), "  1", fill=(148, 163, 184), font=gfont)
-    _wrap_lines(draw, lines[0] if lines else "", code_font, code_area_w - 100)
-    y = code_area_y
-    drawn = 0
-    line_no = 1
-    for i in range(n_lines):
-        line_text = lines[i]
-        wrapped = _wrap_lines(draw, line_text, code_font, code_area_w - 100)
-        for wline in wrapped:
-            if drawn >= max_lines:
-                break
-            # line number
-            draw.text(
-                (code_area_x, y),
-                f"{line_no:>3}",
-                fill=(100, 116, 139),
-                font=gfont,
-            )
-            # code
-            draw.text(
-                (code_area_x + 100, y),
-                wline,
-                fill=(226, 232, 240),
-                font=code_font,
-            )
-            y += line_height
-            drawn += 1
-        line_no += 1
-        if drawn >= max_lines:
-            break
+    title = heading or "コード"
+    if language and language.lower() != "text":
+        title = f"{title}  ·  {language.upper()}"
+    _, _, area_w, area_h = _composition_area(width, height, title, None)
+    lines = (code or "").expandtabs(4).splitlines() or [""]
+    digits = len(str(len(lines)))
+    numbered = [f"{index:>{digits}}  {line}" for index, line in enumerate(lines, 1)]
+    content = render_grid_content(numbered, area_w, area_h, focus_text=focus_text,
+                                  foreground=(226, 232, 240), highlight=(22, 78, 99),
+                                  focus_source=code or "")
+    img = compose_on_canvas(content, width=width, height=height, title=title,
+                            background=(15, 23, 42), title_color=(226, 232, 240))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, format="PNG")
     return RenderResult(output_path=output_path, width=width, height=height)
@@ -635,6 +607,7 @@ def render_visual_plan(
     width: int,
     height: int,
     fallback_summary: str = "",
+    focus_text: str | None = None,
 ) -> RenderResult:
     """Dispatch a validated-ish plan payload to its renderer.
 
@@ -644,6 +617,7 @@ def render_visual_plan(
         width: Exact output width in pixels.
         height: Exact output height in pixels.
         fallback_summary: Text used when a plan omits visible summary/body.
+        focus_text: Narration sentence used to highlight existing body labels.
 
     Returns:
         The selected renderer's ``RenderResult``.  Invalid/missing visual types
@@ -670,6 +644,7 @@ def render_visual_plan(
             width=width,
             height=height,
             title=heading,
+            focus_text=focus_text,
         )
         return RenderResult(output_path=output_path, width=width, height=height)
     if vtype == VisualType.code_slide.value:
@@ -680,6 +655,7 @@ def render_visual_plan(
             heading=heading or "コード",
             code=plan_payload.get("code") or "",
             language=plan_payload.get("language") or "text",
+            focus_text=focus_text,
         )
     if vtype == VisualType.formula.value:
         return render_formula(
@@ -740,4 +716,5 @@ def render_visual_plan(
         height=height,
         heading=heading or "要点",
         body=plan_payload.get("visual_summary") or fallback_summary,
+        focus_text=focus_text,
     )

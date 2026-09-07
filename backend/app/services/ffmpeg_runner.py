@@ -146,12 +146,27 @@ def build_block_video_args(
     fit = _slide_fit_chain(width, height, band)
     sub_filter = f",subtitles={_escape_sub_path(subtitle_path)}" if burn_subs else ""
 
+    # Round cumulative cut times, not each interval independently. Otherwise
+    # every non-frame-aligned sentence can add a frame of highlight drift.
+    slide_frames: list[int] = []
+    elapsed_ms = 0
+    previous_frame = 0
+    for index, (_, slide_ms) in enumerate(slides):
+        elapsed_ms += slide_ms
+        rounding = 999 if index == len(slides) - 1 else 500
+        end_frame = max(previous_frame + 1, (elapsed_ms * fps + rounding) // 1000)
+        slide_frames.append(end_frame - previous_frame)
+        previous_frame = end_frame
+
     args: list[str] = [ffmpeg, "-y"]
-    for slide_image, slide_ms in slides:
+    for index, (slide_image, slide_ms) in enumerate(slides):
+        input_ms = max(100, slide_ms) if len(slides) == 1 else (
+            (slide_frames[index] * 1000 + fps - 1) // fps
+        )
         args += [
             "-loop", "1",
             "-framerate", str(fps),
-            "-t", f"{max(0.1, slide_ms / 1000.0):.3f}",
+            "-t", f"{input_ms / 1000.0:.3f}",
             "-i", str(slide_image),
         ]
     args += ["-i", str(audio)]
@@ -161,7 +176,10 @@ def build_block_video_args(
     else:
         # Fit each slide identically, then concatenate and burn subtitles on
         # the joined stream so cue timings stay relative to the whole block.
-        parts = [f"[{i}:v]{fit}[v{i}]" for i in range(len(slides))]
+        parts = [
+            f"[{i}:v]trim=end_frame={slide_frames[i]},setpts=PTS-STARTPTS,{fit}[v{i}]"
+            for i in range(len(slides))
+        ]
         joined = "".join(f"[v{i}]" for i in range(len(slides)))
         parts.append(f"{joined}concat=n={len(slides)}:v=1:a=0{sub_filter}[vout]")
         args += [

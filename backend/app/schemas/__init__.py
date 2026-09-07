@@ -11,9 +11,12 @@ request values.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.providers.llm import ProviderError
+from app.services.pronunciation import normalize_overrides
 
 
 class HealthResponse(BaseModel):
@@ -81,7 +84,43 @@ class ProviderConfig(BaseModel):
     image_model: str | None = Field(default=None)
 
 
-class ProjectCreate(BaseModel):
+class PronunciationOverride(BaseModel):
+    """Project-local spoken reading; the displayed script is kept unchanged."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    surface: str = Field(min_length=1, max_length=80)
+    reading: str = Field(min_length=1, max_length=160, pattern=r"^[ァ-ヴー]+$")
+    accent: int | None = Field(default=None, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_reading(self):
+        try:
+            normalize_overrides([self.model_dump()])
+        except ProviderError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
+class QualitySettings(BaseModel):
+    """Defaults shared by detailed and quick project creation."""
+
+    visual_focus_enabled: bool = True
+    subtitle_mode: Literal["sentence", "packed"] = "sentence"
+    narration_pacing_mode: Literal["adaptive", "fixed"] = "adaptive"
+    pronunciation_overrides: list[PronunciationOverride] = Field(default_factory=list, max_length=100)
+
+    @field_validator("pronunciation_overrides")
+    @classmethod
+    def _unique_pronunciations(cls, value):
+        if value is not None:
+            surfaces = [entry.surface for entry in value]
+            if len(surfaces) != len(set(surfaces)):
+                raise ValueError("同じ表記の読み方は1件だけ登録してください")
+        return value
+
+
+class ProjectCreate(QualitySettings):
     """Full project-creation payload including rendering and pacing settings.
 
     Attributes:
@@ -167,7 +206,7 @@ class ProjectCreate(BaseModel):
         return value
 
 
-class QuickCreate(BaseModel):
+class QuickCreate(QualitySettings):
     """Paste-a-script-and-go payload.
 
     Attributes:
@@ -219,7 +258,7 @@ class QuickCreate(BaseModel):
         return value
 
 
-class ProjectPatch(BaseModel):
+class ProjectPatch(QualitySettings):
     """Partial project settings update applied by the PATCH route.
 
     Every field is optional so ``model_dump(exclude_unset=True)`` can apply
@@ -245,6 +284,24 @@ class ProjectPatch(BaseModel):
     pre_margin_seconds: float | None = Field(default=None, ge=0.0, le=5.0)
     post_margin_seconds: float | None = Field(default=None, ge=0.0, le=5.0)
     min_display_seconds: float | None = Field(default=None, ge=0.5, le=10.0)
+    narration_sentence_pause_seconds: float | None = Field(default=None, ge=0.0, le=5.0)
+    max_slides_per_block: int | None = Field(default=None, ge=1, le=9)
+    visual_focus_enabled: bool | None = None
+    subtitle_mode: Literal["sentence", "packed"] | None = None
+    narration_pacing_mode: Literal["adaptive", "fixed"] | None = None
+    pronunciation_overrides: list[PronunciationOverride] | None = Field(default=None, max_length=100)
+
+    @field_validator(
+        "visual_focus_enabled", "subtitle_mode", "narration_pacing_mode",
+        "pronunciation_overrides", "narration_sentence_pause_seconds", "max_slides_per_block",
+        mode="before",
+    )
+    @classmethod
+    def _reject_explicit_null(cls, value):
+        # Omission is valid for PATCH, but SQL non-nullable settings cannot be cleared.
+        if value is None:
+            raise ValueError("設定を削除することはできません。値を指定してください")
+        return value
 
 
 class ProjectSummary(BaseModel):
@@ -297,6 +354,10 @@ class ProjectDetail(ProjectSummary):
     min_display_seconds: float
     narration_sentence_pause_seconds: float = 1.5
     max_slides_per_block: int = 1
+    visual_focus_enabled: bool
+    subtitle_mode: Literal["sentence", "packed"]
+    narration_pacing_mode: Literal["adaptive", "fixed"]
+    pronunciation_overrides: list[PronunciationOverride]
     use_fake_providers: bool
     output_subtitle_path: str | None
 

@@ -12,9 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.routes_projects import _block_summary
+from app.api.utils import ensure_project_idle, ensure_render_assets_ready
 from app.db import get_db
-from app.models.block import Block
+from app.models.block import Block, VisualType
 from app.models.project import Project
+from app.models.job import GenerationJob
+from app.models.block import BlockStatus
 from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse, JobSummary
 from app.workers.job_runner import (
     enqueue_block_audio_rerun,
@@ -71,8 +74,62 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(block, field, value)
+    updates = payload.model_dump(exclude_unset=True)
+    # Validate the entire request before applying even its first text edit.
+    for field in ("source_text", "tts_text"):
+        if field in updates and updates[field] is None:
+            raise HTTPException(status_code=422, detail=f"{field} cannot be null")
+
+    plan = updates.get("visual_plan")
+    visual_type = VisualType.text_slide
+    image_prompt = None
+    if plan is not None:
+        try:
+            previous_type = block.visual_type.value if block.visual_type else VisualType.text_slide.value
+            visual_type = VisualType(plan.get("visual_type", previous_type))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="unsupported visual_plan.visual_type") from exc
+        prompt = plan.get("image_prompt")
+        if prompt is not None and not isinstance(prompt, str):
+            raise HTTPException(status_code=422, detail="visual_plan.image_prompt must be a string or null")
+        plan = {**plan, "visual_type": visual_type.value}
+        if visual_type == VisualType.ai_image:
+            image_prompt = prompt
+
+    ensure_project_idle(block.project_id, db)
+    for field in ("source_text", "tts_text"):
+        if field not in updates or getattr(block, field) == updates[field]:
+            continue
+        setattr(block, field, updates[field])
+        block.status_render = BlockStatus.pending
+        if field == "tts_text":
+            block.status_audio = BlockStatus.pending
+        else:
+            block.status_visual_plan = BlockStatus.pending
+            block.status_image = BlockStatus.pending
+            if block.project.narration_pacing_mode == "adaptive":
+                block.status_audio = BlockStatus.pending
+
+    if "visual_plan" in updates:
+        plan_changed = (
+            plan is None
+            or block.visual_plan_json != plan
+            or block.visual_type != visual_type
+            or block.image_prompt != image_prompt
+        )
+        if plan_changed:
+            block.visual_plan_json = plan
+            block.visual_type = visual_type
+            block.image_prompt = image_prompt
+            block.status_image = BlockStatus.pending
+            block.status_render = BlockStatus.pending
+            # Visible focus terms affect adaptive pauses, even if speech text
+            # itself did not change. Fixed-mode audio remains reusable.
+            if block.project.narration_pacing_mode == "adaptive":
+                block.status_audio = BlockStatus.pending
+        # An explicit plan is ready to render, including when source_text was
+        # edited in this request. Null deliberately asks the planner to rebuild.
+        block.status_visual_plan = BlockStatus.completed if plan is not None else BlockStatus.pending
     db.commit()
     db.refresh(block)
     return _block_summary(block)
@@ -99,8 +156,9 @@ async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> Gen
     project = db.get(Project, block.project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
+    ensure_project_idle(block.project_id, db)
     job = await enqueue_block_visual_rerun(block.project_id, block.index)
-    db.refresh(job)
+    job = db.get(GenerationJob, job.id) or job
     return GenerateAllResponse(
         job=JobSummary(
             id=job.id,
@@ -138,8 +196,9 @@ async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> Gene
     project = db.get(Project, block.project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
+    ensure_project_idle(block.project_id, db)
     job = await enqueue_block_audio_rerun(block.project_id, block.index)
-    db.refresh(job)
+    job = db.get(GenerationJob, job.id) or job
     return GenerateAllResponse(
         job=JobSummary(
             id=job.id,
@@ -182,8 +241,10 @@ async def rerender_block(block_id: int, db: Session = Depends(get_db)) -> Genera
         raise HTTPException(status_code=404, detail="project not found")
     # For MVP, rerendering a single block requires rerunning the whole
     # concat — schedule it as a full re-render job.
+    ensure_project_idle(block.project_id, db)
+    ensure_render_assets_ready(project)
     job = await enqueue_rerender(block.project_id)
-    db.refresh(job)
+    job = db.get(GenerationJob, job.id) or job
     return GenerateAllResponse(
         job=JobSummary(
             id=job.id,

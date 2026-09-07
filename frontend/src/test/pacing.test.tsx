@@ -23,13 +23,15 @@ describe('PacingSettings', () => {
   it('shows the breath pause with its current value', () => {
     renderPanel();
     expect(screen.getByLabelText('文末の息継ぎ')).toHaveValue('1.5');
+    expect(screen.getByLabelText('文末の息継ぎ')).toBeDisabled();
   });
 
   it('reports a changed pause without touching the other settings', () => {
-    const onChange = renderPanel();
+    const onChange = renderPanel({ ...DEFAULT_PACING, narration_pacing_mode: 'fixed' });
     fireEvent.change(screen.getByLabelText('文末の息継ぎ'), { target: { value: '2.4' } });
     expect(onChange).toHaveBeenCalledWith({
       ...DEFAULT_PACING,
+      narration_pacing_mode: 'fixed',
       narration_sentence_pause_seconds: 2.4,
     });
   });
@@ -51,7 +53,8 @@ describe('PacingSettings', () => {
   });
 
   it('offers a pause of zero, which keeps VOICEVOX untouched', () => {
-    renderPanel();
+    renderPanel({ ...DEFAULT_PACING, narration_pacing_mode: 'fixed' });
+    expect(screen.getByLabelText('文末の息継ぎ')).toBeEnabled();
     expect(screen.getByLabelText('文末の息継ぎ')).toHaveAttribute('min', '0');
   });
 });

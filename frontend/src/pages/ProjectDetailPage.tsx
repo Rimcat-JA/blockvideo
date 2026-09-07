@@ -27,7 +27,7 @@ export function ProjectDetailPage() {
   const rerender = useRerender(id);
 
   const isRunning = (s: string | undefined | null) =>
-    !!s && !['completed', 'failed', 'cancelled'].includes(s);
+    !!s && ['splitting', 'planning', 'generating', 'rendering'].includes(s);
 
   // Poll project + blocks while running
   useEffect(() => {
@@ -96,7 +96,7 @@ export function ProjectDetailPage() {
           <button
             type="button"
             className="btn-secondary"
-            disabled={rerender.isPending || !p.block_count}
+            disabled={running || generate.isPending || rerender.isPending || !p.block_count}
             onClick={() => rerender.mutate()}
           >
             レンダリングのみ再実行

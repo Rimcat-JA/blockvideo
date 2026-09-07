@@ -30,7 +30,6 @@ Imports:
     ``unicodedata`` measures East Asian display width.
     Dataclasses/paths/types describe outputs and loose model-produced specs.
     PIL creates canvases, text, fonts, and drawing primitives.
-    ``log`` is available for defensive renderer diagnostics.
 
 Module state:
     Theme colors and layout constants below define the visual language and the
@@ -42,12 +41,13 @@ from __future__ import annotations
 import math
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from app.core.logging import log
+from app.services.visual_focus import literal_ranges, matching_terms
 
 
 # --------------------------------------------------------------------------
@@ -225,53 +225,68 @@ def _dot(draw: ImageDraw.ImageDraw, center, r: int = 14, fill=ARROW) -> None:
 # Canvas composition
 # --------------------------------------------------------------------------
 
+def _composition_area(width: int, height: int, title: str,
+                      caption: str | None) -> tuple[int, int, int, int]:
+    """Measure the same responsive safe area used for drawing and fitting."""
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    unit = min(width / 1920, height / 880)
+    margin = max(12, round(width * 0.035))
+    top = max(12, round(26 * unit))
+    if title:
+        font = _fit_font(draw, title, width - 2 * margin, max(18, round(78 * unit)),
+                         start=max(18, round(64 * unit)))
+        top += _text_size(draw, title, font)[1] + max(18, round(32 * unit))
+    bottom = max(12, round(30 * unit))
+    if caption:
+        font = _fit_font(draw, caption, width - 2 * margin, max(16, round(52 * unit)),
+                         start=max(16, round(34 * unit)))
+        bottom += _text_size(draw, caption, font)[1] + max(14, round(22 * unit))
+    return (margin, top, max(1, width - 2 * margin), max(1, height - top - bottom))
+
+
 def _compose(content: Image.Image, width: int, height: int,
-             title: str, caption: str | None) -> Image.Image:
+             title: str, caption: str | None, *,
+             background=BG, title_color=ACCENT) -> Image.Image:
     """Scale *content* to fit and centre it on a fixed themed canvas.
 
     Never upscales past 1.0 — the natural layout is already drawn large, so
     a scale factor above 1 would only soften the result.
     """
-    canvas = Image.new("RGB", (width, height), BG)
+    canvas = Image.new("RGB", (width, height), background)
     draw = ImageDraw.Draw(canvas)
-
-    top = 34
-    title_h = 0
+    unit = min(width / 1920, height / 880)
+    margin, content_y, avail_w, avail_h = _composition_area(width, height, title, caption)
+    top = max(12, round(26 * unit))
     if title:
-        tfont = _fit_font(draw, title, width - 160, 78, start=64)
+        tfont = _fit_font(draw, title, avail_w, max(18, round(78 * unit)),
+                          start=max(18, round(64 * unit)))
         tw, th = _text_size(draw, title, tfont)
-        draw.text(((width - tw) / 2, top), title, font=tfont, fill=ACCENT)
-        title_h = th + 26
-        draw.line([(width / 2 - tw / 2, top + th + 14),
-                   (width / 2 + tw / 2, top + th + 14)],
-                  fill=ACCENT_SOFT, width=4)
+        draw.text(((width - tw) / 2, top), title, font=tfont, fill=title_color, anchor="lt")
+        underline_y = top + th + max(6, round(12 * unit))
+        draw.line([(width / 2 - tw / 2, underline_y),
+                   (width / 2 + tw / 2, underline_y)],
+                  fill=ACCENT_SOFT, width=max(2, round(4 * unit)))
 
-    cap_h = 0
-    cap_font = None
-    if caption:
-        cap_font = _fit_font(draw, caption, width - 200, 52, start=34)
-        _, cap_h = _text_size(draw, caption, cap_font)
-        cap_h += 30
-
-    avail_w = width - 100
-    avail_h = height - top - title_h - cap_h - 60
     scale = min(avail_w / content.width, avail_h / content.height, 1.0)
     new_size = (max(1, int(content.width * scale)), max(1, int(content.height * scale)))
     resized = content.resize(new_size, Image.LANCZOS)
 
     ox = int((width - resized.width) / 2)
-    oy = int(top + title_h + (avail_h - resized.height) / 2)
+    oy = int(content_y + (avail_h - resized.height) / 2)
     canvas.paste(resized, (ox, oy), resized if resized.mode == "RGBA" else None)
 
-    if caption and cap_font is not None:
-        cw, _ = _text_size(draw, caption, cap_font)
-        draw.text(((width - cw) / 2, height - cap_h - 6), caption,
-                  font=cap_font, fill=MUTED)
+    if caption:
+        cap_font = _fit_font(draw, caption, width - margin * 2, max(16, round(52 * unit)),
+                            start=max(16, round(34 * unit)))
+        cw, ch = _text_size(draw, caption, cap_font)
+        draw.text(((width - cw) / 2, height - max(12, round(20 * unit)) - ch), caption,
+                  font=cap_font, fill=MUTED, anchor="lt")
     return canvas
 
 
 def compose_on_canvas(content: Image.Image, *, width: int, height: int,
-                      title: str = "", caption: str | None = None) -> Image.Image:
+                      title: str = "", caption: str | None = None,
+                      background=BG, title_color=ACCENT) -> Image.Image:
     """Compose content onto an exact-size themed canvas.
 
     Used by the Mermaid path too: ``mmdc`` treats ``-w``/``-H`` as viewport
@@ -290,7 +305,8 @@ def compose_on_canvas(content: Image.Image, *, width: int, height: int,
         enlarged.
 
     """
-    return _compose(content, width, height, title, caption)
+    return _compose(content, width, height, title, caption,
+                    background=background, title_color=title_color)
 
 
 def _blank_layer(w: int, h: int) -> tuple[Image.Image, ImageDraw.ImageDraw]:
@@ -460,28 +476,25 @@ def _load(paths: list[str], size: int):
     return ImageFont.load_default()
 
 
-_NOTDEF_CACHE: dict[int, bytes] = {}
-
-
 def _render_glyph(font, ch: str) -> bytes:
     """Rasterize one glyph into a comparable bitmap for coverage checks."""
-    img = Image.new("L", (72, 72), 0)
-    ImageDraw.Draw(img).text((4, 4), ch, font=font, fill=255)
-    return img.tobytes()
+    return bytes(font.getmask(ch))
 
 
+@lru_cache(maxsize=64)
+def _missing_glyph(font) -> bytes:
+    """Cache by the live font, never a recyclable Python object ID."""
+    return _render_glyph(font, "\uffff")
+
+
+@lru_cache(maxsize=2048)
 def _has_glyph(font, ch: str) -> bool:
     """Whether *font* actually draws *ch* rather than a .notdef box.
 
     PIL exposes no glyph-coverage API, so the character is compared against
     a codepoint guaranteed to be unassigned: identical bitmaps mean tofu.
     """
-    key = id(font)
-    notdef = _NOTDEF_CACHE.get(key)
-    if notdef is None:
-        notdef = _render_glyph(font, "\uffff")
-        _NOTDEF_CACHE[key] = notdef
-    return _render_glyph(font, ch) != notdef
+    return _render_glyph(font, ch) != _missing_glyph(font)
 
 
 def _cells(ch: str) -> int:
@@ -502,6 +515,7 @@ def render_verbatim_slide(
     height: int,
     title: str = "",
     caption: str | None = None,
+    focus_text: str | None = None,
 ) -> None:
     """Draw slide content exactly as the script author wrote it.
 
@@ -524,6 +538,7 @@ def render_verbatim_slide(
         height: Exact output canvas height in pixels.
         title: Optional heading above the drawing.
         caption: Optional explanatory caption below it.
+        focus_text: Narration sentence whose literal labels are highlighted.
 
     Side Effects:
         Creates the destination directory and writes a PNG.  Content is
@@ -535,17 +550,30 @@ def render_verbatim_slide(
     lines = (body or "").replace("\t", "    ").rstrip().splitlines() or [""]
     # Trim the common indentation so a block indented inside the script does
     # not sit against the right edge of the slide.
-    indents = [len(l) - len(l.lstrip(" ")) for l in lines if l.strip()]
+    indents = [len(line) - len(line.lstrip(" ")) for line in lines if line.strip()]
     if indents:
         cut = min(indents)
-        lines = [l[cut:] if l.strip() else "" for l in lines]
+        lines = [line[cut:] if line.strip() else "" for line in lines]
 
-    inner_w = max(1, width - PAD * 2)
-    inner_h = max(1, height - PAD * 2 - (110 if title else 0) - (70 if caption else 0))
+    _, _, inner_w, inner_h = _composition_area(width, height, title, caption)
+    content = render_grid_content(lines, inner_w, inner_h, focus_text=focus_text)
+    _compose(content, width, height, title, caption).save(output_path)
+
+
+def render_grid_content(lines: list[str], max_width: int, max_height: int, *,
+                        focus_text: str | None = None, foreground=INK,
+                        highlight=ACCENT_SOFT, focus_source: str | None = None) -> Image.Image:
+    """Render every character at a stable grid position, with optional focus.
+
+    Sparse sketches grow to a readable size; dense drawings shrink together
+    without wrapping, dropping rows, or changing the authored box geometry.
+    Highlight rectangles cover matching text cells only and never move glyphs.
+    """
+    lines = lines or [""]
 
     columns = max(sum(_cells(ch) for ch in line) for line in lines) or 1
 
-    size = 64
+    size = 128
     while size > 12:
         mono = _load(_GRID_MONO, size)
         cell_w = mono.getlength("0") or size * 0.55
@@ -553,7 +581,7 @@ def render_verbatim_slide(
         # cut to join at exactly that pitch, and any extra leading leaves the
         # verticals of a hand-drawn box visibly disconnected.
         pitch = sum(mono.getmetrics())
-        if cell_w * columns <= inner_w and pitch * len(lines) <= inner_h:
+        if cell_w * columns + 4 <= max_width and pitch * len(lines) <= max_height:
             break
         size -= 2
     else:
@@ -568,7 +596,14 @@ def render_verbatim_slide(
     block_w = max(1, int(cell_w * columns) + 4)
     block_h = pitch * len(lines)
     content, draw = _blank_layer(block_w, block_h)
+    terms = matching_terms(focus_source if focus_source is not None else "\n".join(lines), focus_text)
     for row, line in enumerate(lines):
+        for term in terms:
+            for start, end in literal_ranges(line, term):
+                first = sum(_cells(ch) for ch in line[:start])
+                last = first + sum(_cells(ch) for ch in line[start:end])
+                draw.rectangle((first * cell_w, row * pitch,
+                                last * cell_w - 1, (row + 1) * pitch - 1), fill=highlight)
         col = 0
         for ch in line:
             if ch != " ":
@@ -576,10 +611,10 @@ def render_verbatim_slide(
                 # wherever it has the glyph; anything it lacks (▶, kana) is
                 # drawn from the wide font at its cell position.
                 font = mono if _has_glyph(mono, ch) else wide
-                draw.text((col * cell_w, row * pitch), ch, font=font, fill=INK)
+                draw.text((col * cell_w, row * pitch), ch, font=font, fill=foreground)
             col += _cells(ch)
 
-    _compose(content, width, height, title, caption).save(output_path)
+    return content
 
 
 def render_pointer_diagram(spec: dict, output_path: Path, *, width: int,

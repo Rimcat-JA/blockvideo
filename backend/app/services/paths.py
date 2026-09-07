@@ -79,6 +79,11 @@ def block_audio_path(project_id: int, index: int) -> Path:
     return project_block_dir(project_id, index) / "audio.wav"
 
 
+def block_focus_dir(project_id: int, index: int) -> Path:
+    """Return the directory for derived, sentence-specific focus images."""
+    return project_block_dir(project_id, index) / "focus"
+
+
 def block_narration_path(project_id: int, index: int) -> Path:
     """Sentence timings measured from VOICEVOX when the audio was made.
 

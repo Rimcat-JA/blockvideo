@@ -50,7 +50,7 @@ def translate(contents: list[str], target_lang: str) -> list[str]:
     # Call translator API to translate for each sentence
     translated_contents: list[str] = []
     for content in contents:
-        if type(content) != str:
+        if not isinstance(content, str):
             content = str(content)
 
         result = client.translate_text(content, target_lang=target_lang)

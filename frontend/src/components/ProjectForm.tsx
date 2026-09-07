@@ -4,7 +4,8 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { useState } from 'react';
 import { useCreateProject, useSpeakers } from '@/api/hooks';
 import { useNavigate } from 'react-router-dom';
-import { createProjectSchema, type CreateProjectForm } from '@/lib/validation';
+import { createProjectSchema, DEFAULT_QUALITY, type CreateProjectForm, type CreateProjectInput } from '@/lib/validation';
+import { QualitySettingsFields } from '@/components/QualitySettingsFields';
 
 export function ProjectForm() {
   /** Validate the form, submit provider settings, and navigate to the project. */
@@ -18,9 +19,10 @@ export function ProjectForm() {
     formState: { errors, isSubmitting },
     watch,
     setValue,
-  } = useForm<CreateProjectForm>({
+  } = useForm<CreateProjectForm, unknown, CreateProjectInput>({
     resolver: zodResolver(createProjectSchema),
     defaultValues: {
+      ...DEFAULT_QUALITY,
       title: '',
       source_script: '',
       voicevox_url: 'http://127.0.0.1:50021',
@@ -37,16 +39,17 @@ export function ProjectForm() {
       subtitle_background: true,
       subtitle_max_chars_per_line: 36,
       pre_margin_seconds: 0.15,
-      post_margin_seconds: 0.35,
+      post_margin_seconds: 1.5,
       min_display_seconds: 2.0,
+      narration_sentence_pause_seconds: 1.5,
+      max_slides_per_block: 1,
       use_fake_providers: false,
     },
   });
 
   const useFake = watch('use_fake_providers');
 
-  const onSubmit = handleSubmit(async (rawForm) => {
-    const form = rawForm as unknown as import('@/lib/validation').CreateProjectInput;
+  const onSubmit = handleSubmit(async (form) => {
     const llmApiKey = (document.getElementById('llm_api_key') as HTMLInputElement | null)?.value ?? '';
     const llmBaseUrl = (document.getElementById('llm_base_url') as HTMLInputElement | null)?.value ?? '';
     const llmModel = (document.getElementById('llm_model') as HTMLInputElement | null)?.value ?? '';
@@ -228,6 +231,38 @@ export function ProjectForm() {
               {...register('voicevox_volume_scale', { valueAsNumber: true })}
             />
           </div>
+        </div>
+      </section>
+
+      <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+        <QualitySettingsFields
+          value={{
+            visual_focus_enabled: watch('visual_focus_enabled') ?? DEFAULT_QUALITY.visual_focus_enabled,
+            subtitle_mode: watch('subtitle_mode') ?? DEFAULT_QUALITY.subtitle_mode,
+            narration_pacing_mode: watch('narration_pacing_mode') ?? DEFAULT_QUALITY.narration_pacing_mode,
+            pronunciation_overrides: watch('pronunciation_overrides') ?? [],
+          }}
+          onChange={(quality) => {
+            setValue('visual_focus_enabled', quality.visual_focus_enabled, { shouldValidate: true });
+            setValue('subtitle_mode', quality.subtitle_mode, { shouldValidate: true });
+            setValue('narration_pacing_mode', quality.narration_pacing_mode, { shouldValidate: true });
+            setValue('pronunciation_overrides', quality.pronunciation_overrides, { shouldValidate: true });
+          }}
+          disabled={isSubmitting || create.isPending}
+        />
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="label">
+            文末の息継ぎ（秒）
+            <input type="number" className="input mt-1" min={0} max={5} step={0.1}
+              disabled={watch('narration_pacing_mode') !== 'fixed'}
+              {...register('narration_sentence_pause_seconds', { valueAsNumber: true })} />
+            <span className="mt-1 block text-xs font-normal text-slate-500">一定の間を置く場合に使用します。0でVOICEVOX標準。</span>
+          </label>
+          <label className="label">
+            1ブロックの最大スライド枚数
+            <input type="number" className="input mt-1" min={1} max={9}
+              {...register('max_slides_per_block', { valueAsNumber: true })} />
+          </label>
         </div>
       </section>
 

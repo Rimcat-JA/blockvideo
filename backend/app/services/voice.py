@@ -12,8 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from app.core.logging import log
 from app.core.config import resolve_ffprobe
@@ -24,6 +26,12 @@ from app.services.narration import (
     SentenceSpan,
     build_narration_plan,
     rescale_spans,
+)
+from app.services.pronunciation import (
+    Pronunciation,
+    apply_readings,
+    normalize_overrides,
+    pronunciation_query,
 )
 
 
@@ -130,6 +138,7 @@ async def synthesize_audio(
     *,
     client: VoicevoxClient | FakeVoicevoxClient | None = None,
     max_attempts: int = 3,
+    pronunciation_overrides: Sequence[Mapping[str, Any] | Pronunciation] | None = None,
 ) -> AudioResult:
     """Synthesize one block with simple whole-text fallback behavior.
 
@@ -139,6 +148,7 @@ async def synthesize_audio(
         output_path: WAV destination.
         client: Optional caller-owned live or fake client.
         max_attempts: Maximum transient synthesis attempts.
+        pronunciation_overrides: Readings preserved even on whole-text fallback.
 
     Returns:
         ``AudioResult`` with the written path and FFprobe duration; spans are
@@ -149,6 +159,7 @@ async def synthesize_audio(
         created live client.
 
     """
+    overrides = normalize_overrides(pronunciation_overrides)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     close_client = False
     if client is None:
@@ -156,7 +167,13 @@ async def synthesize_audio(
         close_client = True
     try:
         async def once() -> bytes:
-            audio, _query = await client.synthesize_text(text, settings)
+            if overrides and isinstance(client, VoicevoxClient):
+                query = await pronunciation_query(text, settings.speaker_id, client, overrides)
+                client.apply_settings(query, settings)
+                return await client.synthesis(query, settings.speaker_id)
+            if overrides and any(item.accent is not None for item in overrides):
+                log.info("デモ音声では読み方のみを反映します。アクセントの確認にはVOICEVOX Engineが必要です")
+            audio, _query = await client.synthesize_text(apply_readings(text, overrides), settings)
             return audio
 
         audio = await _with_retries(once, max_attempts=max_attempts)
@@ -177,6 +194,9 @@ async def synthesize_block(
     sentence_pause_seconds: float = 0.0,
     plan_concurrency: int = 4,
     max_attempts: int = 3,
+    pacing_mode: str = "fixed",
+    pronunciation_overrides: Sequence[Mapping[str, Any] | Pronunciation] | None = None,
+    focus_terms: Sequence[Sequence[str]] | None = None,
 ) -> AudioResult:
     """Synthesize a block, measuring where each sentence lands in the audio.
 
@@ -185,9 +205,12 @@ async def synthesize_block(
         settings: Voice/speaker controls.
         output_path: WAV destination.
         client: Optional live/fake client; fake clients use simple synthesis.
-        sentence_pause_seconds: Extra pause between measured sentences.
+        sentence_pause_seconds: Wall-clock gap between measured sentences in fixed mode.
         plan_concurrency: Maximum concurrent VOICEVOX query requests.
         max_attempts: Maximum transient synthesis attempts.
+        pacing_mode: ``adaptive`` uses sentence roles; ``fixed`` preserves the scalar pause.
+        pronunciation_overrides: Speech-only readings with optional VOICEVOX accents.
+        focus_terms: Diagram labels for each sentence, used to allow time for focus changes.
 
     Returns:
         ``AudioResult`` with measured duration and rescaled spans when planning
@@ -200,6 +223,9 @@ async def synthesize_block(
     the behaviour before this existed — whenever the plan cannot be built.
 
     """
+    overrides = normalize_overrides(pronunciation_overrides)
+    if pacing_mode not in {"fixed", "adaptive"}:
+        raise ValueError(f"Unknown narration pacing mode: {pacing_mode}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     close_client = False
     if client is None:
@@ -214,10 +240,14 @@ async def synthesize_block(
                 client,
                 sentence_pause_seconds=sentence_pause_seconds,
                 concurrency=plan_concurrency,
+                pacing_mode=pacing_mode,
+                pronunciation_overrides=overrides,
+                focus_terms=focus_terms,
             )
         if plan is None:
             return await synthesize_audio(
-                text, settings, output_path, client=client, max_attempts=max_attempts
+                text, settings, output_path, client=client, max_attempts=max_attempts,
+                pronunciation_overrides=overrides,
             )
 
         async def once() -> bytes:
