@@ -28,6 +28,7 @@ export function ProjectsPage() {
         {error && (
           <p className="text-sm text-red-600">読み込みに失敗しました: {(error as Error).message}</p>
         )}
+        {del.error && <p className="text-sm text-red-600" role="alert">削除できませんでした: {del.error.message}</p>}
         {data && data.length === 0 && (
           <div className="rounded-md border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">
             まだプロジェクトがありません。「新規作成」から始めてください。
@@ -51,8 +52,10 @@ export function ProjectsPage() {
               <button
                 type="button"
                 className="btn-danger"
+                disabled={del.isPending || ['splitting', 'planning', 'generating', 'rendering'].includes(p.status)}
+                title={['splitting', 'planning', 'generating', 'rendering'].includes(p.status) ? '生成中は削除できません' : undefined}
                 onClick={() => {
-                  if (window.confirm(`「${p.title}」を削除しますか？`)) {
+                  if (window.confirm(`「${p.title}」を削除しますか？ 保存した動画と設定の履歴も削除されます。`)) {
                     del.mutate(p.id);
                   }
                 }}

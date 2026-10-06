@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.providers.llm import ProviderError
+from app.core.provider_errors import ProviderError
 from app.services.pronunciation import normalize_overrides
 
 
@@ -317,6 +317,7 @@ class ProjectSummary(BaseModel):
     """
 
     id: int
+    revision: int = 1
     title: str
     status: str
     progress: float
@@ -328,12 +329,24 @@ class ProjectSummary(BaseModel):
     updated_at: str | None
 
 
+ProjectGenerationRecoveryCode = Literal["busy", "external_outcome_unknown", "ready"]
+ProjectGenerationRecommendedAction = Literal["wait", "check_provider", "generate"]
+
+
+class ProjectGenerationRecovery(BaseModel):
+    """Bounded project-wide generation permission and operator action."""
+
+    code: ProjectGenerationRecoveryCode
+    recommended_action: ProjectGenerationRecommendedAction
+
+
 class ProjectDetail(ProjectSummary):
     """Project summary plus source, pacing, subtitle, and output settings.
 
     Raw provider credentials are intentionally not part of this response.
     """
 
+    generation_recovery: ProjectGenerationRecovery
     source_script: str
     global_visual_style: str | None
     voicevox_url: str
@@ -412,6 +425,24 @@ class BlockPatch(BaseModel):
     visual_plan: dict[str, Any] | None = None
 
 
+RecoveryCode = Literal[
+    "wait",
+    "safe_retry",
+    "external_outcome_unknown",
+    "refresh_required",
+    "cancelled",
+    "completed",
+    "failed",
+]
+RecommendedAction = Literal[
+    "wait",
+    "retry_current",
+    "check_provider",
+    "refresh",
+    "none",
+]
+
+
 class JobSummary(BaseModel):
     """Public progress representation of a background generation job.
 
@@ -433,6 +464,15 @@ class JobSummary(BaseModel):
     started_at: str | None
     finished_at: str | None
     error_message: str | None
+    cancel_requested: bool = False
+    input_revision: int | None = None
+    parent_job_id: int | None = None
+    recovery_message: str | None = None
+    retryable: bool = False
+    retry_blocked_reason: str | None = None
+    recovery_code: RecoveryCode
+    recommended_action: RecommendedAction
+    plan: dict[str, list[str]] | None = None
 
 
 class GenerateAllResponse(BaseModel):

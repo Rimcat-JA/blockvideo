@@ -1,0 +1,9 @@
+{
+  "model": "text-embedding-nomic-embed-text-v1.5",
+  "weights_sha256": "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac",
+  "dimensions": 768,
+  "document_prefix": "search_document: ",
+  "query_prefix": "search_query: ",
+  "normalization": "l2-full-v1",
+  "transport": "local-openai-embeddings-v1"
+}

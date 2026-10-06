@@ -68,6 +68,8 @@ class Project(Base):
 
     # Identity and original user content.
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Settings/content revision; progress and output updates do not increment it.
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     source_script: Mapped[str] = mapped_column(Text, nullable=False)
     global_visual_style: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -146,6 +148,7 @@ class Project(Base):
 
     # Storage-relative artifact paths; API routes validate before serving them.
     output_video_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    current_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_subtitle_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     # Provider-mode override (allows Fake for demos)

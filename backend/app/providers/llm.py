@@ -18,6 +18,9 @@ import abc
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.provider_errors import ProviderError
+from app.services.external_calls import ExternalOutcomeUnknown
+
 
 @dataclass
 class LLMMessage:
@@ -146,27 +149,6 @@ class LLMProvider(abc.ABC):
         return json.loads(text)
 
 
-class ProviderError(RuntimeError):
-    """Raised when an upstream LLM fails.
-
-    Exception messages are sanitized: stack frames may show technical detail
-    but should never carry the API key. Use ``safe=True`` for user-facing
-    messages.
-
-    Attributes:
-        safe: Whether ``str(error)`` is suitable for a user-facing response.
-        original: Optional underlying exception retained for server-side
-            diagnostics and exception chaining.
-
-    """
-
-    def __init__(self, message: str, *, safe: bool = True, original: Exception | None = None) -> None:
-        """Create an error with a user-safe message and optional original cause."""
-        super().__init__(message)
-        self.safe = safe
-        self.original = original
-
-
 async def safe_chat_json(provider: LLMProvider, request: LLMRequest) -> dict[str, Any]:
     """Run ``chat_json`` and normalize unexpected failures.
 
@@ -184,7 +166,7 @@ async def safe_chat_json(provider: LLMProvider, request: LLMRequest) -> dict[str
     """
     try:
         return await provider.chat_json(request)
-    except ProviderError:
+    except (ProviderError, ExternalOutcomeUnknown):
         raise
     except Exception as exc:  # pragma: no cover - defensive
         raise ProviderError(str(exc), safe=True, original=exc) from exc

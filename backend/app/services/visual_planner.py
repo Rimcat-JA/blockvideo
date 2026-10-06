@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from app.core.logging import log
 from app.models.block import VisualType
 from app.providers.llm import LLMProvider, LLMRequest, LLMMessage
+from app.services.external_calls import ExternalOutcomeUnknown
 from app.services.stage_schemas import GlobalVisualStylePayload, VisualPlan, VisualPlanPayload
 
 
@@ -687,6 +688,8 @@ async def _design_diagram(
     for attempt in (1, 2):
         try:
             data = await provider.chat_json(request)
+        except ExternalOutcomeUnknown:
+            raise
         except Exception as exc:  # noqa: BLE001 - downgraded by the caller's guard
             log.warning(
                 "block={idx} {kind} の設計に失敗 (attempt {n}): {err}",

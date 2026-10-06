@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from app.providers.llm import ProviderError
+from app.core.provider_errors import ProviderError
 
 if TYPE_CHECKING:
     from app.providers.voicevox import VoicevoxClient

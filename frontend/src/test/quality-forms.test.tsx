@@ -9,6 +9,7 @@ import { QuickGeneratePage } from '@/pages/QuickGeneratePage';
 import { ProjectDetailPage } from '@/pages/ProjectDetailPage';
 import { DEFAULT_QUALITY } from '@/lib/validation';
 import { api } from '@/api/client';
+import { historyFixture, projectFixture } from '@/test/project-fixtures';
 
 vi.mock('@/api/client', () => ({
   api: {
@@ -18,6 +19,8 @@ vi.mock('@/api/client', () => ({
     getProject: vi.fn().mockResolvedValue({ id: 4, status: 'completed' }),
     listBlocks: vi.fn().mockResolvedValue([]),
     generateAll: vi.fn().mockResolvedValue({ job: { id: 1 } }),
+    getProjectHistory: vi.fn(),
+    executeOperation: vi.fn().mockResolvedValue({ request_id: 'request', revision: 3, job_id: 1, data: {} }),
   },
 }));
 
@@ -33,16 +36,23 @@ function addReading() {
   fireEvent.change(screen.getByLabelText('アクセント 1'), { target: { value: '0' } });
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  sessionStorage.clear();
+  vi.mocked(api.getProject).mockResolvedValue(projectFixture());
+  vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture());
+});
 
 describe('quality controls', () => {
   it('allows a newly created detailed project to start generation', async () => {
-    vi.mocked(api.getProject).mockResolvedValueOnce({ id: 4, status: 'pending', block_count: 0 } as Awaited<ReturnType<typeof api.getProject>>);
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({ status: 'pending', block_count: 0 }));
     wrap(<Routes><Route path="/projects/:id" element={<ProjectDetailPage />} /></Routes>, '/projects/4');
     const start = await screen.findByRole('button', { name: '生成開始' });
     expect(start).toBeEnabled();
     fireEvent.click(start);
-    await waitFor(() => expect(api.generateAll).toHaveBeenCalledWith(4));
+    await waitFor(() => expect(api.executeOperation).toHaveBeenCalledWith(expect.objectContaining({
+      operation_id: 'project.generation.start', target: { project_id: 4 }, base_revision: 3, arguments: {},
+    })));
   });
 
   it('edits readings, reports validation, removes rows and retains mode choices', () => {

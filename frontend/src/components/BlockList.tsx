@@ -1,14 +1,15 @@
 /** Ordered collection view for the generated blocks in a project. */
-import type { BlockSummary } from '@/lib/types';
+import type { BlockSummary, PartialGenerationKind } from '@/lib/types';
 import { BlockItem } from './BlockItem';
 
 /** Inputs required to render the block collection. */
 interface BlockListProps {
-  projectId: number;
   blocks: BlockSummary[];
+  disabled?: boolean;
+  onGenerate: (kind: PartialGenerationKind, blockIndex: number) => void;
 }
 
-export function BlockList({ projectId, blocks }: BlockListProps) {
+export function BlockList({ blocks, disabled, onGenerate }: BlockListProps) {
   /** Show an empty-state message or one BlockItem per block. */
   if (blocks.length === 0) {
     return (
@@ -20,7 +21,7 @@ export function BlockList({ projectId, blocks }: BlockListProps) {
   return (
     <div className="space-y-3">
       {blocks.map((block) => (
-        <BlockItem key={block.id} block={block} projectId={projectId} />
+        <BlockItem key={block.id} block={block} disabled={disabled} onGenerate={onGenerate} />
       ))}
     </div>
   );

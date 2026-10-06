@@ -31,7 +31,7 @@ export function QuickGeneratePage() {
   const quick = useQuickCreate();
   const { data: project } = useLiveProject(projectId);
 
-  const running = projectId != null && project?.status !== 'completed' && project?.status !== 'failed';
+  const running = projectId != null && !['completed', 'failed', 'cancelled', 'unknown'].includes(project?.status ?? '');
   const done = project?.status === 'completed' && Boolean(project?.output_video_path);
   const qualityValid = qualitySettingsSchema.safeParse(pacing).success;
 
@@ -150,6 +150,7 @@ export function QuickGeneratePage() {
               生成中です。このページを開いたままお待ちください（長い台本では数分かかります）。
             </p>
           )}
+          {!running && !done && <Link className="btn-secondary" to={`/projects/${projectId}`}>生成の状態・復旧方法を確認</Link>}
         </div>
       )}
     </Layout>

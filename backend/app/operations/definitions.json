@@ -1,0 +1,572 @@
+{
+  "operations": [
+    {
+      "schema_version": 1,
+      "operation_id": "project.artifact.restore",
+      "operation_version": 1,
+      "description": "Make an earlier successful final video from the output history the project's current video, without changing settings or generating.",
+      "examples": [
+        "Make an earlier successful final video from the output history the project's current video."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.restore_artifact",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "artifact_restored"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.subtitle-font-size.adjust",
+      "operation_version": 1,
+      "description": "Resolve a relative subtitle change once using request_id and base_revision.",
+      "examples": [
+        "字幕を少し大きくする（delta: 2）"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "delta": {
+            "type": "integer",
+            "minimum": -104,
+            "maximum": 104
+          }
+        },
+        "required": [
+          "delta"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.adjust_subtitle_font_size",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "subtitle_font_size_saved"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.status.get",
+      "operation_version": 1,
+      "description": "Return the current project and generation status without changing state.",
+      "examples": [
+        "現在の動画の状態を確認する"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler_key": "project.get_status",
+      "affected_artifacts": [],
+      "precondition_key": "project_exists",
+      "postcondition_key": "state_unchanged"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.subtitle-font-size.set",
+      "operation_version": 1,
+      "description": "Set the project's subtitle font size; generation requires an explicit generation_requested flag.",
+      "examples": [
+        "字幕の文字サイズを56pxにする"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 120
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.set_subtitle_font_size",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "subtitle_font_size_saved"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.settings.update",
+      "operation_version": 1,
+      "description": "Save project settings together without generation unless explicitly requested.",
+      "examples": [
+        "Save project settings together without generation unless explicitly requested."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "voicevox_url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "voicevox_speaker_id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "voicevox_speed_scale": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 2.0
+          },
+          "voicevox_pitch_scale": {
+            "type": "number",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "voicevox_intonation_scale": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "voicevox_volume_scale": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "subtitle_font_size": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 120
+          },
+          "subtitle_max_chars_per_line": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 120
+          },
+          "subtitle_position": {
+            "type": "string",
+            "enum": [
+              "top",
+              "middle",
+              "bottom"
+            ]
+          },
+          "subtitle_mode": {
+            "type": "string",
+            "enum": [
+              "sentence",
+              "packed"
+            ]
+          },
+          "narration_pacing_mode": {
+            "type": "string",
+            "enum": [
+              "adaptive",
+              "fixed"
+            ]
+          },
+          "max_slides_per_block": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9
+          },
+          "min_display_seconds": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 10
+          },
+          "pronunciation_overrides": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "surface": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "reading": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "accent": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "surface",
+                "reading"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "subtitle_enabled": {
+            "type": "boolean"
+          },
+          "subtitle_background": {
+            "type": "boolean"
+          },
+          "visual_focus_enabled": {
+            "type": "boolean"
+          },
+          "subtitle_text_color": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "subtitle_outline_color": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "pre_margin_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "post_margin_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "narration_sentence_pause_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler_key": "project.update_settings",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "settings_saved"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.generation.start",
+      "operation_version": 1,
+      "description": "Generate using the current saved configuration.",
+      "examples": [
+        "Generate using the current saved configuration."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "full",
+              "rerender",
+              "block_visual",
+              "block_audio"
+            ]
+          },
+          "block_index": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler_key": "project.start_generation",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "job_queued"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.generation.cancel",
+      "operation_version": 1,
+      "description": "Request cooperative cancellation without reverting settings.",
+      "examples": [
+        "Request cooperative cancellation without reverting settings."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.cancel_generation",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_exists",
+      "postcondition_key": "cancellation_requested"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.generation.retry",
+      "operation_version": 1,
+      "description": "Create a new linked job using the current configuration; unknown outcomes cannot be replayed.",
+      "examples": [
+        "Create a new linked job using the current configuration; unknown outcomes cannot be replayed."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.retry_generation",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "job_queued"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.settings.restore",
+      "operation_version": 1,
+      "description": "Restore a recorded settings version as a new revision without generating.",
+      "examples": [
+        "Restore a recorded settings version as a new revision without generating."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.restore_settings",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "settings_restored"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.settings.update",
+      "operation_version": 2,
+      "description": "Atomically update multiple settings with an optional relative subtitle size change. Do not calculate an absolute size in the model.",
+      "examples": [
+        "字幕を少し大きくして、APIをエーピーアイと読んで。作り直して"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "settings": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "voicevox_url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "voicevox_speaker_id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "voicevox_speed_scale": {
+                "type": "number",
+                "minimum": 0.5,
+                "maximum": 2.0
+              },
+              "voicevox_pitch_scale": {
+                "type": "number",
+                "minimum": -1,
+                "maximum": 1
+              },
+              "voicevox_intonation_scale": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "voicevox_volume_scale": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "subtitle_font_size": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 120
+              },
+              "subtitle_max_chars_per_line": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 120
+              },
+              "subtitle_position": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "middle",
+                  "bottom"
+                ]
+              },
+              "subtitle_mode": {
+                "type": "string",
+                "enum": [
+                  "sentence",
+                  "packed"
+                ]
+              },
+              "narration_pacing_mode": {
+                "type": "string",
+                "enum": [
+                  "adaptive",
+                  "fixed"
+                ]
+              },
+              "max_slides_per_block": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9
+              },
+              "min_display_seconds": {
+                "type": "number",
+                "minimum": 0.5,
+                "maximum": 10
+              },
+              "pronunciation_overrides": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "surface": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "reading": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "accent": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "surface",
+                    "reading"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "subtitle_enabled": {
+                "type": "boolean"
+              },
+              "subtitle_background": {
+                "type": "boolean"
+              },
+              "visual_focus_enabled": {
+                "type": "boolean"
+              },
+              "subtitle_text_color": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "subtitle_outline_color": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "pre_margin_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 5
+              },
+              "post_margin_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 5
+              },
+              "narration_sentence_pause_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 5
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "subtitle_font_size_delta": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": -104,
+            "maximum": 104
+          }
+        },
+        "required": [
+          "settings",
+          "subtitle_font_size_delta"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.update_settings_v2",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "settings_saved"
+    }
+  ]
+}

@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from app.core.config import Settings
 from app.core.logging import log
 from app.providers.llm import LLMProvider, LLMRequest, LLMMessage
+from app.services.external_calls import ExternalOutcomeUnknown
 from app.services.stage_schemas import SplitBlock, SplitPayload
 
 
@@ -419,6 +420,8 @@ async def repair_narration_gaps(
                 data = await provider.chat_json(
                     _build_repair_prompt(block.source_text, block.tts_text)
                 )
+            except ExternalOutcomeUnknown:
+                raise
             except Exception as exc:  # noqa: BLE001 - keep the original text
                 log.warning(
                     "block={idx} ナレーション修復に失敗: {err}",

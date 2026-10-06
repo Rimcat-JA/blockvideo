@@ -90,6 +90,10 @@ class StageContext:
     voicevox_settings: VoicevoxSettings
     progress_cb: ProgressCallback | None = None
     is_cancelled: Callable[[], bool] = lambda: False
+    block_indices: frozenset[int] | None = None
+    input_guard: Callable[[], None] | None = None
+    output_directory: Path | None = None
+    accept_generated_inputs: Callable[[], None] | None = None
 
     async def report(self, stage: str, progress: float, message: str | None = None) -> None:
         """Forward stage progress to the optional worker callback.
@@ -114,6 +118,25 @@ class RenderContext:
     project: Project
     settings: Settings
     is_cancelled: Callable[[], bool] = lambda: False
+    input_guard: Callable[[], None] | None = None
+    output_directory: Path | None = None
+
+
+def _check_boundary(ctx: StageContext | RenderContext) -> None:
+    """Stop cooperatively before consuming changed inputs or publishing effects."""
+    from app.services.generation_snapshots import GenerationCancelled
+
+    if getattr(ctx, "is_cancelled", lambda: False)():
+        raise GenerationCancelled("ユーザーによりキャンセルされました")
+    guard = getattr(ctx, "input_guard", None)
+    if guard:
+        guard()
+
+
+def _selected_blocks(ctx: StageContext) -> list[Block]:
+    indices = getattr(ctx, "block_indices", None)
+    return [block for block in sorted(ctx.project.blocks, key=lambda row: row.index)
+            if indices is None or block.index in indices]
 
 
 async def ensure_global_style(ctx: StageContext, db: Session) -> str:
@@ -134,10 +157,13 @@ async def ensure_global_style(ctx: StageContext, db: Session) -> str:
     if ctx.project.global_visual_style:
         return ctx.project.global_visual_style
     style = await generate_global_style(ctx.bundle.llm, project_title=ctx.project.title)
+    _check_boundary(ctx)
     ctx.project.global_visual_style = style
     db.add(ctx.project)
     db.commit()
     db.refresh(ctx.project)
+    if getattr(ctx, "accept_generated_inputs", None):
+        ctx.accept_generated_inputs()
     return style
 
 
@@ -157,6 +183,7 @@ async def run_split_stage(ctx: StageContext, db: Session) -> list[Block]:
         and TTS text, and commit the synchronized block set.
 
     """
+    _check_boundary(ctx)
     script = normalize_kept(ctx.project.source_script)
     result = await split_script(script, ctx.bundle.llm, ctx.settings)
     log.info(
@@ -180,6 +207,7 @@ async def run_split_stage(ctx: StageContext, db: Session) -> list[Block]:
                 n=repaired, total=len(result.blocks),
             )
 
+    _check_boundary(ctx)
     # wipe blocks that don't correspond to the new split (cache invalidation).
     existing = {b.index: b for b in ctx.project.blocks}
     new_blocks: list[Block] = []
@@ -240,8 +268,9 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
     """
     import asyncio
 
+    _check_boundary(ctx)
     style = await ensure_global_style(ctx, db)
-    blocks = sorted(ctx.project.blocks, key=lambda b: b.index)
+    blocks = _selected_blocks(ctx)
     done = sum(1 for b in blocks if b.status_visual_plan == BlockStatus.completed)
     todo = [b for b in blocks if b.status_visual_plan != BlockStatus.completed]
     if not todo:
@@ -279,9 +308,14 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
                 )
                 return block, plan
             except Exception as exc:  # noqa: BLE001 - recorded per block below
+                from app.services.external_calls import ExternalOutcomeUnknown
+
+                if isinstance(exc, ExternalOutcomeUnknown):
+                    raise
                 return block, exc
 
     results = await asyncio.gather(*(plan_one(b) for b in todo))
+    _check_boundary(ctx)
 
     # The planner is meant to be the exception, not the rule: a script that
     # draws its own slides never reaches it, and every block that does is one
@@ -319,6 +353,10 @@ async def run_visual_plan_stage(ctx: StageContext, db: Session) -> int:
             style,
         )
         block.status_visual_plan = BlockStatus.completed
+        block.status_image = BlockStatus.pending
+        block.status_render = BlockStatus.pending
+        if ctx.project.narration_pacing_mode == "adaptive":
+            block.status_audio = BlockStatus.pending
         block.error_message = None
         done += 1
     db.commit()
@@ -353,9 +391,8 @@ async def run_image_stage(ctx: StageContext, db: Session) -> int:
     """
     count = 0
     style = ctx.project.global_visual_style or ""
-    for block in sorted(ctx.project.blocks, key=lambda b: b.index):
-        if ctx.is_cancelled():
-            break
+    for block in _selected_blocks(ctx):
+        _check_boundary(ctx)
         if block.status_image == BlockStatus.completed:
             count += 1
             continue
@@ -395,6 +432,7 @@ async def _render_block_image(
             await ctx.bundle.image.generate_image(
                 prompt, settings.output_width, settings.output_height, output
             )
+            _check_boundary(ctx)
         else:
             # Render at the size of the *slide region*, not the whole frame.
             # With subtitles on, ffmpeg fits the slide into
@@ -426,6 +464,7 @@ async def _render_block_image(
                 block_image_path(ctx.project.id, block.index, stale).unlink(
                     missing_ok=True
                 )
+        _check_boundary(ctx)
         block.image_path = relpath_for_db(output)
         block.status_image = BlockStatus.completed
         block.status_render = BlockStatus.pending
@@ -451,9 +490,8 @@ async def run_audio_stage(ctx: StageContext, db: Session) -> int:
     """
     count = 0
     ensure_project_layout(ctx.project.id)
-    for block in sorted(ctx.project.blocks, key=lambda b: b.index):
-        if ctx.is_cancelled():
-            break
+    for block in _selected_blocks(ctx):
+        _check_boundary(ctx)
         if block.status_audio == BlockStatus.completed and block.audio_path:
             count += 1
             continue
@@ -492,6 +530,7 @@ async def _render_block_audio(
             pronunciation_overrides=ctx.project.pronunciation_overrides,
             focus_terms=_narration_focus_terms(block),
         )
+        _check_boundary(ctx)
         # Sentence timings are what the render stage times captions and slide
         # changes against, and rerender runs long after this — persist them.
         narration.write_spans(
@@ -545,7 +584,11 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
         timeline JSON, project JSON, and corresponding database fields.
 
     """
+    _check_boundary(ctx)
     ensure_project_layout(ctx.project.id)
+    managed_directory = getattr(ctx, "output_directory", None)
+    if managed_directory:
+        managed_directory.mkdir(parents=True, exist_ok=True)
     settings = ctx.settings
 
     blocks = sorted(ctx.project.blocks, key=lambda b: b.index)
@@ -568,8 +611,7 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
     timeline: list[dict[str, Any]] = []
     cursor_ms = 0
     for block in blocks:
-        if ctx.is_cancelled():
-            break
+        _check_boundary(ctx)
         db.refresh(block)
         if block.duration_ms:
             block.display_duration_ms = compute_display_duration_ms(
@@ -654,6 +696,7 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
                 args,
                 log_path=project_dir(ctx.project.id) / "logs" / f"block_{block.index:04d}.log",
             )
+            _check_boundary(ctx)
             candidate.replace(output)
             block.video_path = relpath_for_db(output)
             db.commit()
@@ -691,13 +734,12 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
         block.status_render = BlockStatus.completed
         db.commit()
 
-    if ctx.is_cancelled():
-        raise RuntimeError("ユーザーによりキャンセルされました")
+    _check_boundary(ctx)
 
     # concat
     list_file = concat_list_path(ctx.project.id)
     ffmpeg_runner.write_concat_list(per_block_videos, list_file)
-    final = output_video_path(ctx.project.id)
+    final = (managed_directory / "video.mp4") if managed_directory else output_video_path(ctx.project.id)
     candidate_final = final.with_name("video.pending.mp4")
     args = ffmpeg_runner.build_concat_args(
         list_file=list_file,
@@ -709,11 +751,10 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
         args,
         log_path=project_dir(ctx.project.id) / "logs" / "concat.log",
     )
-    candidate_final.replace(final)
-    ctx.project.output_video_path = relpath_for_db(final)
+    _check_boundary(ctx)
 
     # subtitles (whole-project .ass for external players; absolute timeline)
-    ass_path = project_subtitle_path(ctx.project.id)
+    ass_path = (managed_directory / "subtitles.ass") if managed_directory else project_subtitle_path(ctx.project.id)
     if ctx.project.subtitle_enabled:
         subtitles.render_ass(
             cues,
@@ -726,17 +767,33 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
             outline_color=ctx.project.subtitle_outline_color,
             background=ctx.project.subtitle_background,
         )
-    ctx.project.output_subtitle_path = relpath_for_db(ass_path) if ass_path.exists() else None
+    subtitle_path = relpath_for_db(ass_path) if ctx.project.subtitle_enabled and ass_path.exists() else None
 
     # write timeline + project.json
-    project_json_path(ctx.project.id).write_text(
-        _project_json_payload(ctx.project, timeline),
-        encoding="utf-8",
-    )
-    timeline_json_path(ctx.project.id).write_text(
+    metadata_path = (managed_directory / "project.json") if managed_directory else project_json_path(ctx.project.id)
+    metadata_text = _project_json_payload(ctx.project, timeline)
+    if managed_directory:
+        import json
+
+        metadata = json.loads(metadata_text)
+        metadata["output_video_path"] = relpath_for_db(final)
+        metadata["output_subtitle_path"] = subtitle_path
+        metadata_text = json.dumps(metadata, ensure_ascii=False, indent=2)
+    metadata_path.write_text(metadata_text, encoding="utf-8")
+    timeline_path = (managed_directory / "timeline.json") if managed_directory else timeline_json_path(ctx.project.id)
+    timeline_path.write_text(
         _timeline_json_payload(timeline),
         encoding="utf-8",
     )
+    _check_boundary(ctx)
+    if managed_directory:
+        # The history publisher verifies media and owns the only current-pointer
+        # and terminal-job commit. Working metadata never publishes by itself.
+        db.commit()
+        return candidate_final
+    candidate_final.replace(final)
+    ctx.project.output_video_path = relpath_for_db(final)
+    ctx.project.output_subtitle_path = subtitle_path
     db.commit()
     return final
 
@@ -1222,3 +1279,204 @@ async def rerender_project(
             db.commit()
     finally:
         db.close()
+
+
+def _providers_for_stages(project: Project, stages: list[str]) -> ProviderBundle:
+    """Only initialize credentials for providers this execution can actually use."""
+    if project.use_fake_providers or "split" in stages or "plan" in stages:
+        return build_providers_for_project(project)
+    from app.core.security import secret_store
+    from app.providers.image_openai import OpenAIImageProvider
+    from app.providers.llm_fake import FakeLLMProvider
+    from app.providers.voicevox import VoicevoxClient
+
+    settings = get_settings()
+    secrets = secret_store.get(project.id)
+    image_provider = None
+    if "image" in stages and any(block.visual_type == VisualType.ai_image for block in project.blocks):
+        key = (secrets.image_api_key if secrets else None) or settings.image_api_key
+        if key:
+            image_provider = OpenAIImageProvider(
+                api_key=key,
+                model=(secrets.image_model if secrets else None) or settings.image_model or "gpt-image-1",
+                base_url=(secrets.image_base_url if secrets else None) or "https://api.openai.com/v1",
+            )
+    # The unused LLM is an offline placeholder; no planning stage can reach it.
+    return ProviderBundle(llm=FakeLLMProvider(), image=image_provider,
+                          voicevox=VoicevoxClient(project.voicevox_url), use_fake=False)
+
+
+async def run_generation_job(job_id: int, cancel_check: Callable[[], bool]) -> None:
+    """Execute one durable plan against checked inputs and publish immutable history.
+
+    This is the managed production entry point. Legacy direct stage/pipeline
+    functions retain their signatures for callers and regression tests.
+    """
+    from app.db import get_session_factory
+    from app.models.job import GenerationJob, JobStatus
+    from app.services.artifact_store import (
+        collect_completed_materials, collect_render_materials, file_identity,
+        preserve_legacy_video, publish_artifact, verify_materials,
+    )
+    from app.services.generation_plan import build_generation_plan
+    from app.services.generation_snapshots import (
+        FROZEN_SNAPSHOT_KEYS, GenerationCancelled, StaleGenerationInput, capture_inputs, fingerprint_inputs,
+    )
+
+    factory = get_session_factory()
+    bundle: ProviderBundle | None = None
+    with factory() as db:
+        job = db.get(GenerationJob, job_id)
+        if job is None or job.status != JobStatus.running:
+            raise StaleGenerationInput("生成ジョブは実行中ではありません")
+        project = db.get(Project, job.project_id)
+        if project is None or not job.input_snapshot or not job.input_fingerprint:
+            raise StaleGenerationInput("保存された生成入力が見つかりません")
+        if fingerprint_inputs(job.input_snapshot) != job.input_fingerprint:
+            raise StaleGenerationInput("保存された生成入力が破損しています")
+        expected_revision = job.input_revision
+        expected = (job.plan_json or {}).get("resume_inputs", job.input_snapshot)
+        if not isinstance(expected, dict) or any(expected.get(key) != job.input_snapshot.get(key)
+                                                for key in FROZEN_SNAPSHOT_KEYS):
+            raise StaleGenerationInput("再開地点の設定または接続先が変更されています")
+        expected_fingerprint = fingerprint_inputs(expected)
+        if "resume_inputs" in (job.plan_json or {}) and job.plan_json.get("resume_fingerprint") != expected_fingerprint:
+            raise StaleGenerationInput("保存された再開入力が破損しています")
+        if project.revision != expected_revision or fingerprint_inputs(capture_inputs(project)) != expected_fingerprint:
+            raise StaleGenerationInput("生成要求後に設定または入力が変更されました")
+        expected_materials: list[dict[str, Any]] = []
+        mutable_paths: set[str] = set()
+
+        def guard() -> None:
+            if cancel_check():
+                raise GenerationCancelled("ユーザーによりキャンセルされました")
+            with factory() as check_db:
+                current_job = check_db.get(GenerationJob, job_id)
+                current = check_db.get(Project, project.id)
+                if current_job is None or current_job.cancel_requested:
+                    raise GenerationCancelled("ユーザーによりキャンセルされました")
+                if current is None or current.revision != expected_revision:
+                    raise StaleGenerationInput("生成中に設定の版が変更されました")
+                if fingerprint_inputs(capture_inputs(current)) != expected_fingerprint:
+                    raise StaleGenerationInput("生成中に参照入力が変更されました")
+            verify_materials([item for item in expected_materials if item["path"] not in mutable_paths])
+
+        def checkpoint() -> None:
+            nonlocal expected_fingerprint, expected_materials
+            db.expire_all()
+            snapshot = capture_inputs(project)
+            # User settings must never be adopted from an out-of-band write.
+            if project.revision != expected_revision or any(snapshot.get(key) != job.input_snapshot.get(key)
+                                                            for key in FROZEN_SNAPSHOT_KEYS):
+                raise StaleGenerationInput("生成中に設定が変更されました")
+            expected_fingerprint = fingerprint_inputs(snapshot)
+            expected_materials = collect_completed_materials(project)
+            job.input_snapshot = snapshot
+            job.input_fingerprint = expected_fingerprint
+            job.plan_json = {**(job.plan_json or {}), "resume_inputs": snapshot,
+                             "resume_fingerprint": expected_fingerprint,
+                             "stage_materials": expected_materials}
+            db.commit()
+
+        guard()
+        await preserve_legacy_video(project.id)
+        guard()
+        db.expire_all()
+        plan = build_generation_plan(project, job.kind, job.block_index)
+        expected_materials = collect_completed_materials(project)
+        stages: list[str] = plan["stages"]
+        if any(stage != "render" for stage in stages):
+            bundle = _providers_for_stages(project, stages)
+        context = StageContext(
+            project=project, settings=get_settings(), bundle=bundle,  # type: ignore[arg-type]
+            voicevox_settings=build_voicevox_settings(project), is_cancelled=cancel_check,
+            input_guard=guard, accept_generated_inputs=checkpoint,
+        )
+        output_directory = project_dir(project.id) / "history" / f"job-{job_id:08d}"
+        try:
+            for number, stage in enumerate(stages):
+                guard()
+                mutable_paths.clear()
+                job.current_stage = stage
+                job.progress = number / max(1, len(stages))
+                project.current_stage = stage
+                project.progress = job.progress
+                project.error_message = None
+                project.status = {
+                    "split": ProjectStatus.splitting, "plan": ProjectStatus.planning,
+                    "image": ProjectStatus.generating, "audio": ProjectStatus.generating,
+                    "render": ProjectStatus.rendering,
+                }[stage]
+                db.commit()
+                if stage == "split":
+                    await run_split_stage(context, db)
+                    checkpoint()
+                    # Newly split blocks did not exist when the request was accepted.
+                    plan = build_generation_plan(project, job.kind, job.block_index)
+                    continue
+                selected = frozenset(int(index) for index, tasks in plan["blocks"].items() if stage in tasks)
+                context.block_indices = selected
+                for block in project.blocks:
+                    if block.index not in selected:
+                        continue
+                    if stage == "plan":
+                        block.status_visual_plan = BlockStatus.pending
+                    elif stage == "image":
+                        block.status_image = BlockStatus.pending
+                        mutable_paths.update(relpath_for_db(block_image_path(project.id, block.index, slot))
+                                             for slot in range(9))
+                    elif stage == "audio":
+                        block.status_audio = BlockStatus.pending
+                        mutable_paths.update({relpath_for_db(block_audio_path(project.id, block.index)),
+                                              relpath_for_db(block_narration_path(project.id, block.index))})
+                    elif stage == "render":
+                        block.status_render = BlockStatus.pending
+                        mutable_paths.add(relpath_for_db(block_video_path(project.id, block.index)))
+                db.commit()
+                if stage == "plan":
+                    await run_visual_plan_stage(context, db)
+                    if any(block.status_visual_plan != BlockStatus.completed
+                           for block in project.blocks if block.index in selected):
+                        raise RuntimeError("画面構成が未完成のブロックがあります")
+                elif stage == "image":
+                    await run_image_stage(context, db)
+                elif stage == "audio":
+                    await run_audio_stage(context, db)
+                elif stage == "render":
+                    settled = capture_inputs(project)
+                    materials = collect_render_materials(project)
+                    reused_videos = [file_identity(block.video_path) for block in project.blocks
+                                     if block.status_render == BlockStatus.completed and block.video_path]
+                    render_context = RenderContext(
+                        project, get_settings(), is_cancelled=cancel_check,
+                        input_guard=guard, output_directory=output_directory,
+                    )
+                    candidate = await run_render_stage(render_context, db)
+                    guard()
+                    if collect_render_materials(project) != materials:
+                        raise StaleGenerationInput("生成中に参照素材の一覧または内容が変更されました")
+                    subtitle = output_directory / "subtitles.ass" if project.subtitle_enabled else None
+                    await publish_artifact(job_id, candidate, subtitle,
+                                           settled_inputs=settled, materials=materials + reused_videos,
+                                           cancel_check=cancel_check,
+                                           block_videos=[file_identity(block.video_path)
+                                                         for block in project.blocks if block.video_path])
+                    return
+                checkpoint()
+                mutable_paths.clear()
+                guard()
+            # Targeted intermediate operations have no final-video publication.
+            guard()
+            project.current_stage = "done"
+            project.progress = 1.0
+            project.status = ProjectStatus.completed
+            db.commit()
+        finally:
+            if bundle is not None:
+                closed: set[int] = set()
+                for provider in (bundle.llm, bundle.image, bundle.voicevox, bundle.llm_planner):
+                    if provider is not None and id(provider) not in closed:
+                        closed.add(id(provider))
+                        close = getattr(provider, "aclose", None)
+                        if close:
+                            await close()

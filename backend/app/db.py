@@ -19,6 +19,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
+from app.core.startup_status import StartupUnavailableError, get_startup_status
 
 
 class Base(DeclarativeBase):
@@ -69,7 +70,7 @@ def get_engine():
         url = _make_engine_url(settings.database_url)
         _engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 30},
             future=True,
         )
     return _engine
@@ -91,71 +92,39 @@ def get_session_factory() -> sessionmaker[Session]:
     return _SessionLocal
 
 
-def init_db() -> None:
-    """Register models, create missing tables, and apply additive updates.
-
-    Side Effects:
-        Imports concrete model modules, creates missing tables, and adds model
-        columns absent from an existing SQLite database.  Existing data is not
-        migrated beyond these additive column operations.
-    """
-    # Import models so they register with Base.
+def register_models() -> None:
+    """Import every ORM model module without opening or altering a database."""
+    from app.models import artifact as _artifact  # noqa: F401
     from app.models import block as _block  # noqa: F401
+    from app.models import external_call as _external_call  # noqa: F401
     from app.models import job as _job  # noqa: F401
+    from app.models import language_request as _language_request  # noqa: F401
+    from app.models import language_turn as _language_turn  # noqa: F401
+    from app.models import operation_request as _operation_request  # noqa: F401
     from app.models import project as _project  # noqa: F401
-
-    engine = get_engine()
-    Base.metadata.create_all(bind=engine)
-    _add_missing_columns(engine)
+    from app.models import project_identity as _project_identity  # noqa: F401
+    from app.models import settings_revision as _settings_revision  # noqa: F401
 
 
-def _add_missing_columns(engine) -> None:
-    """Add columns that exist on the models but not yet in the database.
+def init_db() -> None:
+    """Create the registered current schema after migration approval."""
+    Base.metadata.create_all(bind=get_engine())
 
-    ``create_all`` only creates missing *tables*, so a new field on an
-    existing model is silently absent and every query against it fails. There
-    is no migration tool here by design (single-user, local SQLite), and the
-    only schema changes this project makes are additive, which SQLite's
-    ``ALTER TABLE ADD COLUMN`` handles directly. Anything else — dropping,
-    renaming, retyping — is deliberately not attempted.
 
-    Args:
-        engine: SQLAlchemy engine whose tables should be compared with
-            ``Base.metadata``.
+def shutdown_db() -> None:
+    """Dispose the application engine pool and clear cached database factories.
 
-    Raises:
-        RuntimeError: If a missing non-nullable column has no server default,
-            because SQLite cannot add it while preserving existing rows.
-
-    Side Effects:
-        Executes ``ALTER TABLE ... ADD COLUMN`` statements for missing,
-        additive columns.  Tables and existing columns are not removed or
-        retyped.
-
+    This production shutdown seam performs no schema mutation. The next
+    application lifespan constructs a new engine bound to the current database
+    file after acquiring its lease.
     """
-    from sqlalchemy import inspect, text
-
-    inspector = inspect(engine)
-    existing_tables = set(inspector.get_table_names())
-    with engine.begin() as connection:
-        for table in Base.metadata.sorted_tables:
-            if table.name not in existing_tables:
-                continue
-            present = {c["name"] for c in inspector.get_columns(table.name)}
-            for column in table.columns:
-                if column.name in present:
-                    continue
-                ddl = f"{column.name} {column.type.compile(engine.dialect)}"
-                default = column.server_default
-                if default is not None:
-                    ddl += f" DEFAULT {default.arg}"
-                elif not column.nullable:
-                    # ADD COLUMN cannot leave existing rows without a value.
-                    raise RuntimeError(
-                        f"{table.name}.{column.name} is NOT NULL without a "
-                        "server_default; add one so existing rows can be filled"
-                    )
-                connection.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {ddl}"))
+    global _engine, _SessionLocal
+    try:
+        if _engine is not None:
+            _engine.dispose()
+    finally:
+        _engine = None
+        _SessionLocal = None
 
 
 def get_db() -> Iterator[Session]:
@@ -169,6 +138,8 @@ def get_db() -> Iterator[Session]:
         transaction commit/rollback remains the caller's responsibility.
 
     """
+    if get_startup_status().status != "ready":
+        raise StartupUnavailableError()
     factory = get_session_factory()
     db = factory()
     try:

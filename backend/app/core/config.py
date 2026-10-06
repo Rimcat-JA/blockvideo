@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -73,6 +74,21 @@ class Settings(BaseSettings):
 
     # LLM fallbacks (env-var only)
     llm_api_key: str | None = None
+    # D17 language control is opt-in and separate from paid generation providers.
+    language_model: str | None = None
+    language_base_url: str = "http://127.0.0.1:1234/v1"
+    language_reasoning_effort: Literal["none"] | None = "none"
+    language_review_all: bool = False
+    # Unattended requests (UI toggle, off per request by default) may run end to end.
+    language_yolo_enabled: bool = True
+    # D27 opt-in: local verified index only; absence preserves All Tools.
+    language_retrieval_index: Path | None = None
+    language_retrieval_profile: Path = PROJECT_ROOT / "app/retrieval/e5-profile.json"
+    language_embedding_assets: Path = PROJECT_ROOT / "storage/embedding-models/multilingual-e5-small"
+    language_embedding_base_url: str = "http://127.0.0.1:1234/v1"
+    language_retrieval_all_tools: bool = True
+    # D28: applies only when a semantic index is explicitly configured.
+    language_retrieval_readiness: bool = True
     llm_base_url: str | None = None
     llm_model: str | None = None
     # Optional cheaper/faster model for the high-volume per-block planning

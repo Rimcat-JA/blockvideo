@@ -15,8 +15,8 @@ from typing import Any
 
 import httpx
 
-from app.core.security import redact
 from app.providers.llm import LLMProvider, LLMRequest, LLMResponse, ProviderError
+from app.services.external_calls import journaled_post
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -142,7 +142,9 @@ class OpenAICompatibleProvider(LLMProvider):
 
         async def _post(payload: dict[str, Any]) -> httpx.Response:
             try:
-                return await self._client.post(url, json=payload, headers=headers)
+                return await journaled_post(
+                    self._client, url, provider=self.name, json=payload, headers=headers,
+                )
             except httpx.HTTPError as exc:
                 raise ProviderError(
                     f"LLM接続に失敗しました: {exc.__class__.__name__}", safe=True, original=exc
@@ -164,11 +166,10 @@ class OpenAICompatibleProvider(LLMProvider):
             response = await _post(retry_payload)
 
         if response.status_code >= 400:
-            # never include the API key in the error message
-            text_preview = response.text[:200] if response.text else ""
-            redacted = redact(text_preview)
+            # Upstream bodies can echo source text or credentials; retain them
+            # only in the private response cache, never in public/log errors.
             raise ProviderError(
-                f"LLMリクエストエラー (status {response.status_code}): {redacted}",
+                f"LLMリクエストエラー (status {response.status_code})",
                 safe=True,
             )
         data = response.json()

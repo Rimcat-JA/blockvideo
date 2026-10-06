@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from app import __version__
 from app.core.config import get_settings
+from app.core.startup_status import get_startup_status
 from app.providers.llm import ProviderError
 from app.providers.voicevox import VoicevoxClient
 from app.schemas import HealthResponse, SpeakersEnvelope
@@ -27,13 +28,14 @@ def health() -> HealthResponse:
     """Report version and media-tool availability.
 
     Returns:
-        ``HealthResponse`` with ``status="ok"``, backend version, and PATH/
-        configuration probes for FFmpeg and FFprobe.  The endpoint does not
-        invoke either executable.
+        ``HealthResponse`` with the database startup health, backend version,
+        and PATH/configuration probes for FFmpeg and FFprobe.  The endpoint
+        does not invoke either executable.
 
     """
+    startup = get_startup_status()
     return HealthResponse(
-        status="ok",
+        status="degraded" if startup.status == "migration_failed" else "ok",
         version=__version__,
         ffmpeg_available=ffmpeg_available(),
         ffprobe_available=ffprobe_available(),

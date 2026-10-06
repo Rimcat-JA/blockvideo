@@ -34,7 +34,7 @@ export function useLiveProject(id: number | null) {
     queryFn: () => api.getProject(id as number),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === 'completed' || status === 'failed' ? false : 1500;
+      return status && ['completed', 'failed', 'cancelled', 'unknown'].includes(status) ? false : 1500;
     },
   });
 }
@@ -45,6 +45,17 @@ export function useProjectBlocks(projectId: number | null) {
     queryKey: ['blocks', projectId],
     enabled: projectId != null,
     queryFn: () => api.listBlocks(projectId as number),
+  });
+}
+
+export function useProjectHistory(projectId: number) {
+  return useQuery({
+    queryKey: ['history', projectId],
+    queryFn: () => api.getProjectHistory(projectId),
+    // History verifies media on disk. Avoid rehashing every saved video while idle.
+    refetchInterval: (query) => query.state.data?.jobs.some((job) =>
+      job.status === 'pending' || job.status === 'running') ? 2000 : false,
+    refetchOnWindowFocus: true,
   });
 }
 

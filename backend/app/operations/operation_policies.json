@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "global_negative_phrases": [
+    "何もしない",
+    "実行しない",
+    "変更しない",
+    "do nothing",
+    "do not execute",
+    "don't execute"
+  ],
+  "negated_clause_pattern": "(?:(?!(?:して|って|んで|いて|えて|けて|せて|めて|べて|れて|きて|みて|にて|ちて|うえで|上で|てから|たら)(?!いただかな|もらわな|くれな|ほしくな))[^、。,.!！?？])*?(?:ないで|ないこと|なくていい|なくてよい|なくても(?:いい|よい|大丈夫)|なくて大丈夫)(?:です|ください|ね|ほしい|おいて)?",
+  "negation_residue_pattern": "[ 、。,.!！?？]*(?:です|ね|よ|お願いします)?[ 、。,.!！?？]*",
+  "setting_keywords": {"voicevox_speed_scale": ["話速|速度|速さ|スピード|読み上げ.{0,3}速", "(\\d+(?:\\.\\d+)?)\\s*倍速", "(\\d+(?:\\.\\d+)?)\\s*倍の(?:話速|速度|速さ|スピード)"], "voicevox_volume_scale": ["音量|ボリューム", "(\\d+(?:\\.\\d+)?)\\s*倍の(?:音量|ボリューム)"], "voicevox_pitch_scale": ["ピッチ|声の高さ|音の高さ"], "voicevox_intonation_scale": ["抑揚|イントネーション"], "voicevox_speaker_id": ["話者|スピーカー"], "subtitle_max_chars_per_line": ["1行の文字数|一行の文字数|行あたりの文字数|字幕の文字数"], "max_slides_per_block": ["スライド"], "min_display_seconds": ["最低表示時間|表示時間"], "pre_margin_seconds": ["前の余白|前余白|前のマージン"], "post_margin_seconds": ["後の余白|後余白|後ろの余白|後のマージン"], "narration_sentence_pause_seconds": ["文の間|文間|ポーズ|間隔"]},
+  "follow_up_generation": {
+    "operation_id": "project.generation.start",
+    "operation_version": 1,
+    "arguments": {"kind": "full"}
+  },
+  "references": {
+    "artifact": {
+      "patterns": ["(?:動画|成果物|artifact)\\s*(?:id|番号)?\\s*[:=#]?\\s*(\\d+)\\s*(?:番)?(?!\\s*(?:px|ピクセル|倍|秒|%))"],
+      "marker": "(?:動画|成果物|artifact)",
+      "answer_prefix": "動画 ",
+      "question": "戻したい完成動画の番号を「動画 3」のように1つ指定してください（出力履歴の「動画 N を開く」の番号です）。"
+    },
+    "job": {
+      "patterns": ["(?:ジョブ|job)(?:[_\\s]*id)?\\s*[:=#]?\\s*(\\d+)"],
+      "marker": "(?:ジョブ|job)",
+      "answer_prefix": "ジョブ ",
+      "question": "対象のジョブ番号を「ジョブ7」のように1つ指定してください。"
+    },
+    "revision": {
+      "patterns": [
+        "(?:revision|リビジョン|設定(?:の)?(?:版|バージョン))\\s*[:=#]?\\s*(\\d+)",
+        "(?:第)?(\\d+)\\s*版"
+      ],
+      "marker": "(?:revision|リビジョン|版|バージョン)",
+      "answer_prefix": "revision ",
+      "question": "戻したい設定の版番号を「revision 2」のように1つ指定してください。"
+    }
+  },
+  "operations": {
+    "project.artifact.restore": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "negative_patterns": ["(?:動画|成果物)[^、。,.!！?？]{0,12}?戻さない"],
+      "reference": {"argument": "artifact_id", "kind": "artifact"}
+    },
+    "project.generation.cancel": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "negative_phrases": ["止めない", "中止しない", "キャンセルしない", "取り消さない", "停止しない", "do not cancel", "don't cancel"],
+      "reference": {"argument": "job_id", "kind": "job"}
+    },
+    "project.generation.retry": {
+      "mutates": true,
+      "requires_confirmation": true,
+      "negative_phrases": ["再試行しない", "再実行しない", "やり直さない", "do not retry", "don't retry"],
+      "reference": {"argument": "job_id", "kind": "job"}
+    },
+    "project.generation.start": {
+      "mutates": true,
+      "requires_confirmation": true,
+      "negative_phrases": ["作らない", "生成しない", "開始しない", "作り直さない", "do not generate", "don't generate"]
+    },
+    "project.settings.restore": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "negative_patterns": ["(?:設定|第?\\d+\\s*版|revision\\s*\\d+)[^、。,.!！?？]{0,12}?戻さない"],
+      "reference": {"argument": "revision", "kind": "revision"}
+    },
+    "project.settings.update": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "allows_generate_after_save": true,
+      "requires_arguments": true,
+      "settings_views": {
+        "1": {"settings_at": ""},
+        "2": {"settings_at": "settings", "aliases": {"subtitle_font_size_delta": "subtitle_font_size_delta"}}
+      }
+    },
+    "project.status.get": {
+      "mutates": false,
+      "requires_confirmation": false
+    },
+    "project.subtitle-font-size.adjust": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "allows_generate_after_save": true,
+      "settings_views": {"1": {"aliases": {"delta": "subtitle_font_size_delta"}}}
+    },
+    "project.subtitle-font-size.set": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "allows_generate_after_save": true,
+      "settings_views": {"1": {"aliases": {"value": "subtitle_font_size"}}}
+    }
+  }
+}

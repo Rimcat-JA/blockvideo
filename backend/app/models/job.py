@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -29,6 +29,7 @@ class JobStatus(str, enum.Enum):
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
+    unknown = "unknown"
 
 
 class GenerationJob(Base):
@@ -63,6 +64,15 @@ class GenerationJob(Base):
     stage_progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
 
     cancel_requested: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    kind: Mapped[str] = mapped_column(String(32), default="full", server_default=text("'full'"), nullable=False)
+    block_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plan_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    parent_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recovery_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

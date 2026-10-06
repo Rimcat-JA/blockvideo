@@ -13,9 +13,9 @@ from pathlib import Path
 
 import httpx
 
-from app.core.security import redact
 from app.providers.image import ImageProvider
 from app.providers.llm import ProviderError
+from app.services.external_calls import journaled_post
 
 
 class OpenAIImageProvider(ImageProvider):
@@ -91,7 +91,9 @@ class OpenAIImageProvider(ImageProvider):
             "Content-Type": "application/json",
         }
         try:
-            response = await self._client.post(url, json=payload, headers=headers)
+            response = await journaled_post(
+                self._client, url, provider=self.name, json=payload, headers=headers,
+            )
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"画像API接続に失敗しました: {exc.__class__.__name__}",
@@ -99,9 +101,8 @@ class OpenAIImageProvider(ImageProvider):
                 original=exc,
             ) from exc
         if response.status_code >= 400:
-            text_preview = response.text[:200] if response.text else ""
             raise ProviderError(
-                f"画像APIエラー (status {response.status_code}): {redact(text_preview)}",
+                f"画像APIエラー (status {response.status_code})",
                 safe=True,
             )
         try:

@@ -1,12 +1,12 @@
 /** Detailed block card with artifacts, stage state, and regeneration actions. */
-import { useRegenerateBlockAudio, useRegenerateBlockVisual, useRerender } from '@/api/hooks';
-import type { BlockSummary } from '@/lib/types';
+import type { BlockSummary, PartialGenerationKind } from '@/lib/types';
 import { StatusBadge } from './StatusBadge';
 
 /** Block card inputs, including the parent project used by mutations. */
 interface BlockItemProps {
   block: BlockSummary;
-  projectId: number;
+  disabled?: boolean;
+  onGenerate: (kind: PartialGenerationKind, blockIndex: number) => void;
 }
 
 function formatMs(ms: number | null | undefined): string {
@@ -15,11 +15,8 @@ function formatMs(ms: number | null | undefined): string {
   return `${(ms / 1000).toFixed(2)}秒`;
 }
 
-export function BlockItem({ block, projectId }: BlockItemProps) {
+export function BlockItem({ block, disabled, onGenerate }: BlockItemProps) {
   /** Render block metadata and controls for partial regeneration. */
-  const visual = useRegenerateBlockVisual(projectId);
-  const audio = useRegenerateBlockAudio(projectId);
-  const rerender = useRerender(projectId);
 
   return (
     <article className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
@@ -74,24 +71,24 @@ export function BlockItem({ block, projectId }: BlockItemProps) {
         <button
           type="button"
           className="btn-secondary"
-          onClick={() => visual.mutate(block.id)}
-          disabled={visual.isPending}
+          onClick={() => onGenerate('block_visual', block.index)}
+          disabled={disabled}
         >
           画像だけ再生成
         </button>
         <button
           type="button"
           className="btn-secondary"
-          onClick={() => audio.mutate(block.id)}
-          disabled={audio.isPending}
+          onClick={() => onGenerate('block_audio', block.index)}
+          disabled={disabled}
         >
           音声だけ再生成
         </button>
         <button
           type="button"
           className="btn-secondary"
-          onClick={() => rerender.mutate()}
-          disabled={rerender.isPending}
+          onClick={() => onGenerate('rerender', block.index)}
+          disabled={disabled}
         >
           このブロックから再レンダリング
         </button>

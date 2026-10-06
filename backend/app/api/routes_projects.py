@@ -15,13 +15,21 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.api.utils import ensure_project_idle, ensure_render_assets_ready, validate_artifact_path
+from app.api.utils import (
+    delete_project_external_calls,
+    ensure_project_deletable,
+    ensure_project_idle,
+    ensure_render_assets_ready,
+    validate_artifact_path,
+)
 from app.core.logging import log
 from app.core.security import SecretBundle, secret_store
 from app.db import get_db
+from app.models.artifact import GenerationArtifact
+from app.models.settings_revision import SettingsRevision
 from app.models.block import Block
 from app.models.job import GenerationJob
 from app.models.project import Project
@@ -37,13 +45,22 @@ from app.schemas import (
     QuickCreateResponse,
 )
 from app.services.paths import ensure_project_layout, project_dir
-from app.services.invalidation import invalidate_project_settings
-from app.services.provider_factory import build_providers_for_project
-from app.services.visual_planner import generate_title
+from app.services.project_settings import apply_project_settings
+from app.services.transactions import begin_write
+from app.services.settings_history import record_settings, validate_settings
+from app.services.job_control import cancel_job
+from app.services.job_views import (
+    RecoveryContext,
+    build_recovery_contexts,
+    job_summary,
+    project_generation_recovery,
+)
+from app.services.project_identity import allocate_project_id, reserve_project_id
+from app.services.artifact_store import artifact_file_path
+from app.services.job_records import create_pending_job
 from app.workers.job_runner import (
     enqueue_full_pipeline,
     enqueue_rerender,
-    job_registry,
 )
 
 
@@ -63,6 +80,7 @@ def _project_summary(project: Project) -> ProjectSummary:
     """
     return ProjectSummary(
         id=project.id,
+        revision=project.revision,
         title=project.title,
         status=project.status.value,
         progress=project.progress,
@@ -75,7 +93,7 @@ def _project_summary(project: Project) -> ProjectSummary:
     )
 
 
-def _project_detail(project: Project) -> ProjectDetail:
+def _project_detail(project: Project, recovery_context: RecoveryContext) -> ProjectDetail:
     """Map user-visible project settings and state to API JSON.
 
     Args:
@@ -88,6 +106,8 @@ def _project_detail(project: Project) -> ProjectDetail:
     """
     return ProjectDetail(
         id=project.id,
+        generation_recovery=project_generation_recovery(recovery_context),
+        revision=project.revision,
         title=project.title,
         status=project.status.value,
         progress=project.progress,
@@ -160,7 +180,7 @@ def _block_summary(block: Block) -> BlockSummary:
     )
 
 
-def _job_summary(job: GenerationJob) -> JobSummary:
+def _job_summary(job: GenerationJob, recovery_context: RecoveryContext | None) -> JobSummary:
     """Map a persisted job row to the public progress schema.
 
     Args:
@@ -170,17 +190,7 @@ def _job_summary(job: GenerationJob) -> JobSummary:
         ``JobSummary`` with ISO timestamps and status/progress fields.
 
     """
-    return JobSummary(
-        id=job.id,
-        project_id=job.project_id,
-        current_stage=job.current_stage,
-        status=job.status.value,
-        progress=job.progress,
-        stage_progress=job.stage_progress,
-        started_at=job.started_at.isoformat() if job.started_at else None,
-        finished_at=job.finished_at.isoformat() if job.finished_at else None,
-        error_message=job.error_message,
-    )
+    return job_summary(job, recovery_context)
 
 
 def _provisional_title(script: str) -> str:
@@ -219,20 +229,21 @@ async def quick_create(
 
     Side Effects:
         Creates the project/layout, stores no raw secrets, performs best-effort
-        title generation when no title was supplied, and queues full pipeline
+        a title derived from the first script line, and queues full pipeline
         execution.
 
     Creates the project with defaults, names it from the script, and starts
-    the full pipeline in one call. Title generation is best-effort: a failed
-    or slow title must never stop the video from being produced, so we fall
-    back to the script's first line.
+    the full pipeline in one call. The first line provides a deterministic title;
+    paid external work begins only after a durable generation job is committed.
 
     """
     script = payload.source_script.strip()
     if not script:
         raise HTTPException(status_code=422, detail="source_script is empty")
 
+    begin_write(db)
     project = Project(
+        id=allocate_project_id(db),
         title=(payload.title or _provisional_title(script)),
         source_script=script,
         voicevox_url=payload.voicevox_url,
@@ -255,27 +266,17 @@ async def quick_create(
         if value is not None:
             setattr(project, field, value)
     db.add(project)
+    db.flush()
+    record_settings(db, project)
+    job = create_pending_job(db, project.id)
     db.commit()
     db.refresh(project)
+    db.refresh(job)
     ensure_project_layout(project.id)
-
-    if not payload.title:
-        try:
-            bundle = build_providers_for_project(project)
-            project.title = await generate_title(bundle.llm, script=script)
-            db.commit()
-            db.refresh(project)
-        except Exception as exc:  # noqa: BLE001 - never block generation
-            log.warning(
-                "タイトル自動生成に失敗、暫定タイトルを使用します: {err}",
-                err=exc.__class__.__name__,
-            )
-
-    job = await enqueue_full_pipeline(project.id)
-    fresh_job = db.get(GenerationJob, job.id) or job
-    db.refresh(project)
+    recovery_context = build_recovery_contexts(db, [project.id]).get(project.id)
     return QuickCreateResponse(
-        project=_project_detail(project), job=_job_summary(fresh_job)
+        project=_project_detail(project, recovery_context),
+        job=_job_summary(job, recovery_context),
     )
 
 
@@ -296,7 +297,9 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         job is queued.
 
     """
+    begin_write(db)
     project = Project(
+        id=allocate_project_id(db),
         title=payload.title,
         source_script=payload.source_script,
         voicevox_url=payload.voicevox_url,
@@ -325,6 +328,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
     )
     db.add(project)
     db.flush()
+    record_settings(db, project)
     if payload.providers.model_dump(exclude_none=True):
         secret_store.set(
             project.id,
@@ -340,7 +344,8 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
     db.commit()
     db.refresh(project)
     ensure_project_layout(project.id)
-    return _project_detail(project)
+    recovery_context = build_recovery_contexts(db, [project.id])[project.id]
+    return _project_detail(project, recovery_context)
 
 
 @router.get("", response_model=list[ProjectSummary])
@@ -376,7 +381,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    return _project_detail(project)
+    recovery_context = build_recovery_contexts(db, [project_id])[project_id]
+    return _project_detail(project, recovery_context)
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -394,16 +400,22 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
         HTTPException: Status 404 when the project does not exist.
 
     Side Effects:
-        Drops process-local secrets, cascades ORM child deletion, commits the
-        transaction, and best-effort removes the project's storage directory.
+        Commits the project and child-row deletion, drops process-local secrets,
+        and then best-effort removes the project's storage directory.
 
     """
+    begin_write(db)
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    secret_store.drop(project_id)
+    ensure_project_deletable(project_id, db)
+    reserve_project_id(db, project_id)
+    db.execute(delete(SettingsRevision).where(SettingsRevision.project_id == project_id))
+    db.execute(delete(GenerationArtifact).where(GenerationArtifact.project_id == project_id))
+    delete_project_external_calls(project_id, db)
     db.delete(project)
     db.commit()
+    secret_store.drop(project_id)
     # Best-effort filesystem cleanup; ignore failures.
     import shutil
 
@@ -439,18 +451,20 @@ def patch_project(
         callers choose an explicit regenerate endpoint afterward.
 
     """
+    begin_write(db)
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
     ensure_project_idle(project_id, db)
-    updates = payload.model_dump(exclude_unset=True)
-    changed_fields = {field for field, value in updates.items() if getattr(project, field) != value}
-    for field, value in updates.items():
-        setattr(project, field, value)
-    invalidate_project_settings(project, changed_fields)
+    try:
+        updates = validate_settings(project, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="設定値が正しくありません") from exc
+    apply_project_settings(project, updates)
     db.commit()
     db.refresh(project)
-    return _project_detail(project)
+    recovery_context = build_recovery_contexts(db, [project_id])[project_id]
+    return _project_detail(project, recovery_context)
 
 
 @router.get("/{project_id}/blocks", response_model=list[BlockSummary])
@@ -498,7 +512,8 @@ def list_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobSummary
         .order_by(GenerationJob.id.desc())
         .limit(20)
     ).scalars().all()
-    return [_job_summary(j) for j in jobs]
+    recovery_context = build_recovery_contexts(db, [project_id]).get(project_id)
+    return [_job_summary(job, recovery_context) for job in jobs]
 
 
 @router.post("/{project_id}/generate-all", response_model=GenerateAllResponse, status_code=202)
@@ -525,7 +540,10 @@ async def generate_all(project_id: int, db: Session = Depends(get_db)) -> Genera
     # enqueue_* closes its own session; re-fetch from the request session.
     fresh = db.get(GenerationJob, job.id)
     summary_source = fresh if fresh is not None else job
-    return GenerateAllResponse(job=_job_summary(summary_source), message="queued")
+    recovery_context = build_recovery_contexts(db, [project_id]).get(project_id)
+    return GenerateAllResponse(
+        job=_job_summary(summary_source, recovery_context), message="queued"
+    )
 
 
 @router.post("/{project_id}/cancel", status_code=200)
@@ -537,14 +555,16 @@ def cancel_project(project_id: int, db: Session = Depends(get_db)) -> dict[str, 
         db: Request-scoped SQLAlchemy session.
 
     Returns:
-        Mapping containing the count of jobs whose live process task accepted
-        the cancellation signal.
+        Mapping containing the count of newly persisted cancellation requests.
 
     Side Effects:
-        Sets durable ``cancel_requested`` flags and signals process-local tasks
-        through ``job_registry``.  Stages observe cancellation cooperatively.
+        Sets durable ``cancel_requested`` flags; workers observe them at safe
+        boundaries and publication checks the same persisted flag.
 
     """
+    begin_write(db)
+    if db.get(Project, project_id) is None:
+        raise HTTPException(status_code=404, detail="project not found")
     cancelled: list[int] = []
     jobs = db.execute(
         select(GenerationJob).where(
@@ -553,8 +573,7 @@ def cancel_project(project_id: int, db: Session = Depends(get_db)) -> dict[str, 
         )
     ).scalars().all()
     for job in jobs:
-        job.cancel_requested = True
-        if job_registry.request_cancel(job.id):
+        if cancel_job(db, job):
             cancelled.append(job.id)
     db.commit()
     return {"cancelled": len(cancelled)}
@@ -586,7 +605,10 @@ async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAl
     job = await enqueue_rerender(project_id)
     fresh = db.get(GenerationJob, job.id)
     summary_source = fresh if fresh is not None else job
-    return GenerateAllResponse(job=_job_summary(summary_source), message="rerender queued")
+    recovery_context = build_recovery_contexts(db, [project_id]).get(project_id)
+    return GenerateAllResponse(
+        job=_job_summary(summary_source, recovery_context), message="rerender queued"
+    )
 
 
 @router.get("/{project_id}/artifacts/image/{block_index}")
@@ -697,7 +719,16 @@ def download_video(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="project not found")
     if not project.output_video_path:
         raise HTTPException(status_code=404, detail="完成動画がまだ生成されていません")
-    path = validate_artifact_path(project.output_video_path)
+    if project.current_artifact_id is not None:
+        artifact = db.get(GenerationArtifact, project.current_artifact_id)
+        if artifact is None or artifact.project_id != project_id:
+            raise HTTPException(status_code=404, detail="完成動画の履歴が見つかりません")
+        try:
+            path = artifact_file_path(artifact)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="完成動画が欠損または変更されています") from exc
+    else:
+        path = validate_artifact_path(project.output_video_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="動画ファイルが見つかりません")
     return FileResponse(

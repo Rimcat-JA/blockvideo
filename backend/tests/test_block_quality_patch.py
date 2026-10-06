@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
-from app.db import get_db, get_session_factory
+from app.db import get_session_factory
 from app.main import create_app
 from app.models.block import Block, BlockStatus, VisualType
 from app.models.project import Project
@@ -72,7 +72,8 @@ async def test_patched_local_plan_never_calls_remote_image_provider(block_client
     remote_image = SimpleNamespace(generate_image=AsyncMock())
     with get_session_factory()() as session:
         block = session.get(Block, block_id)
-        context = SimpleNamespace(project=block.project, settings=get_settings(), bundle=SimpleNamespace(image=remote_image))
+        context = SimpleNamespace(project=block.project, settings=get_settings(),
+                                  bundle=SimpleNamespace(image=remote_image), is_cancelled=lambda: False)
         await pipeline._render_block_image(context, block, "", session)
     assert rendered == ["verbatim_slide"]
     remote_image.generate_image.assert_not_awaited()
@@ -96,22 +97,20 @@ def test_local_to_ai_plan_copies_prompt_and_keeps_fixed_audio(block_client):
 
 
 @pytest.mark.parametrize("plan, expected_type", [(SLIDE_PLAN, "verbatim_slide"), ({"heading": "新しい図"}, "text_slide")])
-def test_unplanned_block_accepts_visual_patch_without_previous_type(block_client, plan, expected_type):
+def test_unplanned_block_accepts_visual_patch_without_previous_type(block_client, plan, expected_type, monkeypatch):
+    from app.api import routes_blocks
+
     client, block_id = block_client
-    with get_session_factory()() as session:
-        block = session.get(Block, block_id)
-        # A not-yet-flushed planning state may have no selector. Keep the API
-        # robust before SQLAlchemy has applied its insertion default.
-        block.visual_type = None
+    begin_write = routes_blocks.begin_write
 
-        def override_db():
-            yield session
+    def begin_with_unplanned_block(session):
+        begin_write(session)
+        # Simulate a not-yet-flushed selector inside the write boundary. The
+        # boundary itself must enter with no uncommitted writes to discard.
+        session.get(Block, block_id).visual_type = None
 
-        client.app.dependency_overrides[get_db] = override_db
-        try:
-            response = client.patch(f"/api/blocks/{block_id}", json={"visual_plan": plan})
-        finally:
-            client.app.dependency_overrides.clear()
+    monkeypatch.setattr(routes_blocks, "begin_write", begin_with_unplanned_block)
+    response = client.patch(f"/api/blocks/{block_id}", json={"visual_plan": plan})
     assert response.status_code == 200, response.text
     assert response.json()["visual_type"] == expected_type
 
