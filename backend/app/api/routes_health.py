@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.core.startup_status import get_startup_status
 from app.providers.llm import ProviderError
 from app.providers.voicevox import VoicevoxClient
-from app.schemas import HealthResponse, SpeakersEnvelope
+from app.schemas import HealthResponse, SpeakerInfo, SpeakersEnvelope
 from app.services.ffmpeg_runner import ffmpeg_available, ffprobe_available
 
 
@@ -69,4 +69,6 @@ async def voicevox_speakers(url: str | None = None) -> SpeakersEnvelope:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         await client.aclose()
-    return SpeakersEnvelope(url=base_url, speakers=speakers)
+    # The provider returns plain dataclasses; convert them explicitly for the response schema.
+    return SpeakersEnvelope(url=base_url, speakers=[
+        SpeakerInfo(speaker_id=item.speaker_id, name=item.name, styles=item.styles) for item in speakers])
