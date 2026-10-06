@@ -178,8 +178,12 @@ key ─▶ table ─▶ value
 
 ` ```slide ` の中身はそのまま画面に出て、読み上げはされません。
 
-**台本生成を LLM に頼む場合は [`docs/script-prompt.md`](docs/script-prompt.md)
-をそのまま渡してください。** この形式で書かせるためのプロンプトです。
+**台本生成を LLM に頼む場合は、次のプロンプトをそのまま渡し、末尾の「今回の依頼」を埋めてください。**
+
+| プロンプト | 向いている用途 |
+|---|---|
+| [`docs/script-prompt.md`](docs/script-prompt.md) | 汎用版。台本の形式とアスキーアートの描き方を守らせる |
+| [`docs/script-prompt-passive.md`](docs/script-prompt-passive.md) | 講義資料や教科書を「再生して見ているだけで分かる」動画にする。説明の粒度・順番・繰り返し・間まで指定し、良い例と避ける例、推奨設定、長い動画の分け方を含む |
 
 ### 2. 貼り付けて生成
 
@@ -398,5 +402,5 @@ VOICEVOX で合成した音声を公開する場合は、各キャラクター�
 
 ## About Contributors
 
-- [Karin](https://github.com/Rimcat-JA): Project Manager + Developer
+- [Rimcat-JA](https://github.com/Rimcat-JA): Project Manager + Developer
 - [Thérèse](https://github.com/FidesTherese): Developer
