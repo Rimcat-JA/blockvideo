@@ -1,0 +1,95 @@
+BEGIN TRANSACTION;
+CREATE TABLE blocks (
+    id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    "index" INTEGER NOT NULL,
+    source_text TEXT NOT NULL,
+    tts_text TEXT NOT NULL,
+    visual_type VARCHAR(32) NOT NULL,
+    visual_plan_json JSON,
+    image_prompt TEXT,
+    image_path VARCHAR(1024),
+    audio_path VARCHAR(1024),
+    video_path VARCHAR(1024),
+    duration_ms INTEGER,
+    display_duration_ms INTEGER,
+    status_split VARCHAR(16) NOT NULL,
+    status_visual_plan VARCHAR(16) NOT NULL,
+    status_image VARCHAR(16) NOT NULL,
+    status_audio VARCHAR(16) NOT NULL,
+    status_render VARCHAR(16) NOT NULL,
+    error_message TEXT,
+    content_hash VARCHAR(64),
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE
+);
+CREATE TABLE generation_jobs (
+    id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    current_stage VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    progress FLOAT NOT NULL,
+    stage_progress FLOAT NOT NULL,
+    cancel_requested BOOLEAN NOT NULL,
+    started_at DATETIME,
+    finished_at DATETIME,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE
+);
+CREATE TABLE legacy_notes (id INTEGER PRIMARY KEY, note TEXT NOT NULL);
+INSERT INTO legacy_notes VALUES (1, 'keep-table');
+CREATE TABLE projects (
+    id INTEGER NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    source_script TEXT NOT NULL,
+    global_visual_style TEXT,
+    status VARCHAR(32) NOT NULL,
+    progress FLOAT NOT NULL,
+    current_stage VARCHAR(64),
+    llm_provider VARCHAR(32) NOT NULL,
+    llm_base_url VARCHAR(512),
+    llm_model VARCHAR(128),
+    image_provider VARCHAR(32) NOT NULL,
+    image_model VARCHAR(128),
+    voicevox_url VARCHAR(512) NOT NULL,
+    voicevox_speaker_id INTEGER NOT NULL,
+    voicevox_speed_scale FLOAT NOT NULL,
+    voicevox_pitch_scale FLOAT NOT NULL,
+    voicevox_intonation_scale FLOAT NOT NULL,
+    voicevox_volume_scale FLOAT NOT NULL,
+    subtitle_enabled BOOLEAN NOT NULL,
+    subtitle_font_size INTEGER NOT NULL,
+    subtitle_position VARCHAR NOT NULL,
+    subtitle_text_color VARCHAR NOT NULL,
+    subtitle_outline_color VARCHAR NOT NULL,
+    subtitle_background BOOLEAN NOT NULL,
+    subtitle_max_chars_per_line INTEGER NOT NULL,
+    narration_sentence_pause_seconds FLOAT DEFAULT '1.5' NOT NULL,
+    max_slides_per_block INTEGER DEFAULT '1' NOT NULL,
+    pre_margin_seconds FLOAT NOT NULL,
+    post_margin_seconds FLOAT NOT NULL,
+    min_display_seconds FLOAT NOT NULL,
+    output_video_path VARCHAR(1024),
+    output_subtitle_path VARCHAR(1024),
+    use_fake_providers BOOLEAN NOT NULL,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    legacy_marker TEXT,
+    PRIMARY KEY (id)
+);
+INSERT INTO projects VALUES (
+    101, 'fixture-project', 'fixture-script', NULL, 'pending', 0.0, NULL,
+    'openai_compatible', NULL, NULL, 'openai', NULL,
+    'http://127.0.0.1:50021', 1, 1.0, 0.0, 1.0, 1.0,
+    1, 48, 'bottom', '#FFFFFF', '#000000', 1, 36, 1.5, 1,
+    0.15, 1.5, 2.0, NULL, NULL, 1, NULL,
+    '2026-01-02 03:04:05', '2026-01-02 03:04:05', 'keep-upstream'
+);
+CREATE INDEX ix_blocks_project_id ON blocks (project_id);
+CREATE INDEX ix_generation_jobs_project_id ON generation_jobs (project_id);
+COMMIT;

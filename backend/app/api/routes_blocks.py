@@ -18,7 +18,9 @@ from app.models.block import Block, VisualType
 from app.models.project import Project
 from app.models.job import GenerationJob
 from app.models.block import BlockStatus
-from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse, JobSummary
+from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse
+from app.services.job_views import build_recovery_contexts, job_summary
+from app.services.transactions import begin_write
 from app.workers.job_runner import (
     enqueue_block_audio_rerun,
     enqueue_block_visual_rerun,
@@ -71,6 +73,7 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
         regeneration job.
 
     """
+    begin_write(db)
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -130,6 +133,8 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
         # An explicit plan is ready to render, including when source_text was
         # edited in this request. Null deliberately asks the planner to rebuild.
         block.status_visual_plan = BlockStatus.completed if plan is not None else BlockStatus.pending
+    if db.is_modified(block, include_collections=False):
+        block.project.revision += 1
     db.commit()
     db.refresh(block)
     return _block_summary(block)
@@ -159,18 +164,9 @@ async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> Gen
     ensure_project_idle(block.project_id, db)
     job = await enqueue_block_visual_rerun(block.project_id, block.index)
     job = db.get(GenerationJob, job.id) or job
+    recovery_context = build_recovery_contexts(db, [block.project_id]).get(block.project_id)
     return GenerateAllResponse(
-        job=JobSummary(
-            id=job.id,
-            project_id=job.project_id,
-            current_stage=job.current_stage,
-            status=job.status.value,
-            progress=job.progress,
-            stage_progress=job.stage_progress,
-            started_at=job.started_at.isoformat() if job.started_at else None,
-            finished_at=job.finished_at.isoformat() if job.finished_at else None,
-            error_message=job.error_message,
-        ),
+        job=job_summary(job, recovery_context),
         message="visual regeneration queued",
     )
 
@@ -199,18 +195,9 @@ async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> Gene
     ensure_project_idle(block.project_id, db)
     job = await enqueue_block_audio_rerun(block.project_id, block.index)
     job = db.get(GenerationJob, job.id) or job
+    recovery_context = build_recovery_contexts(db, [block.project_id]).get(block.project_id)
     return GenerateAllResponse(
-        job=JobSummary(
-            id=job.id,
-            project_id=job.project_id,
-            current_stage=job.current_stage,
-            status=job.status.value,
-            progress=job.progress,
-            stage_progress=job.stage_progress,
-            started_at=job.started_at.isoformat() if job.started_at else None,
-            finished_at=job.finished_at.isoformat() if job.finished_at else None,
-            error_message=job.error_message,
-        ),
+        job=job_summary(job, recovery_context),
         message="audio regeneration queued",
     )
 
@@ -245,17 +232,8 @@ async def rerender_block(block_id: int, db: Session = Depends(get_db)) -> Genera
     ensure_render_assets_ready(project)
     job = await enqueue_rerender(block.project_id)
     job = db.get(GenerationJob, job.id) or job
+    recovery_context = build_recovery_contexts(db, [block.project_id]).get(block.project_id)
     return GenerateAllResponse(
-        job=JobSummary(
-            id=job.id,
-            project_id=job.project_id,
-            current_stage=job.current_stage,
-            status=job.status.value,
-            progress=job.progress,
-            stage_progress=job.stage_progress,
-            started_at=job.started_at.isoformat() if job.started_at else None,
-            finished_at=job.finished_at.isoformat() if job.finished_at else None,
-            error_message=job.error_message,
-        ),
+        job=job_summary(job, recovery_context),
         message="block rerender queued (via project rerender)",
     )

@@ -8,9 +8,22 @@ import type {
   SpeakersEnvelope,
   QuickCreateInput,
   QuickCreateResponse,
+  OperationRequest,
+  OperationResult,
+  ProjectHistory,
+  StartupState,
 } from '@/lib/types';
 
 const API_BASE = '/api';
+import type { CandidateReadinessSnapshot, LanguageConfirmation, LanguageRequest, LanguageResponse } from '@/lib/language-types';
+import type { LanguageConnection } from '@/lib/language-connection';
+
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 async function request<T>(
   path: string,
@@ -25,7 +38,13 @@ async function request<T>(
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(`HTTP ${res.status}: ${detail}`);
+    let message = detail;
+    try {
+      const parsed = JSON.parse(detail).detail;
+      if (typeof parsed === 'string') message = parsed;
+      else if (typeof parsed?.message === 'string') message = parsed.message;
+    } catch { /* Non-JSON errors retain the server message. */ }
+    throw new ApiError(res.status, `HTTP ${res.status}: ${message}`);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -34,6 +53,18 @@ async function request<T>(
 }
 
 export const api = {
+  startup: (signal?: AbortSignal) => request<StartupState>('/startup', undefined, signal),
+  languageConnection: (check = false) =>
+    request<LanguageConnection>(`/language/connection${check ? '?check=true' : ''}`),
+  submitLanguage: (input: LanguageRequest, signal?: AbortSignal) =>
+    request<LanguageResponse>('/language/requests', { method: 'POST', body: JSON.stringify(input) }, signal),
+  getLanguageRequest: (requestId: string, signal?: AbortSignal) =>
+    request<LanguageResponse>(`/language/requests/${encodeURIComponent(requestId)}`, undefined, signal),
+  getCandidateReadiness: (requestId: string, signal?: AbortSignal) =>
+    request<CandidateReadinessSnapshot>(`/language/requests/${encodeURIComponent(requestId)}/candidate-readiness`, undefined, signal),
+  confirmLanguage: (requestId: string, input: LanguageConfirmation, signal?: AbortSignal) =>
+    request<LanguageResponse>(`/language/requests/${encodeURIComponent(requestId)}/execute`,
+      { method: 'POST', body: JSON.stringify(input) }, signal),
   /** Fetch backend health and executable availability flags. */
   health: () => request<{ status: string; ffmpeg_available: boolean; ffprobe_available: boolean }>('/health'),
   /** Fetch VOICEVOX speakers from an optional engine URL. */
@@ -43,6 +74,9 @@ export const api = {
   listProjects: () => request<ProjectSummary[]>('/projects'),
   /** Fetch one project and its configuration fields. */
   getProject: (id: number) => request<ProjectDetail>(`/projects/${id}`),
+  getProjectHistory: (id: number) => request<ProjectHistory>(`/projects/${id}/history`),
+  executeOperation: (input: OperationRequest) =>
+    request<OperationResult>('/operations/execute', { method: 'POST', body: JSON.stringify(input) }),
   /** Create a project without starting generation. */
   createProject: (input: CreateProjectInput) =>
     request<ProjectDetail>('/projects', { method: 'POST', body: JSON.stringify(input) }),

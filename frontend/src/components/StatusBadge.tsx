@@ -12,6 +12,7 @@ const statusMap: Record<string, string> = {
   generating: 'badge-running',
   rendering: 'badge-running',
   cancelled: 'badge-pending',
+  unknown: 'badge-running',
 };
 
 export function StatusBadge({ status }: { status: BlockStatus | ProjectStatus | string }) {

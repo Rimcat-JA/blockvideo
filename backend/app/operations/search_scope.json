@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "app_id": "blockvideo",
+  "bindings": [
+    {"operation_id": "project.artifact.restore", "operation_version": 1, "required_capabilities": ["artifact.history.restore"]},
+    {"operation_id": "project.generation.cancel", "operation_version": 1, "required_capabilities": ["generation.cancel"]},
+    {"operation_id": "project.generation.retry", "operation_version": 1, "required_capabilities": ["generation.retry"]},
+    {"operation_id": "project.generation.start", "operation_version": 1, "required_capabilities": ["generation.start"]},
+    {"operation_id": "project.settings.restore", "operation_version": 1, "required_capabilities": ["settings.history.restore"]},
+    {"operation_id": "project.settings.update", "operation_version": 1, "required_capabilities": ["settings.write"]},
+    {"operation_id": "project.settings.update", "operation_version": 2, "required_capabilities": ["settings.write", "settings.relative-subtitle"]},
+    {"operation_id": "project.status.get", "operation_version": 1, "required_capabilities": ["project.status.read"]},
+    {"operation_id": "project.subtitle-font-size.adjust", "operation_version": 1, "required_capabilities": ["settings.write", "settings.relative-subtitle"]},
+    {"operation_id": "project.subtitle-font-size.set", "operation_version": 1, "required_capabilities": ["settings.write"]}
+  ]
+}

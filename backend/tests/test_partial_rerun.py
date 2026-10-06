@@ -43,7 +43,7 @@ def _make_ctx(project, bundle):
 
 
 @pytest.mark.asyncio
-async def test_partial_rerun_only_touches_image_status(temp_storage) -> None:
+async def test_partial_rerun_only_touches_image_status(temp_storage, monkeypatch) -> None:
     """Re-running the image stage should reset only status_image on the target."""
     from app.db import get_session_factory
     from app.models.block import Block
@@ -89,7 +89,7 @@ async def test_partial_rerun_only_touches_image_status(temp_storage) -> None:
             block.status_image = BlockStatus.completed
             db.commit()
 
-        pipe._render_block_image = fake_render  # type: ignore
+        monkeypatch.setattr(pipe, "_render_block_image", fake_render)
 
         ensure_project_layout(project.id)
         bundle = build_providers_for_project(project)
@@ -116,7 +116,7 @@ async def test_hash_reflects_audio_settings_change(temp_storage) -> None:
 
 
 @pytest.mark.asyncio
-async def test_repeated_image_rerun_is_noop_when_complete(temp_storage) -> None:
+async def test_repeated_image_rerun_is_noop_when_complete(temp_storage, monkeypatch) -> None:
     from app.db import get_session_factory
     from app.models.block import Block, BlockStatus, VisualType
     from app.models.project import Project
@@ -156,7 +156,7 @@ async def test_repeated_image_rerun_is_noop_when_complete(temp_storage) -> None:
         async def fake_render(ctx, block, style, db):
             called.append(block.index)
 
-        pipe._render_block_image = fake_render  # type: ignore
+        monkeypatch.setattr(pipe, "_render_block_image", fake_render)
         ensure_project_layout(project.id)
         bundle = build_providers_for_project(project)
         ctx = _make_ctx(project, bundle)

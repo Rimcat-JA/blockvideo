@@ -12,11 +12,14 @@ Imports:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.providers.llm import ProviderError
+from app.services.external_calls import journaled_post
 
 
 @dataclass
@@ -77,6 +80,11 @@ class VoicevoxClient:
 
         """
         self.base_url = base_url.rstrip("/")
+        host = urlsplit(base_url).hostname or ""
+        try:
+            self._local_computation = ip_address(host).is_loopback
+        except ValueError:
+            self._local_computation = host.lower() == "localhost"
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def aclose(self) -> None:
@@ -148,7 +156,10 @@ class VoicevoxClient:
         url = f"{self.base_url}/audio_query"
         params = {"text": text, "speaker": speaker_id}
         try:
-            r = await self._client.post(url, params=params)
+            r = await journaled_post(
+                self._client, url, provider="voicevox",
+                remote_side_effect=not self._local_computation, params=params,
+            )
         except httpx.HTTPError as exc:
             raise ProviderError(
                 "VOICEVOX audio_queryに失敗しました (Engine起動を確認してください)",
@@ -172,8 +183,9 @@ class VoicevoxClient:
     ) -> list[dict[str, Any]]:
         """Recalculate mora duration and pitch after project-local accent edits."""
         try:
-            response = await self._client.post(
-                f"{self.base_url}/mora_data",
+            response = await journaled_post(
+                self._client, f"{self.base_url}/mora_data",
+                provider="voicevox", remote_side_effect=not self._local_computation,
                 params={"speaker": speaker_id},
                 json=accent_phrases,
             )
@@ -207,8 +219,9 @@ class VoicevoxClient:
         url = f"{self.base_url}/synthesis"
         params = {"speaker": speaker_id}
         try:
-            r = await self._client.post(
-                url, params=params, json=query, headers={"Content-Type": "application/json"}
+            r = await journaled_post(
+                self._client, url, provider="voicevox", remote_side_effect=not self._local_computation,
+                params=params, json=query, headers={"Content-Type": "application/json"},
             )
         except httpx.HTTPError as exc:
             raise ProviderError(

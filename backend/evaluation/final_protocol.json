@@ -1,0 +1,1 @@
+{"schema_version":1,"modes":["all_tools","stateful"],"per_call_deadline_seconds":180,"maximum_model_calls":4,"isolation":"fresh_case_state_under_source_group","scoring_owner":"external_evaluator"}

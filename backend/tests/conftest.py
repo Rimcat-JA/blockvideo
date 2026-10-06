@@ -28,15 +28,29 @@ def temp_storage(monkeypatch, tmp_path: Path) -> Path:
     from app.core import config
 
     config.reset_settings_cache()
-    from app.db import init_db, reset_db_for_tests
+    from app.core.startup_status import StartupStatus, set_startup_status
+    from app.db import init_db, register_models, reset_db_for_tests
 
     reset_db_for_tests()
+    register_models()
     init_db()
+    set_startup_status(
+        StartupStatus(
+            status="ready",
+            reason_code=None,
+            message="起動が完了しました。",
+            schema_version=1,
+            backup_available=False,
+        )
+    )
     yield storage
     # teardown
     shutil.rmtree(storage, ignore_errors=True)
     config.reset_settings_cache()
     reset_db_for_tests()
+    from app.core.startup_status import reset_startup_status_for_tests
+
+    reset_startup_status_for_tests()
 
 
 @pytest.fixture()

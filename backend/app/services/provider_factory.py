@@ -176,8 +176,8 @@ def build_voicevox_settings(project: Project, settings: Settings | None = None) 
 
     Args:
         project: Project whose endpoint and synthesis values should be used.
-        settings: Optional global defaults used only when project values are
-            falsey/missing.
+        settings: Optional global defaults for missing project values. Speaker
+            ID zero is a valid selection and is preserved.
 
     Returns:
         A provider-specific settings dataclass ready for synthesis.
@@ -186,7 +186,7 @@ def build_voicevox_settings(project: Project, settings: Settings | None = None) 
     s = settings or get_settings()
     return VoicevoxSettings(
         base_url=project.voicevox_url or s.voicevox_url,
-        speaker_id=project.voicevox_speaker_id or s.voicevox_speaker_id,
+        speaker_id=project.voicevox_speaker_id if project.voicevox_speaker_id is not None else s.voicevox_speaker_id,
         speed_scale=project.voicevox_speed_scale or s.voicevox_speed_scale,
         pitch_scale=project.voicevox_pitch_scale,
         intonation_scale=project.voicevox_intonation_scale,

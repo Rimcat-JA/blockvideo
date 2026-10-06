@@ -4,7 +4,10 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import _add_missing_columns, get_engine, get_session_factory
+from app.core.config import get_settings
+from app.db import Base, get_engine, get_session_factory
+from app.migrations.lease import acquire_database_lease
+from app.migrations.runner import migrate_database
 from app.main import create_app
 from app.models.job import GenerationJob
 from app.models.project import Project
@@ -107,8 +110,13 @@ def test_legacy_database_keeps_previous_quality_modes(temp_storage):
         for name in ("visual_focus_enabled", "subtitle_mode", "narration_pacing_mode", "pronunciation_overrides"):
             connection.exec_driver_sql(f"ALTER TABLE projects DROP COLUMN {name}")
     engine.dispose()  # Simulate opening the legacy DB in a fresh application process.
-    _add_missing_columns(engine)
-    _add_missing_columns(engine)  # Startup is idempotent.
+    database_url = get_settings().database_url
+    lease = acquire_database_lease(database_url)
+    try:
+        assert migrate_database(database_url, Base.metadata, lease=lease).status == "migrated"
+        assert migrate_database(database_url, Base.metadata, lease=lease).status == "current"
+    finally:
+        lease.release()
     with factory() as session:
         legacy = session.get(Project, legacy_id)
         assert legacy.visual_focus_enabled is False
