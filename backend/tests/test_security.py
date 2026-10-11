@@ -39,3 +39,11 @@ def test_redact_strips_api_keys_in_text() -> None:
 def test_redact_passes_through_safe_text() -> None:
     assert redact("hello world") == "hello world"
     assert redact("") == ""
+
+def test_redact_keeps_ordinary_words_and_long_paths() -> None:
+    from app.core.security import redact
+
+    assert redact("task-scheduler failed") == "task-scheduler failed"
+    path = "C:/Users/x/a_very_long_folder_name_without_any_digits_here_ok/file"
+    assert redact(path) == path
+    assert "sk-abcdefghijklmnop123" not in redact("key sk-abcdefghijklmnop123 end")

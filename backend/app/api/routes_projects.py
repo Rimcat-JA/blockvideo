@@ -16,7 +16,7 @@ from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -227,9 +227,26 @@ def _provisional_title(script: str) -> str:
     return "無題の台本"
 
 
+def _server_default(field: str, value: _T) -> _T:
+    """A server ``.env`` default, checked against the project schema's bounds.
+
+    An out-of-range environment value would otherwise be stored and then make
+    every later settings save fail validation; it falls back to the schema
+    default with a warning instead.
+    """
+    try:
+        ProjectCreate.__pydantic_validator__.validate_assignment(ProjectCreate.model_construct(), field, value)
+        return value
+    except ValidationError:
+        fallback = ProjectCreate.model_fields[field].default
+        log.warning("ignoring out-of-range server default field={field} value={value}",
+                    field=field, value=value)
+        return fallback
+
+
 def _or_default(payload: BaseModel, field: str, default: _T) -> _T:
-    """Return the request's value, or ``default`` when the request omitted it."""
-    return getattr(payload, field) if field in payload.model_fields_set else default
+    """Return the request's value, or the checked server default when omitted."""
+    return getattr(payload, field) if field in payload.model_fields_set else _server_default(field, default)
 
 
 @router.post("/quick", response_model=QuickCreateResponse, status_code=201)
@@ -271,8 +288,13 @@ async def quick_create(
         source_script=script,
         voicevox_url=_or_default(payload, "voicevox_url", settings.voicevox_url),
         voicevox_speaker_id=_or_default(payload, "voicevox_speaker_id", settings.voicevox_speaker_id),
-        voicevox_speed_scale=settings.voicevox_speed_scale,
-        narration_sentence_pause_seconds=settings.narration_sentence_pause_seconds,
+        voicevox_speed_scale=_server_default("voicevox_speed_scale", settings.voicevox_speed_scale),
+        voicevox_pitch_scale=_server_default("voicevox_pitch_scale", settings.voicevox_pitch_scale),
+        voicevox_intonation_scale=_server_default("voicevox_intonation_scale", settings.voicevox_intonation_scale),
+        voicevox_volume_scale=_server_default("voicevox_volume_scale", settings.voicevox_volume_scale),
+        narration_sentence_pause_seconds=_server_default(
+            "narration_sentence_pause_seconds", settings.narration_sentence_pause_seconds
+        ),
         use_fake_providers=payload.use_fake_providers,
         visual_focus_enabled=payload.visual_focus_enabled,
         subtitle_mode=payload.subtitle_mode,

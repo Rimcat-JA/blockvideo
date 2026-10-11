@@ -7,6 +7,12 @@ import { useNavigate } from 'react-router-dom';
 import { createProjectSchema, DEFAULT_QUALITY, type CreateProjectForm, type CreateProjectInput } from '@/lib/validation';
 import { QualitySettingsFields } from '@/components/QualitySettingsFields';
 
+/** Fields the server fills from VOICEVOX_* / NARRATION_* when the request omits them. */
+const SERVER_DEFAULTED = [
+  'voicevox_speaker_id', 'voicevox_speed_scale', 'voicevox_pitch_scale', 'voicevox_intonation_scale',
+  'voicevox_volume_scale', 'narration_sentence_pause_seconds',
+] as const;
+
 export function ProjectForm() {
   /** Validate the form, submit provider settings, and navigate to the project. */
   const navigate = useNavigate();
@@ -15,7 +21,7 @@ export function ProjectForm() {
   const {
     register,
     handleSubmit,
-    formState: { errors, isSubmitting },
+    formState: { errors, isSubmitting, dirtyFields },
     watch,
     setValue,
   } = useForm<CreateProjectForm, unknown, CreateProjectInput>({
@@ -57,8 +63,12 @@ export function ProjectForm() {
     const llmModel = (document.getElementById('llm_model') as HTMLInputElement | null)?.value ?? '';
     const imageApiKey = (document.getElementById('image_api_key') as HTMLInputElement | null)?.value ?? '';
     const imageModel = (document.getElementById('image_model') as HTMLInputElement | null)?.value ?? '';
+    // Untouched VOICEVOX and pause fields defer to the server's .env defaults.
+    const serverDefaulted = Object.fromEntries(SERVER_DEFAULTED
+      .filter((field) => !dirtyFields[field]).map((field) => [field, undefined]));
     const result = await create.mutateAsync({
       ...form,
+      ...serverDefaulted,
       voicevox_url: form.voicevox_url || undefined,
       providers: {
         llm_api_key: llmApiKey || undefined,
@@ -182,7 +192,7 @@ export function ProjectForm() {
               id="voicevox_speaker_id"
               className="input"
               {...register('voicevox_speaker_id', { valueAsNumber: true })}
-              onChange={(e) => setValue('voicevox_speaker_id', Number(e.target.value))}
+              onChange={(e) => setValue('voicevox_speaker_id', Number(e.target.value), { shouldDirty: true })}
             >
               {(speakers.data?.speakers ?? []).flatMap((s) =>
                 (s.styles.length ? s.styles : [{ id: s.speaker_id, name: undefined }]).map((style) => (

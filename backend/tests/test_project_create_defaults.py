@@ -53,3 +53,27 @@ def test_new_project_never_inherits_leftover_byok_keys(client: TestClient) -> No
     project = client.post("/api/projects", json=INPUT).json()
     assert project["id"] == 1
     assert secret_store.get(1) is None
+
+
+def test_out_of_range_server_defaults_fall_back_and_settings_stay_editable(temp_storage: Any, monkeypatch: Any) -> None:
+    monkeypatch.setenv("VOICEVOX_SPEED_SCALE", "9.0")
+    monkeypatch.setenv("NARRATION_SENTENCE_PAUSE_SECONDS", "12")
+    config.reset_settings_cache()
+    client = TestClient(create_app())
+    project = client.post("/api/projects", json=INPUT).json()
+    assert project["voicevox_speed_scale"] == 1.0
+    assert project["narration_sentence_pause_seconds"] == 1.5
+    saved = client.patch(f"/api/projects/{project['id']}",
+                         json={"subtitle_font_size": 50})
+    assert saved.status_code == 200, saved.text
+
+
+def test_quick_create_uses_server_voice_scales(temp_storage: Any, monkeypatch: Any) -> None:
+    monkeypatch.setenv("VOICEVOX_PITCH_SCALE", "0.1")
+    monkeypatch.setenv("VOICEVOX_VOLUME_SCALE", "1.5")
+    config.reset_settings_cache()
+    client = TestClient(create_app())
+    project = client.post("/api/projects/quick", json={"source_script": INPUT["source_script"],
+                                                        "use_fake_providers": True}).json()["project"]
+    assert project["voicevox_pitch_scale"] == 0.1
+    assert project["voicevox_volume_scale"] == 1.5

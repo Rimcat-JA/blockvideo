@@ -5,6 +5,10 @@ import { Layout } from '@/components/Layout';
 import { ProgressBar } from '@/components/ProgressBar';
 import { StatusBadge } from '@/components/StatusBadge';
 import { DEFAULT_PACING, PacingSettings, type Pacing } from '@/components/PacingSettings';
+import type { QuickCreateInput } from '@/lib/types';
+
+/** Fields the server fills from VOICEVOX_* / NARRATION_* when the request omits them. */
+const SERVER_DEFAULTED = ['voicevox_speaker_id', 'voicevox_speed_scale', 'narration_sentence_pause_seconds'] as const;
 import { useLiveProject, useQuickCreate } from '@/api/hooks';
 import { qualitySettingsSchema } from '@/lib/validation';
 
@@ -37,8 +41,13 @@ export function QuickGeneratePage() {
 
   const start = () => {
     if (!script.trim() || !qualityValid) return;
+    // Untouched speaker/speed/pause defer to the server's .env defaults.
+    const body: QuickCreateInput = { source_script: script, ...pacing };
+    for (const field of SERVER_DEFAULTED) {
+      if (pacing[field] === DEFAULT_PACING[field]) delete body[field];
+    }
     quick.mutate(
-      { source_script: script, ...pacing },
+      body,
       { onSuccess: (res) => setProjectId(res.project.id) },
     );
   };

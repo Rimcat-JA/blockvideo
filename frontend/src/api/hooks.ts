@@ -4,7 +4,8 @@ import { api } from '@/api/client';
 import type { CreateProjectInput, ProjectStatus, QuickCreateInput } from '@/lib/types';
 
 /** Project statuses that change on their own while a job runs. */
-const ACTIVE_STATUSES = new Set<ProjectStatus>(['pending', 'splitting', 'planning', 'generating', 'rendering']);
+// 'pending' is a project that was never generated; queued jobs already show 'generating'.
+const ACTIVE_STATUSES = new Set<ProjectStatus>(['splitting', 'planning', 'generating', 'rendering']);
 
 export function useProjects() {
   /** Fetch the newest project summaries. */

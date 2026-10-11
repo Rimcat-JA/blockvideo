@@ -94,7 +94,7 @@ export function ProjectSettingsEditor({ project, disabled, onSave }: {
               </label>
               {([['subtitle_text_color', '字幕の文字色'], ['subtitle_outline_color', '字幕の縁取り色']] as const).map(([field, label]) => (
                 <label key={field} className="label">{label}
-                  <input type="color" className="input mt-1 h-10 p-1" value={value[field]} onChange={(event) => set(field, event.target.value)} />
+                  <input type="color" className="input mt-1 h-10 p-1" value={value[field].toLowerCase()} onChange={(event) => set(field, event.target.value.toUpperCase())} />
                 </label>
               ))}
               {([['subtitle_enabled', '字幕を表示する'], ['subtitle_background', '字幕の半透明背景を表示する']] as const).map(([field, label]) => (

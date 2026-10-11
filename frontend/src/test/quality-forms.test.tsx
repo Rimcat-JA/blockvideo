@@ -108,4 +108,16 @@ describe('quality controls', () => {
       pronunciation_overrides: [{ surface: 'API', reading: 'エーピーアイ', accent: null }],
     })));
   });
+
+  it('lets untouched speaker, speed and pause defer to the server defaults', async () => {
+    vi.mocked(api.quickCreate).mockClear();
+    wrap(<QuickGeneratePage />);
+    fireEvent.change(screen.getByPlaceholderText('ここに日本語の台本を貼り付けてください…'), { target: { value: 'APIを説明します。' } });
+    fireEvent.click(screen.getByRole('button', { name: /クイック生成/ }));
+    await waitFor(() => expect(api.quickCreate).toHaveBeenCalledTimes(1));
+    const body = vi.mocked(api.quickCreate).mock.calls[0][0];
+    expect(body).not.toHaveProperty('voicevox_speaker_id');
+    expect(body).not.toHaveProperty('voicevox_speed_scale');
+    expect(body).not.toHaveProperty('narration_sentence_pause_seconds');
+  });
 });

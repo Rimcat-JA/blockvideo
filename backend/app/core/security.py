@@ -17,13 +17,17 @@ from typing import Any
 
 # Heuristic matcher for common provider tokens and long token-shaped strings.
 # It is intentionally conservative and is not a credential validator.
+# Tokens must start at a word boundary ("task-manager" is not "sk-…"), and a
+# generic long token needs both a letter and a digit, so ordinary long words
+# and path segments in user-facing failure messages are not masked.
 _KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_\-])"
     r"(sk-[A-Za-z0-9_\-]{8,}|"
     r"sk-or-[A-Za-z0-9_\-]{8,}|"
     r"sk-ant-[A-Za-z0-9_\-]{8,}|"
     r"AIza[0-9A-Za-z_\-]{20,}|"
     r"gho_[A-Za-z0-9]{20,}|"
-    r"[A-Za-z0-9_\-]{40,})"
+    r"(?=[A-Za-z_\-]*[0-9])(?=[0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{40,})"
 )
 
 
