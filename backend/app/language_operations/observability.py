@@ -21,8 +21,10 @@ _REASONS = frozenset({
     "incomplete_response", "response_too_large", "refused", "interpretation_failed",
     "interpretation_interrupted", "target_required", "target_conflict", "target_not_found",
     "stale_state", "project_busy", "not_ready", "dialogue_superseded", "job_not_found",
-    "job_not_retryable", "external_result_unknown", "history_not_found", "artifact_not_found",
-    "artifact_unavailable",
+    "job_not_retryable", "external_outcome_unknown", "history_not_found", "artifact_not_found",
+    "artifact_unavailable", "database_busy", "settings_revision_not_found", "yolo_disabled",
+    "too_many_candidates", "retrieval_deadline", "retrieval_unavailable", "retrieval_integrity_failed",
+    "request_id_conflict", "operation_not_found", "invalid_generation_request", "stale_media",
 })
 _NUMBERS = {
     "value": (16, 120), "delta": (-104, 104), "subtitle_font_size": (16, 120),

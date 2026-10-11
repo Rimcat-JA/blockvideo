@@ -19,7 +19,9 @@ API            := http://127.0.0.1:8000
 UV             ?= uv
 PNPM           ?= pnpm
 PYTHON         ?= python
-FFMPEG         ?= ffmpeg
+# backend/.env may name ffmpeg by absolute path when it is not on PATH.
+FFMPEG_PATH    ?= $(strip $(shell sed -n 's/^FFMPEG_PATH=//p' $(BACKEND_DIR)/.env 2>/dev/null | tr -d '"\r'))
+FFMPEG         ?= $(if $(FFMPEG_PATH),$(FFMPEG_PATH),ffmpeg)
 
 # Detect an OS-specific activation script.
 ifeq ($(OS),Windows_NT)
@@ -51,8 +53,8 @@ help:
 	@echo "  clean        remove generated storage + frontend dist"
 
 ffmpeg-check:
-	@command -v $(FFMPEG) >/dev/null 2>&1 || (echo "ffmpeg not found on PATH" && exit 1)
-	@$(FFMPEG) -version | head -n 1
+	@command -v "$(FFMPEG)" >/dev/null 2>&1 || (echo "ffmpeg not found (PATH or FFMPEG_PATH)" && exit 1)
+	@"$(FFMPEG)" -version | head -n 1
 
 install:
 	$(UV) sync --project $(BACKEND_DIR) --extra dev
@@ -80,7 +82,7 @@ check: lint test
 demo: ffmpeg-check
 	@echo "[demo] starting backend in background..."
 	@mkdir -p $(STORAGE_DIR)
-	@cd $(BACKEND_DIR) && $(UV) run uvicorn app.main:app --host 127.0.0.1 --port 8000 > ../$(STORAGE_DIR)/demo-backend.log 2>&1 & echo $$! > ../$(STORAGE_DIR)/demo-backend.pid
+	@(cd $(BACKEND_DIR) && exec $(UV) run uvicorn app.main:app --host 127.0.0.1 --port 8000 > ../$(STORAGE_DIR)/demo-backend.log 2>&1) & echo $$! > $(STORAGE_DIR)/demo-backend.pid
 	@echo "[demo] waiting for /api/health..."
 	@for i in $$(seq 1 30); do \
 		if curl -sf $(API)/api/health >/dev/null 2>&1; then break; fi; \

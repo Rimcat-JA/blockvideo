@@ -19,7 +19,7 @@ import type { CandidateReadinessSnapshot, LanguageConfirmation, LanguageRequest,
 import type { LanguageConnection } from '@/lib/language-connection';
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(public readonly status: number, message: string, public readonly reasonCode?: string) {
     super(message);
     this.name = 'ApiError';
   }
@@ -38,18 +38,39 @@ async function request<T>(
   });
   if (!res.ok) {
     const detail = await res.text();
-    let message = detail;
+    let message = detail.trim()
+      ? detail
+      : res.status >= 500
+        ? 'バックエンドに接続できません。サーバーが起動しているか確認してください。'
+        : 'サーバーからの応答が空です。';
+    let reasonCode: string | undefined;
     try {
       const parsed = JSON.parse(detail).detail;
+      if (typeof parsed?.reason_code === 'string') reasonCode = parsed.reason_code;
       if (typeof parsed === 'string') message = parsed;
       else if (typeof parsed?.message === 'string') message = parsed.message;
+      else if (Array.isArray(parsed)) message = validationMessage(parsed);
     } catch { /* Non-JSON errors retain the server message. */ }
-    throw new ApiError(res.status, `HTTP ${res.status}: ${message}`);
+    throw new ApiError(res.status, `HTTP ${res.status}: ${message}`, reasonCode);
   }
   if (res.status === 204) {
     return undefined as T;
   }
   return (await res.json()) as T;
+}
+
+/** One FastAPI validation entry; ``input`` echoes the rejected value and is never shown. */
+interface ValidationIssue {
+  loc?: Array<string | number>;
+  msg?: string;
+}
+
+function validationMessage(issues: ValidationIssue[]): string {
+  /** Summarise 422 field errors as "field: reason" without echoing the input. */
+  return issues
+    .slice(0, 5)
+    .map((issue) => `${issue.loc?.at(-1) ?? '入力'}: ${issue.msg ?? '値が正しくありません'}`)
+    .join(' / ');
 }
 
 export const api = {

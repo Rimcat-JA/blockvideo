@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import get_settings
 from app.core.security import secret_store
 from app.models.project import Project
+from app.services.provider_credentials import resolve_image_credential, resolve_llm_credential
 
 
 class GenerationCancelled(RuntimeError):
@@ -47,6 +48,8 @@ def capture_inputs(project: Project) -> dict[str, Any]:
     """
     settings = get_settings()
     secrets = secret_store.get(project.id) if not project.use_fake_providers else None
+    llm = resolve_llm_credential(secrets, settings)
+    image = resolve_image_credential(secrets, settings)
     payload = {
         "schema_version": 1,
         "project_id": project.id,
@@ -55,15 +58,13 @@ def capture_inputs(project: Project) -> dict[str, Any]:
         "runtime": {key: getattr(settings, key) for key in RUNTIME_INPUT_FIELDS},
         "resolved_providers": {
             "fake": project.use_fake_providers,
-            "llm_base_url": (secrets.llm_base_url if secrets else None) or settings.llm_base_url,
-            "llm_model": (secrets.llm_model if secrets else None) or settings.llm_model,
-            "planner_model": settings.llm_model_planner or (secrets.llm_model if secrets else None) or settings.llm_model,
-            "llm_credential_origin": ("project" if secrets and secrets.llm_api_key else
-                                      "global" if settings.llm_api_key else "missing"),
-            "image_base_url": (secrets.image_base_url if secrets else None) or "https://api.openai.com/v1",
-            "image_model": (secrets.image_model if secrets else None) or settings.image_model or "gpt-image-1",
-            "image_credential_origin": ("project" if secrets and secrets.image_api_key else
-                                        "global" if settings.image_api_key else "missing"),
+            "llm_base_url": llm.base_url,
+            "llm_model": llm.model,
+            "planner_model": settings.llm_model_planner or llm.model,
+            "llm_credential_origin": llm.origin,
+            "image_base_url": image.base_url,
+            "image_model": image.model,
+            "image_credential_origin": image.origin,
         },
         "blocks": [{
             "id": block.id,

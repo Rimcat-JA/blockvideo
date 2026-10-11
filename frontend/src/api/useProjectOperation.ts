@@ -1,5 +1,6 @@
 /** One user intent has one durable request ID, including uncertain resends. */
 import { useCallback, useRef, useState } from 'react';
+import { operationReasonMessage } from '@/lib/language-results';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '@/api/client';
 import type { OperationRequest, ProjectOperationId } from '@/lib/types';
@@ -52,7 +53,8 @@ export function useProjectOperation(projectId: number) {
     } catch (cause) {
       // A rejected 4xx has no committed effect. Network/5xx outcomes can be unknown.
       if (cause instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(cause.status)) remember(null, intent.request.request_id);
-      setError(cause instanceof Error ? cause.message : '応答を確認できませんでした。');
+      const known = cause instanceof ApiError ? operationReasonMessage(cause.reasonCode) : undefined;
+      setError(known ?? (cause instanceof Error ? cause.message : '応答を確認できませんでした。'));
     } finally {
       await Promise.allSettled([
         qc.invalidateQueries({ queryKey: ['project', projectId] }),

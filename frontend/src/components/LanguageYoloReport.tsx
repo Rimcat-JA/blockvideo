@@ -25,12 +25,20 @@ const operationLabels: Record<string, string> = {
 export function LanguageYoloReport({ response }: { response: LanguageResponse }) {
   const report = response.yolo_report;
   if (response.execution_mode !== 'yolo' || !report) return null;
+  const ran = !!response.executed || report.auto_confirmed.length > 0;
+  if (!ran) {
+    return <section className="mt-3 rounded border border-slate-300 bg-slate-50 p-3 text-sm text-slate-800" aria-label="自動実行の報告">
+      <p className="font-semibold">YOLOモード：この依頼は実行しませんでした</p>
+      {(report.dropped_steps ?? []).length > 0 && <p className="mt-1">否定された手順は実行しませんでした：{(report.dropped_steps ?? []).map((id) => operationLabels[id] ?? id).join('、')}</p>}
+      {report.unresolved && <p className="mt-1">{report.unresolved}</p>}
+    </section>;
+  }
   return <section className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900" aria-label="自動実行の報告">
     <p className="font-semibold">確認なしで自動実行しました（YOLO）</p>
     {report.auto_confirmed.length > 0 && <p className="mt-1">自動で確認した操作：{report.auto_confirmed.map((id) => operationLabels[id] ?? id).join('、')}</p>}
     {report.bypassed_guards.length > 0 ? <ul className="mt-1 list-disc pl-5">
       {report.bypassed_guards.map((code) => <li key={code}>{guardLabels[code]}</li>)}
-    </ul> : <p className="mt-1">依頼に書かれていない値の推測はありませんでした。</p>}
+    </ul> : report.guessing_allowed && <p className="mt-1">依頼に書かれていない値の推測はありませんでした。</p>}
     {(report.dropped_steps ?? []).length > 0 && <p className="mt-1">否定された手順は実行しませんでした：{(report.dropped_steps ?? []).map((id) => operationLabels[id] ?? id).join('、')}</p>}
     {report.unresolved && <p className="mt-1">{report.unresolved}</p>}
     <p className="mt-1 text-xs">結果が意図と違う場合は、設定履歴から依頼前の版に戻せます。</p>

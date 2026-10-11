@@ -1,5 +1,6 @@
 /** Shared page shell with navigation and the centered content column. */
 import type { ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import { StartupStatus } from '@/components/StartupStatus';
 
 /** Content supplied to the application shell. */
@@ -13,16 +14,16 @@ export function Layout({ children }: LayoutProps) {
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
-          <a href="/" className="text-lg font-bold text-accent-700">
+          <Link to="/" className="text-lg font-bold text-accent-700">
             BlockVideo
-          </a>
+          </Link>
           <nav className="space-x-4 text-sm">
-            <a href="/" className="text-slate-600 hover:text-slate-900">
+            <Link to="/projects" className="text-slate-600 hover:text-slate-900">
               プロジェクト一覧
-            </a>
-            <a href="/projects/new" className="text-slate-600 hover:text-slate-900">
+            </Link>
+            <Link to="/projects/new" className="text-slate-600 hover:text-slate-900">
               新規作成
-            </a>
+            </Link>
           </nav>
         </div>
       </header>

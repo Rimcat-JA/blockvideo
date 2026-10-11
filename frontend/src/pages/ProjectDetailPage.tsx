@@ -127,7 +127,7 @@ function ProjectMonitor({ id }: { id: number }) {
     <Layout>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <Link to="/" className="text-xs text-slate-500 hover:underline">← 一覧へ戻る</Link>
+          <Link to="/projects" className="text-xs text-slate-500 hover:underline">← 一覧へ戻る</Link>
           <h1 className="mt-1 text-2xl font-bold text-slate-800">{p.title}</h1>
           <p className="text-sm text-slate-500">設定の版 {revision} · {p.block_count} ブロック</p>
         </div>

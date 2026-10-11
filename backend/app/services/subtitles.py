@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from app.core.colors import normalize_color
+
 
 @dataclass
 class SubtitleCue:
@@ -36,17 +38,17 @@ class SubtitleCue:
 
 
 # Colors -> ASS &HBBGGRR& form.
-def _rgb_to_ass(hex_color: str) -> str:
+def _rgb_to_ass(hex_color: str, fallback: str = "&H00FFFFFF") -> str:
     """Convert CSS-style RGB text into ASS ``&HBBGGRR&`` notation.
 
-    Invalid-length values return opaque white rather than raising, preserving
-    subtitle generation for malformed user color input.
+    Colour names are understood (``normalize_color``); anything else returns
+    ``fallback`` rather than raising, so a malformed stored value cannot fail
+    the render stage.
     """
-    h = hex_color.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    if len(h) != 6:
-        return "&H00FFFFFF"
+    color = normalize_color(hex_color or "")
+    if color is None:
+        return fallback
+    h = color[1:]
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f"&H00{b:02X}{g:02X}{r:02X}"
 
@@ -140,6 +142,8 @@ def _wrap_japanese(text: str, max_chars: int) -> list[str]:
 # libass draws a line roughly 1.25x the nominal font size tall (glyphs plus
 # leading). Used to predict how many wrapped lines fit inside the band.
 LINE_HEIGHT_RATIO = 1.25
+# Left/right caption margins in the ASS style (pixels).
+SIDE_MARGIN = 80
 
 
 @dataclass
@@ -160,7 +164,7 @@ class BandFit:
     @property
     def text(self) -> str:
         r"""Return wrapped lines joined with ASS's explicit ``\N`` marker."""
-        return "\\N".join(self.lines)
+        return "\\N".join(ass_literal(line) for line in self.lines)
 
 
 def fit_text_to_band(
@@ -171,6 +175,7 @@ def fit_text_to_band(
     base_max_chars: int,
     min_font_size: int = 24,
     pad: int = 16,
+    frame_width: int = 1920,
 ) -> BandFit:
     """Lay out *text* so it is guaranteed to fit inside the subtitle band.
 
@@ -186,7 +191,8 @@ def fit_text_to_band(
         band_height: Available caption-band height in pixels.
         base_font_size: Preferred starting font size.
         base_max_chars: Preferred characters per line.
-        min_font_size: Smallest permitted fallback font size.
+        min_font_size: Smallest fallback size (a smaller base size is kept).
+        frame_width: Video width; caps characters per line inside the margins.
         pad: Minimum interior padding around the text.
 
     Returns:
@@ -199,10 +205,15 @@ def fit_text_to_band(
     usable = max(1, band_height - pad * 2)
 
     best: BandFit | None = None
-    size = max(min_font_size, base_font_size)
-    while size >= min_font_size:
+    # A size below the usual floor was chosen on purpose: honour it.
+    floor = min(min_font_size, base_font_size)
+    size = base_font_size
+    while size >= floor:
         # Narrower glyphs at smaller sizes mean more characters per line.
         max_chars = max(8, int(base_max_chars * base_font_size / size))
+        # Full-width glyphs are about one font size wide; a line must fit
+        # between the style's side margins or libass draws it off-frame.
+        max_chars = min(max_chars, max(4, (frame_width - 2 * SIDE_MARGIN) // size))
         lines = _wrap_japanese(body, max_chars) if body else [""]
         text_height = len(lines) * size * LINE_HEIGHT_RATIO
         if text_height <= usable:
@@ -213,7 +224,7 @@ def fit_text_to_band(
 
     # Nothing fits even at the floor; use the smallest layout we produced and
     # pin it to the bottom so it intrudes on the slide as little as possible.
-    return best or BandFit(lines=[body], font_size=min_font_size, margin_v=pad)
+    return best or BandFit(lines=[body], font_size=floor, margin_v=pad)
 
 
 _SENTENCE_END = "。！？!?"
@@ -439,6 +450,21 @@ def build_band_cues(
     return cues, font_size
 
 
+# A word joiner after each source backslash keeps libass from reading the
+# narration's own "\N", "\n" or "\h" as override codes.
+_WORD_JOINER = "⁠"
+
+
+def ass_literal(line: str) -> str:
+    r"""Neutralise backslashes in one caption line before ``\N`` joining."""
+    return line.replace("\\", "\\" + _WORD_JOINER)
+
+
+def plain_text(text: str) -> str:
+    r"""Undo ``ass_literal`` and drop the ``\N`` joins, for re-wrapping a cue."""
+    return text.replace("\\N", "").replace("\\" + _WORD_JOINER, "\\")
+
+
 def _escape_ass(text: str) -> str:
     """Escape line and override characters before writing an ASS event."""
     # Newlines inside a cue become \N
@@ -473,7 +499,7 @@ def build_subtitle_cues(
     cues: list[SubtitleCue] = []
     for idx, start_ms, end_ms, text in blocks:
         wrapped = _wrap_japanese(text or "", max_chars_per_line)
-        joined = "\\N".join(wrapped)
+        joined = "\\N".join(ass_literal(line) for line in wrapped)
         cues.append(SubtitleCue(start_ms=start_ms, end_ms=end_ms, text=joined))
     return cues
 
@@ -525,7 +551,7 @@ def render_ass(
         margin_v = {"top": 60, "middle": 0, "bottom": 80}.get(position, 80)
     alignment = {"top": 8, "middle": 5, "bottom": 2}.get(position, 2)
     primary = _rgb_to_ass(text_color)
-    outline = _rgb_to_ass(outline_color)
+    outline = _rgb_to_ass(outline_color, fallback="&H00000000")
     back = "&H80000000" if background else "&H00000000"
     body = [
         "[Script Info]",
@@ -547,7 +573,7 @@ def render_ass(
         ),
         (
             f"Style: Default,{font_name},{font_size},{primary},{primary},{outline},{back},"
-            f"0,0,0,0,100,100,0,0,1,2,1,{alignment},80,80,{margin_v},1"
+            f"0,0,0,0,100,100,0,0,1,2,1,{alignment},{SIDE_MARGIN},{SIDE_MARGIN},{margin_v},1"
         ),
         "",
         "[Events]",
@@ -598,7 +624,7 @@ def render_vtt(cues: list[SubtitleCue], output_path: Path) -> int:
     for i, c in enumerate(cues, 1):
         body.append(str(i))
         body.append(f"{build_vtt_time(c.start_ms)} --> {build_vtt_time(c.end_ms)}")
-        body.append(c.text.replace("\\N", "\n"))
+        body.append(c.text.replace("\\N", "\n").replace("\\" + _WORD_JOINER, "\\"))
         body.append("")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(body), encoding="utf-8")

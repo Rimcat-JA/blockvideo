@@ -20,7 +20,9 @@ export function LanguageResultCard({ response, project, history, unavailable, bu
   const preparedRevision = prepared?.base_revision ?? response.base_revision;
   const stale = preparedRevision !== project.revision;
   const proposal = response.interpretation?.proposal;
-  const question = response.clarification?.question ?? (proposal?.kind === 'clarification' ? proposal.question : undefined);
+  // A dismissed (negation-only) request has nothing left to answer.
+  const question = response.clarification?.question
+    ?? (response.status === 'needs_input' && proposal?.kind === 'clarification' ? proposal.question : undefined);
   const failureCode = (response.failure ?? response.interpretation?.failure)?.reason_code;
   const candidateState = response.diagnostics?.retrieval?.stages.at(-1)?.candidate_state;
   const connectionFailure = ['model_not_configured', 'configuration_error', 'connection_failed', 'http_error', 'model_mismatch', 'timeout'].includes(failureCode ?? '');
@@ -33,7 +35,14 @@ export function LanguageResultCard({ response, project, history, unavailable, bu
   const title = committed && response.generate_after_save
     ? response.generation_result ? '設定を保存し、動画生成を受け付けました' : '設定は保存済み・動画生成は未開始'
     : committed ? settings ? response.result!.changed ? '設定を保存しました' : '設定の変更はありません'
-    : generation ? '動画生成を受け付けました' : operation === 'project.generation.cancel' ? '停止要求を受け付けました' : '状態を確認しました'
+    : generation ? '動画生成を受け付けました'
+    : operation === 'project.generation.cancel'
+      ? response.result!.changed ? '停止要求を受け付けました'
+        : `停止する処理はありませんでした（対象は${String(response.result!.data.status ?? '終了済み')}）`
+    : operation === 'project.artifact.restore'
+      ? response.result!.changed ? `完成動画を戻しました（動画 ${String(response.result!.data.artifact_id ?? '')}）`
+        : `動画 ${String(response.result!.data.artifact_id ?? '')} は既に現在の動画です`
+    : operation === 'project.status.get' ? '状態を確認しました' : '操作を実行しました'
     : headings[response.status];
 
   return <article className={`mt-4 rounded-lg border p-4 ${committed ? 'border-emerald-200 bg-white' : 'border-slate-200 bg-white'}`} aria-label="自然言語の結果">

@@ -70,12 +70,19 @@ def validate_schema(rule: dict[str, Any], depth: int = 0) -> None:
         raise CatalogError("input schema root type must be object")
 
 
+# Largest integer SQLite stores without overflow.
+_SQLITE_INT_MAX = 2**63 - 1
+
+
 def validate_value(rule: dict[str, Any], value: Any, name: str = "arguments") -> None:
     kind, nullable = _kind(rule)
     if value is None and nullable:
         return
-    valid = {"integer": type(value) is int,
-             "number": type(value) in {int, float} and math.isfinite(value),
+    # A huge int literal must be rejected, not raise OverflowError in isfinite
+    # or overflow SQLite's 64-bit integers later.
+    valid = {"integer": type(value) is int and abs(value) <= _SQLITE_INT_MAX,
+             "number": (type(value) is int and abs(value) <= _SQLITE_INT_MAX)
+             or (type(value) is float and math.isfinite(value)),
              "string": isinstance(value, str), "boolean": type(value) is bool,
              "object": isinstance(value, dict), "array": isinstance(value, list)}
     if not valid.get(kind, False):

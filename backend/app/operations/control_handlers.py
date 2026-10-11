@@ -14,6 +14,7 @@ from app.operations.contracts import OperationResult
 from app.operations.errors import OperationError
 from app.services.artifact_store import artifact_file_path, artifact_is_available
 from app.services.external_calls import has_unresolved_calls
+from app.services.invalidation import stale_media_message
 from app.services.job_records import create_pending_job
 from app.services.project_settings import apply_project_settings
 from app.services.settings_history import configuration, validate_settings
@@ -37,11 +38,22 @@ def update_settings(db: Session, project: Project, arguments: dict[str, Any]) ->
                    data={"changed_fields": sorted(changed), "settings": configuration(project)})
 
 
+def _ensure_render_ready(project: Project) -> None:
+    """Refuse render-only work on stale media, as the legacy rerender route does."""
+    if not project.blocks:
+        raise OperationError("stale_media", "レンダリングするブロックがありません。先に「生成開始」を実行してください")
+    message = stale_media_message(project.blocks)
+    if message:
+        raise OperationError("stale_media", message)
+
+
 def start_generation(db: Session, project: Project, arguments: dict[str, Any]) -> OperationResult:
     kind = arguments.get("kind", "full")
     block_index = arguments.get("block_index")
     if kind in {"full", "rerender"} and block_index is not None:
         raise OperationError("invalid_arguments", "この生成方法にはブロック番号を指定できません")
+    if kind == "rerender":
+        _ensure_render_ready(project)
     try:
         job = create_pending_job(db, project.id, kind=kind, block_index=block_index)
     except ValueError as exc:
@@ -72,6 +84,8 @@ def retry_generation(db: Session, project: Project, arguments: dict[str, Any]) -
         raise OperationError("external_outcome_unknown", "外部処理の結果が未確定です。自動的に再送できません")
     if previous.status not in {JobStatus.failed, JobStatus.cancelled}:
         raise OperationError("job_not_retryable", "失敗またはキャンセルされた処理を指定してください")
+    if previous.kind == "rerender":
+        _ensure_render_ready(project)
     job = create_pending_job(db, project.id, kind=previous.kind,
                              block_index=previous.block_index, parent_job_id=previous.id)
     return _result(project, "project.generation.retry", job=job,

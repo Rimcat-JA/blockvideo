@@ -8,6 +8,8 @@ Imports:
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -30,6 +32,9 @@ from app.workers.job_runner import (
 
 # Mounted below the application-level ``/api`` prefix.
 router = APIRouter(prefix="/blocks")
+
+# Plan fields the renderers read as text; another type would crash them.
+_PLAN_TEXT_FIELDS = ("heading", "visual_summary", "code", "verbatim", "language", "formula", "diagram")
 
 
 @router.get("/{block_id}", response_model=BlockSummary)
@@ -95,6 +100,14 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
         prompt = plan.get("image_prompt")
         if prompt is not None and not isinstance(prompt, str):
             raise HTTPException(status_code=422, detail="visual_plan.image_prompt must be a string or null")
+        for field in _PLAN_TEXT_FIELDS:
+            if plan.get(field) is not None and not isinstance(plan[field], str):
+                raise HTTPException(status_code=422, detail=f"visual_plan.{field} must be a string or null")
+        try:
+            # NaN/Infinity would be stored, then fail every later generation.
+            json.dumps(plan, allow_nan=False)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="visual_plan must not contain NaN or Infinity") from exc
         plan = {**plan, "visual_type": visual_type.value}
         if visual_type == VisualType.ai_image:
             image_prompt = prompt

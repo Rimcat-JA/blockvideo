@@ -22,13 +22,17 @@ def reading_question(texts: list[str], proposal: OperationProposal) -> Clarifica
                              proposal.arguments)
     if settings is None:
         return None
+    if "pronunciation_overrides" in settings and not settings["pronunciation_overrides"]:
+        # There is no removal operation: an empty list would erase every saved reading.
+        return ClarificationProposal(kind="clarification", question="読み方の登録をまとめて消すことはできません。登録・変更する表記と読み方を教えてください。", missing_fields=["arguments"])
     supplied = normalized("\n".join(texts))
     for item in settings.get("pronunciation_overrides", []):
         surface, reading = item["surface"], item["reading"]
         if normalized(surface) not in supplied or normalized(reading) not in supplied:
             return ClarificationProposal(kind="clarification", question="登録する表記と読み方を教えてください。質問に表記がある場合は読み方だけで構いません。", missing_fields=["arguments"])
         accent = item.get("accent")
-        if accent is not None and not re.search(rf"アクセント\s*(?:は|を)?\s*[:：]?\s*{accent}(?!\d)", supplied):
+        # ``normalized`` turns hiragana into katakana, so は/を arrive as ハ/ヲ.
+        if accent is not None and not re.search(rf"アクセント\s*(?:ハ|ヲ)?\s*[:：]?\s*{accent}(?!\d)", supplied):
             return ClarificationProposal(kind="clarification", question="アクセントの値を指定するか、自動と指定してください。", missing_fields=["arguments"])
     return None
 
@@ -38,6 +42,9 @@ def merged_arguments(db: Session, project_id: int, proposal: OperationProposal) 
     view = load_policies().settings_view(proposal.operation_id, proposal.operation_version)
     nested = view is not None and bool(view.settings_at)
     settings = dict(arguments[view.settings_at]) if nested else arguments
+    if "pronunciation_overrides" in settings and not settings["pronunciation_overrides"]:
+        # Never let an empty proposal (e.g. an unattended YOLO run) wipe saved readings.
+        settings.pop("pronunciation_overrides")
     additions = settings.get("pronunciation_overrides") if view is not None and view.settings_at is not None else None
     if additions:
         project = db.get(Project, project_id)

@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/api/client';
 import { GenerationHistory } from '@/components/GenerationHistory';
@@ -217,7 +218,7 @@ describe('Layout startup integration', () => {
   it('mounts one startup live region above routed content', async () => {
     vi.mocked(api.startup).mockResolvedValue(startup());
 
-    render(<Layout><p>ページ本文</p></Layout>);
+    render(<MemoryRouter><Layout><p>ページ本文</p></Layout></MemoryRouter>);
 
     expect(await screen.findByRole('status')).toHaveTextContent('起動が完了しました。');
     expect(screen.getAllByRole('status')).toHaveLength(1);

@@ -11,7 +11,6 @@ export function ProjectForm() {
   /** Validate the form, submit provider settings, and navigate to the project. */
   const navigate = useNavigate();
   const create = useCreateProject();
-  const speakers = useSpeakers();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const {
     register,
@@ -25,7 +24,7 @@ export function ProjectForm() {
       ...DEFAULT_QUALITY,
       title: '',
       source_script: '',
-      voicevox_url: 'http://127.0.0.1:50021',
+      voicevox_url: '',
       voicevox_speaker_id: 1,
       voicevox_speed_scale: 1.0,
       voicevox_pitch_scale: 0.0,
@@ -48,6 +47,9 @@ export function ProjectForm() {
   });
 
   const useFake = watch('use_fake_providers');
+  const voicevoxUrl = watch('voicevox_url');
+  // List the speakers of the engine this project will use (blank: the server default).
+  const speakers = useSpeakers(/^https?:\/\/[^\s/]+/.test(voicevoxUrl ?? '') ? voicevoxUrl : undefined);
 
   const onSubmit = handleSubmit(async (form) => {
     const llmApiKey = (document.getElementById('llm_api_key') as HTMLInputElement | null)?.value ?? '';
@@ -57,13 +59,13 @@ export function ProjectForm() {
     const imageModel = (document.getElementById('image_model') as HTMLInputElement | null)?.value ?? '';
     const result = await create.mutateAsync({
       ...form,
+      voicevox_url: form.voicevox_url || undefined,
       providers: {
         llm_api_key: llmApiKey || undefined,
         llm_base_url: llmBaseUrl || undefined,
         llm_model: llmModel || undefined,
         image_api_key: imageApiKey || undefined,
         image_model: imageModel || undefined,
-        image_base_url: 'https://api.openai.com/v1',
       },
     });
     navigate(`/projects/${result.id}`);
@@ -163,7 +165,13 @@ export function ProjectForm() {
             <label className="label" htmlFor="voicevox_url">
               VOICEVOX Engine URL
             </label>
-            <input id="voicevox_url" className="input" {...register('voicevox_url')} />
+            <input
+              id="voicevox_url"
+              className="input"
+              placeholder={speakers.data?.url ?? 'サーバーの既定（VOICEVOX_URL）'}
+              {...register('voicevox_url')}
+            />
+            <p className="text-xs text-slate-500">空欄のときはサーバーの既定（.env の VOICEVOX_URL）を使います。</p>
             {errors.voicevox_url && <p className="text-xs text-red-600">{errors.voicevox_url.message}</p>}
           </div>
           <div className="space-y-1">
@@ -176,12 +184,15 @@ export function ProjectForm() {
               {...register('voicevox_speaker_id', { valueAsNumber: true })}
               onChange={(e) => setValue('voicevox_speaker_id', Number(e.target.value))}
             >
-              {(speakers.data?.speakers ?? []).map((s) => (
-                <option key={s.speaker_id} value={s.speaker_id}>
-                  {s.speaker_id}: {s.name}
-                </option>
-              ))}
-              {speakers.data == null && <option value={1}>1 (VOICEVOX未接続)</option>}
+              {(speakers.data?.speakers ?? []).flatMap((s) =>
+                (s.styles.length ? s.styles : [{ id: s.speaker_id, name: undefined }]).map((style) => (
+                  <option key={`${s.speaker_id}-${style.id}`} value={style.id}>
+                    {s.name}
+                    {style.name ? `（${style.name}）` : ''}
+                  </option>
+                )),
+              )}
+              {speakers.data == null && <option value={watch('voicevox_speaker_id')}>話者ID {watch('voicevox_speaker_id')}（VOICEVOX未接続）</option>}
             </select>
             {speakers.error && (
               <p className="text-xs text-amber-600">VOICEVOX Engineに接続できません。</p>

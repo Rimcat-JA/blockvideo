@@ -28,9 +28,16 @@ _INVALID_REQUEST_DETAIL = {
 }
 
 
+# Ordinary whitespace a multi-line textarea produces; other controls stay invalid.
+_ALLOWED_CONTROLS = frozenset("\n\r\t")
+
+
 def _contains_invalid_text(value: object) -> bool:
     if isinstance(value, str):
-        return any(unicodedata.category(character) in {"Cc", "Cs"} for character in value)
+        return any(
+            character not in _ALLOWED_CONTROLS and unicodedata.category(character) in {"Cc", "Cs"}
+            for character in value
+        )
     if isinstance(value, dict):
         return any(
             _contains_invalid_text(key) or _contains_invalid_text(item)

@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 
-import pytest
+# Tests never read the developer's backend/.env: real paid keys must not be
+# loaded into the suite, and a documented .env value must not change results.
+# Set before any app import; child processes inherit it.
+os.environ["BLOCKVIDEO_ENV_FILE"] = "none"
+
+import pytest  # noqa: E402
 
 
 @pytest.fixture(scope="session")

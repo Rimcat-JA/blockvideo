@@ -834,7 +834,12 @@ def _snap_to_boundaries(
             b for b in boundaries
             if b not in cuts and previous + MIN_SLIDE_MS <= b <= latest
         ]
-        cut = min(usable, key=lambda b: abs(b - ideal)) if usable else ideal
+        if usable:
+            cut = min(usable, key=lambda b: abs(b - ideal))
+        else:
+            # An earlier cut may have snapped past this ideal point: keep the
+            # cuts ordered so no slide gets a negative or zero duration.
+            cut = min(max(ideal, previous + MIN_SLIDE_MS), max(latest, previous + 1))
         cuts.append(cut)
         previous = cut
     return cuts
@@ -1289,17 +1294,18 @@ def _providers_for_stages(project: Project, stages: list[str]) -> ProviderBundle
     from app.providers.image_openai import OpenAIImageProvider
     from app.providers.llm_fake import FakeLLMProvider
     from app.providers.voicevox import VoicevoxClient
+    from app.services.provider_credentials import resolve_image_credential
 
     settings = get_settings()
     secrets = secret_store.get(project.id)
     image_provider = None
     if "image" in stages and any(block.visual_type == VisualType.ai_image for block in project.blocks):
-        key = (secrets.image_api_key if secrets else None) or settings.image_api_key
-        if key:
+        credential = resolve_image_credential(secrets, settings)
+        if credential.api_key:
             image_provider = OpenAIImageProvider(
-                api_key=key,
-                model=(secrets.image_model if secrets else None) or settings.image_model or "gpt-image-1",
-                base_url=(secrets.image_base_url if secrets else None) or "https://api.openai.com/v1",
+                api_key=credential.api_key,
+                model=credential.model,
+                base_url=credential.base_url,
             )
     # The unused LLM is an offline placeholder; no planning stage can reach it.
     return ProviderBundle(llm=FakeLLMProvider(), image=image_provider,

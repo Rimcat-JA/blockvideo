@@ -151,7 +151,9 @@ export interface JobSummary {
   plan?: { stages: string[] } | null;
 }
 
-export type ProjectSettings = Omit<CreateProjectInput, 'source_script' | 'use_fake_providers' | 'providers'>;
+export type ProjectSettings = Omit<CreateProjectInput, 'source_script' | 'use_fake_providers' | 'providers' | 'voicevox_url'> & {
+  voicevox_url: string;
+};
 
 export interface VideoArtifact {
   id: number;
@@ -216,7 +218,8 @@ export interface OperationResult {
 export interface CreateProjectInput extends OutputQualitySettings {
   title: string;
   source_script: string;
-  voicevox_url: string;
+  /** Omitted: the server's VOICEVOX_URL. */
+  voicevox_url?: string;
   voicevox_speaker_id: number;
   voicevox_speed_scale: number;
   voicevox_pitch_scale: number;

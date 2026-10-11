@@ -909,10 +909,12 @@ def test_installed_native_node_and_npx_origins_without_package_fetch(publication
     env = release.build_group_environment(group.root, python_executable=Path(sys._base_executable), node_executable=node)
     native_before = release._native_file(node, "tools/node")
     script_before = release._tool_file(npx, "tools/npx_cli")
+    # Compare with the installed Node, not one pinned release (24.11.1 failed on 24.13.0).
+    installed = subprocess.run([str(node), "--version"], capture_output=True, text=True, check=True).stdout.strip().lstrip("v")
     async def perform() -> None:
         async with blinded_runtime.OwnedProcessScope() as scope:
             data = release._probe_json(await release._probe(scope, group, (str(node), "-e", "console.log(JSON.stringify({version:process.versions.node,executable:process.execPath}))"), env))
-            assert data["version"] == "24.11.1" and Path(data["executable"]) == node
+            assert data["version"] == installed and Path(data["executable"]) == node
             version = (await release._probe(scope, group, (str(node), str(npx), "--version"), env)).strip().decode("ascii")
             assert version == json.loads((npm / "package.json").read_bytes())["version"]
         assert scope.teardown_confirmed

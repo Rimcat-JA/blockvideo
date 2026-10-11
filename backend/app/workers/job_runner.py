@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.logging import log
+from app.core.provider_errors import ProviderError
+from app.core.security import redact
 from app.db import get_session_factory
 from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project, ProjectStatus
@@ -30,6 +32,17 @@ from app.services.job_control import cancel_job
 from app.services.transactions import atomic_write
 from app.services.job_liveness import clear_running, is_running, mark_running
 from app.services.job_records import ProjectBusyError, create_pending_job, has_active_project_job
+
+
+def _failure_message(exc: Exception) -> str:
+    """Explain a failed job: keep a safe provider message, otherwise the class.
+
+    ``ProviderError(safe=True)`` messages are written for users (missing API
+    settings, VOICEVOX unreachable, ffmpeg errors); key-shaped text is redacted.
+    """
+    if isinstance(exc, ProviderError) and exc.safe and str(exc):
+        return f"生成処理に失敗しました: {redact(str(exc))[:300]}"
+    return f"生成処理に失敗しました ({exc.__class__.__name__})"
 
 
 class JobRegistry:
@@ -124,8 +137,9 @@ class JobRegistry:
                     raise
                 except Exception as exc:
                     outcome = JobStatus.failed
-                    message = f"生成処理に失敗しました ({exc.__class__.__name__})"
-                    log.error("job failed id={job_id} error={error}", job_id=job_id, error=exc.__class__.__name__)
+                    message = _failure_message(exc)
+                    log.error("job failed id={job_id} error={error} reason={reason}", job_id=job_id,
+                              error=exc.__class__.__name__, reason=message)
                 with get_session_factory()() as db, atomic_write(db):
                     job = db.get(GenerationJob, job_id)
                     if job is None or job.status == JobStatus.completed:

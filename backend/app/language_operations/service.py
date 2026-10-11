@@ -137,7 +137,9 @@ class LanguageOperationService:
                             continue
                         if yolo and code != "explicit_value":
                             # Unattended: a guessed (missing) value stands; the bypass is reported.
-                            bypassed.append(code)
+                            # One entry per guard: plans repeat guards and the report holds 8.
+                            if code not in bypassed:
+                                bypassed.append(code)
                             continue
                         return found, code
                     return None, None

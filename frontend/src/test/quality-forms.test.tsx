@@ -85,7 +85,9 @@ describe('quality controls', () => {
       visual_focus_enabled: true, subtitle_mode: 'sentence', narration_pacing_mode: 'fixed',
       narration_sentence_pause_seconds: 1.2, max_slides_per_block: 3,
       pronunciation_overrides: [{ surface: 'API', reading: 'エーピーアイ', accent: 0 }],
-      providers: expect.objectContaining({ image_base_url: 'https://api.openai.com/v1' }),
+      // Blank URL fields defer to the server's .env endpoints instead of hard-coded ones.
+      voicevox_url: undefined,
+      providers: expect.not.objectContaining({ image_base_url: expect.anything() }),
     })));
   });
 

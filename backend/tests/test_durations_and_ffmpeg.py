@@ -13,7 +13,6 @@ from app.services.subtitles import (
     render_ass,
 )
 from app.services.ffmpeg_runner import build_block_video_args, build_concat_args
-from app.services.mermaid_renderer import mmdc_available
 
 
 def test_display_duration_includes_margins_and_floor() -> None:
@@ -126,12 +125,18 @@ async def test_ffprobe_duration_ms_missing_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mermaid_render_skips_when_mmdc_absent(tmp_path: Path) -> None:
+async def test_mermaid_render_skips_when_mmdc_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When mmdc isn't installed, the renderer raises RuntimeError (so the
-    caller falls back to PIL) rather than silently succeeding."""
-    if mmdc_available():
-        pytest.skip("mmdc present; fallback path not exercised here")
+    caller falls back to PIL) rather than silently succeeding.
+
+    Neither mmdc nor npx is looked up for real: ``npx --yes mmdc`` would
+    download and run a package from npm inside the test suite.
+    """
+    from app.services import mermaid_renderer
     from app.services.mermaid_renderer import render_mermaid_to_png
+
+    monkeypatch.setattr(mermaid_renderer, "resolve_mmdc", lambda: "mmdc")
+    monkeypatch.setattr(mermaid_renderer.shutil, "which", lambda name: None)
 
     out = tmp_path / "diagram.png"
     with pytest.raises(RuntimeError):

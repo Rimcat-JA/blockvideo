@@ -7,7 +7,7 @@ describe('ProgressBar', () => {
   it('shows percent', () => {
     render(<ProgressBar progress={0.42} stage="image" status="running" />);
     expect(screen.getByText('42%')).toBeInTheDocument();
-    expect(screen.getByText(/工程: image/)).toBeInTheDocument();
+    expect(screen.getByText(/工程: スライドの描画（実行中）/)).toBeInTheDocument();
   });
 
   it('clamps out-of-range values', () => {

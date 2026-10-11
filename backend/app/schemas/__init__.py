@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.colors import normalize_color
 from app.core.provider_errors import ProviderError
 from app.services.pronunciation import normalize_overrides
 
@@ -110,6 +111,17 @@ class QualitySettings(BaseModel):
     narration_pacing_mode: Literal["adaptive", "fixed"] = "adaptive"
     pronunciation_overrides: list[PronunciationOverride] = Field(default_factory=list, max_length=100)
 
+    @field_validator("subtitle_text_color", "subtitle_outline_color", check_fields=False)
+    @classmethod
+    def _normalize_subtitle_color(cls, value: str | None) -> str | None:
+        """Accept ``#RGB``/``#RRGGBB`` or a common colour name; store ``#RRGGBB``."""
+        if value is None:
+            return value
+        color = normalize_color(value)
+        if color is None:
+            raise ValueError("字幕の色は #RRGGBB 形式か、白・黒・赤などの色名で指定してください")
+        return color
+
     @field_validator("pronunciation_overrides")
     @classmethod
     def _unique_pronunciations(cls, value):
@@ -141,7 +153,8 @@ class ProjectCreate(QualitySettings):
     # Required project input.
     title: str = Field(min_length=1, max_length=255)
     source_script: str = Field(min_length=1, max_length=100_000)
-    # VOICEVOX endpoint and synthesis controls.
+    # VOICEVOX endpoint and synthesis controls. A field the request omits is
+    # filled from the server's VOICEVOX_* settings by the create route.
     voicevox_url: str = Field(default="http://127.0.0.1:50021")
     voicevox_speaker_id: int = Field(default=1, ge=0)
     voicevox_speed_scale: float = Field(default=1.0, ge=0.5, le=2.0)
@@ -160,6 +173,7 @@ class ProjectCreate(QualitySettings):
     pre_margin_seconds: float = Field(default=0.15, ge=0.0, le=5.0)
     post_margin_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
     min_display_seconds: float = Field(default=2.0, ge=0.5, le=10.0)
+    # Omitted: NARRATION_SENTENCE_PAUSE_SECONDS from the environment.
     narration_sentence_pause_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
     max_slides_per_block: int = Field(default=1, ge=1, le=9)
     # Provider selection and optional request-scoped credentials.
@@ -169,7 +183,7 @@ class ProjectCreate(QualitySettings):
 
     @field_validator("voicevox_url")
     @classmethod
-    def _validate_url(cls, value: str) -> str:
+    def _validate_url(cls, value: str | None) -> str | None:
         """Reject endpoints that are not explicit HTTP(S) URLs.
 
         Args:
@@ -182,6 +196,8 @@ class ProjectCreate(QualitySettings):
             ValueError: If the scheme is not explicitly HTTP(S).
 
         """
+        if value is None:
+            return value
         if not (value.startswith("http://") or value.startswith("https://")):
             raise ValueError("VOICEVOX URL must start with http:// or https://")
         return value
@@ -226,6 +242,7 @@ class QuickCreate(QualitySettings):
 
     source_script: str = Field(min_length=1, max_length=100_000)
     title: str | None = Field(default=None, max_length=255)
+    # Omitted: the server's VOICEVOX_URL / VOICEVOX_SPEAKER_ID.
     voicevox_url: str = Field(default="http://127.0.0.1:50021")
     voicevox_speaker_id: int = Field(default=1, ge=0)
     use_fake_providers: bool = Field(default=False)
@@ -240,7 +257,7 @@ class QuickCreate(QualitySettings):
 
     @field_validator("voicevox_url")
     @classmethod
-    def _validate_url(cls, value: str) -> str:
+    def _validate_url(cls, value: str | None) -> str | None:
         """Validate the optional VOICEVOX endpoint used by quick generation.
 
         Args:
@@ -253,6 +270,8 @@ class QuickCreate(QualitySettings):
             ValueError: For non-HTTP(S) values.
 
         """
+        if value is None:
+            return value
         if not (value.startswith("http://") or value.startswith("https://")):
             raise ValueError("VOICEVOX URL must start with http:// or https://")
         return value

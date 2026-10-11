@@ -8,8 +8,12 @@ const GENERATION = ['project.generation.start', 'project.generation.retry'];
 
 function describe(operationId: string, argumentsValue: Record<string, unknown>): string {
   if (operationId === 'project.generation.start') return generationKinds[String(argumentsValue.kind ?? 'full')] ?? '動画の生成';
-  const entries = Object.entries(argumentsValue.settings && typeof argumentsValue.settings === 'object'
-    ? argumentsValue.settings as Record<string, unknown> : argumentsValue);
+  const nested = argumentsValue.settings && typeof argumentsValue.settings === 'object';
+  // A v2 settings step carries the relative subtitle change beside ``settings``.
+  const entries = Object.entries(nested ? {
+    ...(argumentsValue.settings as Record<string, unknown>),
+    ...(argumentsValue.subtitle_font_size_delta != null ? { delta: argumentsValue.subtitle_font_size_delta } : {}),
+  } : argumentsValue);
   return entries.map(([field, value]) => `${settingNames[field] ?? ({ value: '字幕サイズ', delta: '字幕サイズの増減',
     revision: '戻す設定の版', job_id: '対象ジョブ', artifact_id: '戻す完成動画の番号' } as Record<string, string>)[field] ?? field}: ${settingValue(
     field === 'value' || field === 'delta' ? 'subtitle_font_size' : field, value)}`).join('、');

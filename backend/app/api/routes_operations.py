@@ -23,7 +23,7 @@ def _raise_http(exc: OperationError) -> None:
     """Map a domain rejection to one stable HTTP error body."""
     status = 404 if exc.reason_code in {"operation_not_found", "request_not_found", "job_not_found", "settings_revision_not_found",
                                           "artifact_not_found"} else 422
-    if exc.reason_code in {"request_id_conflict", "external_outcome_unknown", "job_not_retryable"}:
+    if exc.reason_code in {"request_id_conflict", "external_outcome_unknown", "job_not_retryable", "stale_media"}:
         status = 409
     elif exc.reason_code == "database_busy":
         status = 503

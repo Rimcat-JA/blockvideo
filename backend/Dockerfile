@@ -8,6 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+    fonts-noto-cjk fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -29,4 +30,4 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 FROM base AS dev
 RUN uv sync --frozen
 ENV PATH="/app/.venv/bin:$PATH"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]""</content>
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

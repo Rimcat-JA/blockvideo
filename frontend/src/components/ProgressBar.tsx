@@ -1,4 +1,6 @@
 /** Progress display shared by quick generation and project detail pages. */
+import { STAGE_LABELS, STATUS_LABELS, label } from '@/lib/status-labels';
+
 /** Props for a normalized 0..1 project progress display. */
 interface ProgressBarProps {
   progress: number;
@@ -14,8 +16,8 @@ export function ProgressBar({ progress, stage, status }: ProgressBarProps) {
     <div className="space-y-2">
       <div className="flex items-center justify-between text-sm text-slate-600">
         <span>
-          {stage ? `工程: ${stage}` : '待機中'}
-          {status ? ` (${status})` : ''}
+          {stage ? `工程: ${label(STAGE_LABELS, stage)}` : '待機中'}
+          {status ? `（${label(STATUS_LABELS, status)}）` : ''}
         </span>
         <span>{percent}%</span>
       </div>

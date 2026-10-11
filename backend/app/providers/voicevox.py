@@ -62,6 +62,24 @@ class Speaker:
     styles: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _speaker_from_item(item: dict[str, Any]) -> Speaker:
+    """Normalize one ``/speakers`` entry.
+
+    VOICEVOX lists speakers with a ``speaker_uuid`` and their ``styles``;
+    synthesis takes a style id, so the speaker's id is its first talk style
+    (``speaker_id`` is only read for older or custom engines).
+    """
+    styles = [style for style in (item.get("styles") or []) if isinstance(style, dict)]
+    talk = [style for style in styles if style.get("type", "talk") == "talk" and "id" in style]
+    if talk:
+        speaker_id = int(talk[0]["id"])
+    elif "speaker_id" in item:
+        speaker_id = int(item["speaker_id"])
+    else:
+        speaker_id = int(styles[0]["id"]) if styles and "id" in styles[0] else 0
+    return Speaker(speaker_id=speaker_id, name=str(item.get("name", "")), styles=styles)
+
+
 class VoicevoxClient:
     """Async HTTP client for a running VOICEVOX Engine instance.
 
@@ -117,7 +135,7 @@ class VoicevoxClient:
         """
         try:
             r = await self._client.get(f"{self.base_url}/speakers")
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise ProviderError(
                 f"VOICEVOX Engineに接続できません ({self.base_url})",
                 safe=True,
@@ -128,15 +146,18 @@ class VoicevoxClient:
                 f"VOICEVOX話者一覧取得に失敗しました (status {r.status_code})",
                 safe=True,
             )
-        data = r.json()
-        return [
-            Speaker(
-                speaker_id=int(item.get("speaker_id", 0)),
-                name=str(item.get("name", "")),
-                styles=list(item.get("styles") or []),
-            )
-            for item in data
-        ]
+        try:
+            data = r.json()
+            if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+                raise ValueError("speakers response is not a list of objects")
+            return [_speaker_from_item(item) for item in data]
+        except (ValueError, TypeError) as exc:
+            # Something answered 200 that is not VOICEVOX (e.g. a web app's index.html).
+            raise ProviderError(
+                f"VOICEVOX Engineの応答が不正です ({self.base_url})",
+                safe=True,
+                original=exc,
+            ) from exc
 
     async def audio_query(self, text: str, speaker_id: int) -> dict[str, Any]:
         """Ask VOICEVOX for a synthesis query for one text fragment.

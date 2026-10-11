@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -96,6 +97,10 @@ async def ffprobe_duration_ms(path: Path) -> int:
     return int(round(duration * 1000))
 
 
+# HTTP status in VoicevoxClient error messages ("... (status 422)").
+_STATUS = re.compile(r"\(status (\d{3})\)")
+
+
 async def _with_retries(make_audio, *, max_attempts: int) -> bytes:
     """Run a synthesis coroutine with bounded exponential backoff.
 
@@ -117,15 +122,19 @@ async def _with_retries(make_audio, *, max_attempts: int) -> bytes:
             return await make_audio()
         except ProviderError as exc:
             last_error = exc
-            # Don't retry 404-style permanent errors.
-            if "話者ID" in str(exc):
+            # Don't retry permanent errors: unknown speaker or a rejected
+            # request (4xx other than 408 timeout / 429 rate limit).
+            status = _STATUS.search(str(exc))
+            if "話者ID" in str(exc) or (status and status.group(1).startswith("4")
+                                       and status.group(1) not in {"408", "429"}):
                 raise
             log.warning(
                 "VOICEVOX合成失敗 attempt={attempt} error={error}",
                 attempt=attempt,
                 error=exc.__class__.__name__,
             )
-            await asyncio.sleep(min(2.0, 0.5 * (2 ** (attempt - 1))))
+            if attempt < max_attempts:
+                await asyncio.sleep(min(2.0, 0.5 * (2 ** (attempt - 1))))
     if last_error is not None:
         raise last_error
     raise ProviderError("VOICEVOX合成に失敗しました", safe=True)

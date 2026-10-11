@@ -227,8 +227,11 @@ def _escape_sub_path(path: Path) -> str:
         colon.  It is not shell escaping because no shell is used.
 
     """
-    p = str(path).replace("\\", "/").replace(":", "\\:")
-    return f"'{p}'"
+    # Option level: the value parser treats \ ' and : specially.
+    p = str(path).replace("\\", "/").replace("'", "\\'").replace(":", "\\:")
+    # Filtergraph level: a quote cannot appear inside '...', so close the
+    # quote, add an escaped quote and reopen it (paths like C:/Users/O'Brien).
+    return "'" + p.replace("'", "'\\''") + "'"
 
 
 def build_concat_args(*, list_file: Path, output: Path, ffmpeg: str, crossfade_seconds: float) -> list[str]:
@@ -388,5 +391,6 @@ def write_concat_list(items: list[Path], list_file: Path) -> None:
     list_file.parent.mkdir(parents=True, exist_ok=True)
     with list_file.open("w", encoding="utf-8") as fp:
         for item in items:
-            safe = str(item.resolve()).replace("'", "\\'")
+            # Concat syntax: inside '...' a quote is written as '\''.
+            safe = str(item.resolve()).replace("'", "'\\''")
             fp.write(f"file '{safe}'\n")

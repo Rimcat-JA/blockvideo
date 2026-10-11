@@ -18,6 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +30,12 @@ REPO_ROOT = PROJECT_ROOT.parent
 STORAGE_ROOT = REPO_ROOT / "storage"
 # Sample scripts used by the demo and manual checks.
 SAMPLES_ROOT = REPO_ROOT / "samples"
+
+
+def _env_file() -> str | None:
+    """The ``.env`` path to read, or ``None`` when BLOCKVIDEO_ENV_FILE is "none"."""
+    chosen = os.environ.get("BLOCKVIDEO_ENV_FILE", str(PROJECT_ROOT / ".env"))
+    return None if chosen.strip().lower() in {"", "none"} else chosen
 
 
 class Settings(BaseSettings):
@@ -53,7 +60,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"),
+        # BLOCKVIDEO_ENV_FILE overrides the file; "none" disables it (the test
+        # suite, including the child processes it starts, never reads .env).
+        # Windows drops empty variables from child environments, hence "none".
+        env_file=_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -160,6 +170,12 @@ class Settings(BaseSettings):
     # Subtitle burn-in band layout: the slide is scaled into the upper
     # (height - band) region and the lower band hosts burned-in subtitles.
     subtitle_band_height: int = 200
+
+    @field_validator("output_width", "output_height", "subtitle_band_height")
+    @classmethod
+    def _round_down_to_even(cls, value: int) -> int:
+        """Keep frame and band sizes even: yuv420p/libx264 and the slide pad need it."""
+        return value - (value % 2)
 
 
 @lru_cache

@@ -167,7 +167,11 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
                   {style.name ? `（${style.name}）` : ''}
                 </option>
               )),
-            ) ?? <option value={value.voicevox_speaker_id}>読み込み中…</option>}
+            ) ?? (
+              <option value={value.voicevox_speaker_id}>
+                {speakers.isError ? `話者ID ${value.voicevox_speaker_id}（一覧を取得できません）` : '読み込み中…'}
+              </option>
+            )}
           </select>
           {speakers.isError && (
             <p className="mt-1 text-xs text-amber-600">

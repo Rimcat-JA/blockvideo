@@ -41,6 +41,9 @@ tools/mermaid/node_modules/
 # Personal helper that reads local key files — not for distribution.
 scripts/run_blvd.py
 *.tsbuildinfo
+# tsc -b output of the Vite config; a stray vite.config.js would shadow vite.config.ts.
+/frontend/vite.config.js
+/frontend/vite.config.d.ts
 
 # Private development records: kept locally, never published.
 /AGENTS.md

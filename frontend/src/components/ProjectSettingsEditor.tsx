@@ -1,10 +1,18 @@
 /** Edit saved settings separately from generation, with a revision-bound snapshot. */
-import { useState } from 'react';
+import { useState, type ChangeEvent } from 'react';
+import { z } from 'zod';
 import type { ProjectDetail, ProjectSettings } from '@/lib/types';
 import { createProjectSchema } from '@/lib/validation';
 import { QualitySettingsFields } from '@/components/QualitySettingsFields';
 
-const settingsSchema = createProjectSchema.omit({ source_script: true, use_fake_providers: true });
+// A saved project always has an engine URL; blank is only meaningful when creating.
+const settingsSchema = createProjectSchema.omit({ source_script: true, use_fake_providers: true }).extend({
+  voicevox_url: z.string().regex(/^https?:\/\/[^\s/]+/, 'VOICEVOX URL は http:// か https:// で始めてください'),
+});
+
+type NumericField = {
+  [K in keyof ProjectSettings]: ProjectSettings[K] extends number ? K : never
+}[keyof ProjectSettings];
 
 export function ProjectSettingsEditor({ project, disabled, onSave }: {
   project: ProjectDetail;
@@ -19,6 +27,17 @@ export function ProjectSettingsEditor({ project, disabled, onSave }: {
     JSON.stringify(next) !== JSON.stringify(project[field as keyof ProjectSettings]));
   const set = <K extends keyof ProjectSettings>(field: K, next: ProjectSettings[K]) =>
     setValue((previous) => ({ ...previous, [field]: next }));
+  // Raw text of number fields being typed: "" or "-" must not become 0.
+  const [drafts, setDrafts] = useState<Partial<Record<NumericField, string>>>({});
+  const incomplete = Object.values(drafts).some((raw) => raw === undefined || raw.trim() === '' || !Number.isFinite(Number(raw)));
+  const numberProps = (field: NumericField) => ({
+    value: drafts[field] ?? String(value[field]),
+    onChange: (event: ChangeEvent<HTMLInputElement>) => {
+      const raw = event.target.value;
+      setDrafts((previous) => ({ ...previous, [field]: raw }));
+      if (raw.trim() !== '' && Number.isFinite(Number(raw))) set(field, Number(raw));
+    },
+  });
 
   return (
     <section className="mt-6 rounded-lg border border-slate-200 bg-white p-4">
@@ -27,22 +46,20 @@ export function ProjectSettingsEditor({ project, disabled, onSave }: {
       {changed.length > 0 && <p className="mt-2 text-sm text-amber-700" role="status">未保存の変更があります。生成に使うには、先に「設定を保存」を押してください。</p>}
       <form className="mt-4" onSubmit={(event) => {
         event.preventDefault();
-        if (disabled || !validation.success || !changed.length) return;
+        if (disabled || incomplete || !validation.success || !changed.length) return;
         onSave(Object.fromEntries(changed));
       }}>
         <fieldset disabled={disabled} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="label">字幕の大きさ（px）
               <input className="input mt-1" type="number" min={16} max={120} step={1}
-                value={value.subtitle_font_size} onChange={(event) => set('subtitle_font_size', Number(event.target.value))} />
+                {...numberProps('subtitle_font_size')} />
             </label>
             <label className="label">話者ID
-              <input className="input mt-1" type="number" min={0} step={1} value={value.voicevox_speaker_id}
-                onChange={(event) => set('voicevox_speaker_id', Number(event.target.value))} />
+              <input className="input mt-1" type="number" min={0} step={1} {...numberProps('voicevox_speaker_id')} />
             </label>
             <label className="label">話す速さ
-              <input className="input mt-1" type="number" min={0.5} max={2} step={0.05} value={value.voicevox_speed_scale}
-                onChange={(event) => set('voicevox_speed_scale', Number(event.target.value))} />
+              <input className="input mt-1" type="number" min={0.5} max={2} step={0.05} {...numberProps('voicevox_speed_scale')} />
             </label>
           </div>
           <QualitySettingsFields value={value} onChange={(quality) => setValue({ ...value, ...quality })} disabled={disabled} />
@@ -67,8 +84,7 @@ export function ProjectSettingsEditor({ project, disabled, onSave }: {
                 ['max_slides_per_block', '1ブロックの最大スライド枚数', 1, 9, 1],
               ] as const).map(([field, label, min, max, step]) => (
                 <label key={field} className="label">{label}
-                  <input className="input mt-1" type="number" min={min} max={max} step={step} value={value[field]}
-                    onChange={(event) => set(field, Number(event.target.value))} />
+                  <input className="input mt-1" type="number" min={min} max={max} step={step} {...numberProps(field)} />
                 </label>
               ))}
               <label className="label">字幕の位置
@@ -88,8 +104,9 @@ export function ProjectSettingsEditor({ project, disabled, onSave }: {
               ))}
             </div>
           </details>
+          {incomplete && <p role="alert" className="text-sm text-red-600">数値の欄が空か、入力途中です。</p>}
           {!validation.success && <p role="alert" className="text-sm text-red-600">入力値を確認してください。{validation.error.issues[0]?.message}</p>}
-          <button className="btn-primary" type="submit" disabled={disabled || !validation.success || !changed.length}>設定を保存</button>
+          <button className="btn-primary" type="submit" disabled={disabled || incomplete || !validation.success || !changed.length}>設定を保存</button>
         </fieldset>
       </form>
     </section>

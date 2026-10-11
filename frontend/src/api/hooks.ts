@@ -1,11 +1,20 @@
 /** React Query hooks that connect pages/components to the API client. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
-import type { CreateProjectInput, QuickCreateInput } from '@/lib/types';
+import type { CreateProjectInput, ProjectStatus, QuickCreateInput } from '@/lib/types';
+
+/** Project statuses that change on their own while a job runs. */
+const ACTIVE_STATUSES = new Set<ProjectStatus>(['pending', 'splitting', 'planning', 'generating', 'rendering']);
 
 export function useProjects() {
   /** Fetch the newest project summaries. */
-  return useQuery({ queryKey: ['projects'], queryFn: () => api.listProjects() });
+  return useQuery({
+    queryKey: ['projects'],
+    queryFn: () => api.listProjects(),
+    // Keep running rows moving: status, progress and the delete lock follow the job.
+    refetchInterval: (query) =>
+      query.state.data?.some((p) => ACTIVE_STATUSES.has(p.status)) ? 2000 : false,
+  });
 }
 
 export function useProject(id: number | null) {

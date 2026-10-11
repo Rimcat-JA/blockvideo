@@ -37,6 +37,22 @@ const reasons: Record<string, string> = {
   model_not_configured: '自然言語用のモデルが未設定です。接続設定を確認してください。通常の設定フォームは利用できます。',
 };
 
+/** Operation API rejections shown on the project page instead of internal English text. */
+const operationReasons: Record<string, string> = {
+  ...reasons,
+  stale_state: '別の画面や依頼で設定が更新されています。ページを再読み込みして、もう一度実行してください。',
+  target_not_found: '対象のプロジェクトが見つかりません。',
+  job_not_found: '対象の生成処理が見つかりません。',
+  job_not_retryable: '失敗またはキャンセルされた処理だけを再実行できます。',
+  invalid_arguments: '入力の値が正しくありません。',
+  database_busy: 'データベースが混み合っています。少し待ってからもう一度実行してください。',
+};
+
+/** Japanese explanation for an operation rejection's reason code, if known. */
+export function operationReasonMessage(reasonCode: string | undefined): string | undefined {
+  return reasonCode ? operationReasons[reasonCode] : undefined;
+}
+
 export function failureMessage(response: LanguageResponse): string | undefined {
   return response.failure ? reasons[response.failure.reason_code] ?? response.failure.message : undefined;
 }

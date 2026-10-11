@@ -4,9 +4,9 @@ import { render, screen } from '@testing-library/react';
 import { StatusBadge } from '@/components/StatusBadge';
 
 describe('StatusBadge', () => {
-  it('renders the status text', () => {
+  it('renders the status as a Japanese label', () => {
     render(<StatusBadge status="completed" />);
-    expect(screen.getByText('completed')).toBeInTheDocument();
+    expect(screen.getByText('完了')).toHaveAttribute('title', 'completed');
   });
 
   it('falls back gracefully for unknown statuses', () => {

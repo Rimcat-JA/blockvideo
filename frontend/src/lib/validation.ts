@@ -39,7 +39,8 @@ export const createProjectSchema = qualitySettingsSchema.extend({
     .string()
     .min(20, '台本は20文字以上で入力してください')
     .max(100_000, '台本は100000文字以内で入力してください'),
-  voicevox_url: z.string().url('有効なURLを入力してください'),
+  // Blank means the server's VOICEVOX_URL; anything typed must be an http(s) URL.
+  voicevox_url: z.union([z.literal(''), z.string().regex(/^https?:\/\/[^\s/]+/, 'http:// か https:// で始まるURLを入力してください')]),
   voicevox_speaker_id: z.coerce.number().int().nonnegative(),
   voicevox_speed_scale: z.coerce.number().min(0.5).max(2.0),
   voicevox_pitch_scale: z.coerce.number().min(-1).max(1),

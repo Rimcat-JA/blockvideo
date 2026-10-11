@@ -78,7 +78,7 @@ def sentence_cues(
     if selected_size != font_size:
         for cue in all_cues:
             fit = subtitles.fit_text_to_band(
-                cue.text.replace('\\N', ''), band_height=band_height,
+                subtitles.plain_text(cue.text), band_height=band_height,
                 base_font_size=selected_size,
                 base_max_chars=max(1, int(max_chars * font_size / selected_size)),
             )

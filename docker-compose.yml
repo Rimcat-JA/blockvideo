@@ -17,12 +17,15 @@ services:
     image: blockvideo-backend:dev
     environment:
       STORAGE_ROOT: /data/storage
+      # Keep the database in the mounted volume together with the media it describes.
+      DATABASE_URL: sqlite:////data/storage/blockvideo.db
       API_HOST: 0.0.0.0
       API_PORT: "8000"
       VOICEVOX_URL: ${VOICEVOX_URL:-http://host.docker.internal:50021}
       CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173"]'
     ports:
-      - "8000:8000"
+      # The API has no authentication: publish it on the loopback interface only.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./storage:/data/storage
     extra_hosts:
@@ -34,8 +37,10 @@ services:
     command: sh -c "corepack enable && pnpm install && pnpm dev --host 0.0.0.0"
     environment:
       NODE_ENV: development
+      # Inside this container 127.0.0.1 is the frontend itself.
+      VITE_API_PROXY_TARGET: http://backend:8000
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     volumes:
       - ./frontend:/app
     depends_on:
