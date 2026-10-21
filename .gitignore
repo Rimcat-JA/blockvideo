@@ -29,6 +29,7 @@ storage/
 /release-evidence/
 tools/mermaid/node_modules/
 **/*.mp4
+!samples/*.mp4
 **/*.wav
 **/*.ass
 **/*.log
