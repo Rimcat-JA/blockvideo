@@ -18,7 +18,8 @@ API            := http://127.0.0.1:8000
 
 UV             ?= uv
 PNPM           ?= pnpm
-PYTHON         ?= python
+# The backend venv always has Python; bare `python` is missing on stock Debian/Ubuntu.
+PYTHON         ?= $(UV) run --project $(BACKEND_DIR) python
 # backend/.env may name ffmpeg by absolute path when it is not on PATH.
 FFMPEG_PATH    ?= $(strip $(shell sed -n 's/^FFMPEG_PATH=//p' $(BACKEND_DIR)/.env 2>/dev/null | tr -d '"\r'))
 FFMPEG         ?= $(if $(FFMPEG_PATH),$(FFMPEG_PATH),ffmpeg)
