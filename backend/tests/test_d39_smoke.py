@@ -251,6 +251,8 @@ def test_pinned_candidate_owned_serve_and_seed_register_all_models(pinned_source
 def test_pinned_d35_tracked_credential_literals_still_fail_secret_scan(pinned_source: Path) -> None:
     from evaluation import release_verification as verification
     from tests.d37_pinned_support import PINNED_D35
+    from tests.private_inputs import require_commit
+    require_commit(PINNED_D35)
     raw = subprocess.check_output(['git', '-C', str(Path(__file__).parents[2]), 'ls-tree', '-r', '-z', '--name-only', PINNED_D35])
     paths = tuple(path.decode('utf-8') for path in raw.split(b'\0') if path)
     counts = verification.scan_public_files(pinned_source, paths, ())

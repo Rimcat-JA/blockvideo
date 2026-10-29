@@ -32,6 +32,7 @@ from evaluation.comparison_fixture import observe as observe_state
 from tests.test_language_operations import ReplyAdapter, create
 from scripts.run_adversarial import FAKE_REPLIES, main as adversarial_main
 from tests.test_semantic_interpretation import Replies, build_setup
+from tests.private_inputs import private_corpus
 
 _RETRY_PROPOSAL = {
     "kind": "operation",
@@ -369,7 +370,7 @@ def test_adversarial_loader_rejects_invalid_utf8_without_echoing_bytes(tmp_path:
 
 
 def test_committed_development_corpus_covers_both_modes_and_fake_map() -> None:
-    path = Path(__file__).parents[2] / "evaluation/d31/development.jsonl"
+    path = private_corpus("evaluation/d31/development.jsonl")
 
     cases = load_adversarial_cases(path)
 

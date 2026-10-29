@@ -9,6 +9,8 @@ import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from tests.private_inputs import require_commit
+
 PINNED_D35 = "522775516c0797abdb313e3432339a3a444b7ae2"
 
 _INDEX_PROBE = r'''
@@ -74,6 +76,7 @@ def source_hashes(root: Path) -> dict[str, str]:
 
 
 def verified_archive(repository: Path, root: Path) -> dict[str, str]:
+    require_commit(PINNED_D35, repository)
     tree = subprocess.check_output(["git", "-C", str(repository), "ls-tree", "-r", "-z", PINNED_D35])
     expected: dict[str, str] = {}
     for entry in tree.split(b"\0"):
