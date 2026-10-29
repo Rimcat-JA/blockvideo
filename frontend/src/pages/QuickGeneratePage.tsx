@@ -95,6 +95,7 @@ export function QuickGeneratePage() {
           <textarea
             className="h-96 w-full rounded-lg border border-slate-300 p-4 font-mono text-sm leading-relaxed
                        focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500"
+            aria-label="台本"
             placeholder="ここに日本語の台本を貼り付けてください…"
             value={script}
             onChange={(e) => setScript(e.target.value)}

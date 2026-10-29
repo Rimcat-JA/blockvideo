@@ -4,6 +4,7 @@ import { ProjectsPage } from '@/pages/ProjectsPage';
 import { NewProjectPage } from '@/pages/NewProjectPage';
 import { ProjectDetailPage } from '@/pages/ProjectDetailPage';
 import { QuickGeneratePage } from '@/pages/QuickGeneratePage';
+import { NotFoundPage } from '@/pages/NotFoundPage';
 
 export default function App() {
   /** Render the route selected by the browser URL. */
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/projects/new" element={<NewProjectPage />} />
         <Route path="/projects/:id" element={<ProjectDetailPage />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </BrowserRouter>
   );

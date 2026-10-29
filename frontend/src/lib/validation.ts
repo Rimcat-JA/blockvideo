@@ -32,6 +32,14 @@ export const qualitySettingsSchema = z.object({
 
 export const DEFAULT_QUALITY = qualitySettingsSchema.parse({});
 
+/** A number field with Japanese messages; an emptied number input arrives as NaN. */
+function numberIn(min: number, max: number, integer = false) {
+  const base = z.coerce.number({ invalid_type_error: '数値を入力してください' });
+  return (integer ? base.int('整数で入力してください') : base)
+    .min(min, `${min}以上で入力してください`)
+    .max(max, `${max}以下で入力してください`);
+}
+
 /** Client-side constraints that mirror the backend ProjectCreate schema. */
 export const createProjectSchema = qualitySettingsSchema.extend({
   title: z.string().min(1, 'タイトルを入力してください').max(255),
@@ -41,23 +49,23 @@ export const createProjectSchema = qualitySettingsSchema.extend({
     .max(100_000, '台本は100000文字以内で入力してください'),
   // Blank means the server's VOICEVOX_URL; anything typed must be an http(s) URL.
   voicevox_url: z.union([z.literal(''), z.string().regex(/^https?:\/\/[^\s/]+/, 'http:// か https:// で始まるURLを入力してください')]),
-  voicevox_speaker_id: z.coerce.number().int().nonnegative(),
-  voicevox_speed_scale: z.coerce.number().min(0.5).max(2.0),
-  voicevox_pitch_scale: z.coerce.number().min(-1).max(1),
-  voicevox_intonation_scale: z.coerce.number().min(0).max(2),
-  voicevox_volume_scale: z.coerce.number().min(0).max(2),
+  voicevox_speaker_id: numberIn(0, 2 ** 31 - 1, true),
+  voicevox_speed_scale: numberIn(0.5, 2.0),
+  voicevox_pitch_scale: numberIn(-1, 1),
+  voicevox_intonation_scale: numberIn(0, 2),
+  voicevox_volume_scale: numberIn(0, 2),
   subtitle_enabled: z.boolean(),
-  subtitle_font_size: z.coerce.number().int().min(16).max(120),
+  subtitle_font_size: numberIn(16, 120, true),
   subtitle_position: z.enum(['top', 'middle', 'bottom']),
   subtitle_text_color: z.string(),
   subtitle_outline_color: z.string(),
   subtitle_background: z.boolean(),
-  subtitle_max_chars_per_line: z.coerce.number().int().min(8).max(120),
-  pre_margin_seconds: z.coerce.number().min(0).max(5),
-  post_margin_seconds: z.coerce.number().min(0).max(5),
-  min_display_seconds: z.coerce.number().min(0.5).max(10),
-  narration_sentence_pause_seconds: z.coerce.number().min(0).max(5).default(1.5),
-  max_slides_per_block: z.coerce.number().int().min(1).max(9).default(1),
+  subtitle_max_chars_per_line: numberIn(8, 120, true),
+  pre_margin_seconds: numberIn(0, 5),
+  post_margin_seconds: numberIn(0, 5),
+  min_display_seconds: numberIn(0.5, 10),
+  narration_sentence_pause_seconds: numberIn(0, 5).default(1.5),
+  max_slides_per_block: numberIn(1, 9, true).default(1),
   use_fake_providers: z.boolean(),
 });
 

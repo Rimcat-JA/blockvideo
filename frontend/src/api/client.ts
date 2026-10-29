@@ -101,6 +101,9 @@ export const api = {
   getProjectHistory: (id: number) => request<ProjectHistory>(`/projects/${id}/history`),
   executeOperation: (input: OperationRequest) =>
     request<OperationResult>('/operations/execute', { method: 'POST', body: JSON.stringify(input) }),
+  /** Look up a committed request's original acknowledgement (404: nothing was committed). */
+  operationResult: (requestId: string) =>
+    request<OperationResult>(`/operations/requests/${encodeURIComponent(requestId)}`),
   /** Create a project without starting generation. */
   createProject: (input: CreateProjectInput) =>
     request<ProjectDetail>('/projects', { method: 'POST', body: JSON.stringify(input) }),
