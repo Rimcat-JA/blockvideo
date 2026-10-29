@@ -364,11 +364,15 @@ def build_band_cues(
     # font, which is exactly what chunking is meant to avoid.
     usable = max(1, band_height - 32)
     max_lines = max(1, int(usable // (base_font_size * LINE_HEIGHT_RATIO)))
-    chars_per_cue = max(base_max_chars, max_lines * base_max_chars)
+    # What one line really holds at this size. A large font fits fewer than
+    # base_max_chars between the margins; flooring cues at base_max_chars
+    # forced extra lines, and the font then shrank to ~66px whatever was asked.
+    line_chars = min(base_max_chars, max(4, (1920 - 2 * SIDE_MARGIN) // base_font_size))
+    chars_per_cue = max(line_chars, max_lines * line_chars)
 
-    step = max(4, base_max_chars // 4)
+    step = max(2, line_chars // 4)
     chunks = chunk_narration(body, chars_per_cue=chars_per_cue)
-    while chars_per_cue > base_max_chars:
+    while chars_per_cue > line_chars:
         if all(
             fit_text_to_band(
                 chunk,
@@ -379,7 +383,7 @@ def build_band_cues(
             for chunk in chunks
         ):
             break
-        chars_per_cue = max(base_max_chars, chars_per_cue - step)
+        chars_per_cue = max(line_chars, chars_per_cue - step)
         chunks = chunk_narration(body, chars_per_cue=chars_per_cue)
 
     if not chunks:

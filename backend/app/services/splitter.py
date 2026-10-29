@@ -583,7 +583,8 @@ def _deterministic_split(text: str, settings: Settings) -> list[SplitBlock]:
     normalized = re.sub(r"\s+", " ", text).strip()
     if not normalized:
         return []
-    parts = re.findall(r"[^。？！.!?\n]+[。？！.!?]?", normalized)
+    # Runs of enders ("？！", "!?") stay attached; the old pattern dropped them.
+    parts = re.findall(r"[^。？！.!?]*[。？！.!?]+|[^。？！.!?]+", normalized)
     chunks: list[str] = []
     buf = ""
     target = settings.splitter_target_chars
@@ -648,7 +649,9 @@ def segment_script(script: str, *, max_chars: int) -> list[str]:
     if len(text) <= max_chars:
         return [text]
 
-    sentences = re.findall(r"[^。？！\n]+[。？！]?\n*|\n+", text)
+    # Every character lands in exactly one piece: a run of enders ("？！",
+    # "。。。") or a leading one used to match nothing and was dropped.
+    sentences = re.findall(r"[^。？！\n]*[。？！]+\n*|[^。？！\n]+\n*|\n+", text)
     segments: list[str] = []
     buf = ""
     for sentence in sentences:
@@ -853,6 +856,25 @@ def merge_small_blocks(
     ]
 
 
+def _finish_blocks(blocks: list[SplitBlock], settings: Settings) -> list[SplitBlock]:
+    """Merge tiny blocks, then give any still-silent one a spoken cue.
+
+    Both the single- and multi-segment paths need this: a short script used to
+    skip it, leaving a code-only block with no narration at all.
+    """
+    blocks = merge_small_blocks(
+        blocks,
+        min_chars=settings.splitter_min_chars,
+        max_chars=settings.splitter_max_chars,
+    )
+    # Only now, once merging can no longer strand it mid-sentence, give any
+    # still-silent block (a bare code listing) something to say.
+    for block in blocks:
+        if not block.tts_text.strip():
+            block.tts_text = "（コードをご覧ください）"
+    return blocks
+
+
 async def split_script(
     script: str,
     provider: LLMProvider,
@@ -891,8 +913,14 @@ async def split_script(
         masked_script, max_chars=settings.splitter_segment_chars
     )
     if len(segments) <= 1:
-        return await split_segment(
+        single = await split_segment(
             masked_script, provider, settings, code_blocks=code_blocks
+        )
+        return SplitResult(
+            blocks=_finish_blocks(single.blocks, settings),
+            used_fallback=single.used_fallback,
+            attempts=single.attempts,
+            issues=single.issues,
         )
 
     sem = asyncio.Semaphore(max(1, settings.splitter_concurrency))
@@ -928,18 +956,8 @@ async def split_script(
                     tts_text=block.tts_text,
                 )
             )
-    blocks = merge_small_blocks(
-        blocks,
-        min_chars=settings.splitter_min_chars,
-        max_chars=settings.splitter_max_chars,
-    )
-    # Only now, once merging can no longer strand it mid-sentence, give any
-    # still-silent block (a bare code listing) something to say.
-    for block in blocks:
-        if not block.tts_text.strip():
-            block.tts_text = "（コードをご覧ください）"
     return SplitResult(
-        blocks=blocks,
+        blocks=_finish_blocks(blocks, settings),
         used_fallback=used_fallback,
         attempts=attempts,
         issues=issues,
