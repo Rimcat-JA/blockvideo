@@ -115,3 +115,34 @@ async def test_deterministic_fallback_when_join_mismatch() -> None:
 def test_normalize_for_comparison() -> None:
     assert normalize_for_comparison("あ  いう\nえお") == normalize_for_comparison("あ いう えお")
     assert normalize_for_comparison("") == ""
+
+
+@pytest.mark.asyncio
+async def test_provider_error_is_retried_then_falls_back() -> None:
+    from app.providers.llm import ProviderError
+
+    class RateLimitedProvider:
+        name = "limited"
+        calls = 0
+
+        async def chat_json(self, request):
+            self.calls += 1
+            raise ProviderError("LLMリクエストエラー (status 429)", safe=True)
+
+    config.reset_settings_cache()
+    settings = config.get_settings()
+    provider = RateLimitedProvider()
+    result = await split_script(SAMPLE_SCRIPT, provider, settings)
+    assert result.used_fallback is True
+    assert result.blocks
+    assert provider.calls >= settings.splitter_max_attempts
+
+
+@pytest.mark.asyncio
+async def test_code_fence_longer_than_llm_limit_is_restored() -> None:
+    fence = "```\n" + "\n".join(f"(define x{i} {i})" for i in range(400)) + "\n```"
+    assert len(fence) > 4000
+    config.reset_settings_cache()
+    result = await split_script(f"次のコードを見てください。\n{fence}\nこれで定義は終わりです。",
+                                FakeLLMProvider(), config.get_settings())
+    assert any(fence in block.source_text for block in result.blocks)

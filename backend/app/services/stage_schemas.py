@@ -31,7 +31,9 @@ class SplitBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     index: int = Field(ge=0)
-    source_text: str = Field(min_length=1, max_length=4000)
+    # A restored block is a slice of the script (itself capped at 100,000
+    # characters); long code or slide fences are masked for the LLM.
+    source_text: str = Field(min_length=1, max_length=100_000)
     # May legitimately be empty: a block that is only a fenced code listing
     # has nothing to read aloud. The splitter fills these with a spoken cue
     # before the block reaches the voice stage.
