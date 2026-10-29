@@ -288,7 +288,7 @@ describe('StartupStatus', () => {
     const { container } = render(<StartupStatus />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'データベースの移行に失敗しました。管理者に確認してください。アプリを停止したまま、文書化されたバックアップ復元手順を確認してください。復元後にアプリを再起動してください。',
+      'データベースの移行に失敗しました。管理者に確認してください。アプリを停止したまま、backend/ で `uv run python -m scripts.restore_backup --latest` を実行して移行前のバックアップを復元してください（README「DB の移行に失敗したとき」）。復元後にアプリを再起動してください。',
     );
     expect(container.querySelector('button')).toBeNull();
   });

@@ -4,7 +4,7 @@ import type { StartupState } from '@/lib/types';
 
 const POLL_INTERVAL_MS = 2000;
 const NETWORK_FAILURE_MESSAGE = '起動状態を確認できません。通信を確認してから再度確認してください。';
-const BACKUP_MIGRATION_GUIDANCE = 'アプリを停止したまま、文書化されたバックアップ復元手順を確認してください。復元後にアプリを再起動してください。';
+const BACKUP_MIGRATION_GUIDANCE = 'アプリを停止したまま、backend/ で `uv run python -m scripts.restore_backup --latest` を実行して移行前のバックアップを復元してください（README「DB の移行に失敗したとき」）。復元後にアプリを再起動してください。';
 const NO_BACKUP_MIGRATION_GUIDANCE = 'アプリを停止して再起動してください。解決しない場合はサポートに連絡してください。';
 
 export function StartupStatus() {

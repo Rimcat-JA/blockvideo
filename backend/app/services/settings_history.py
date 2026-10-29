@@ -8,11 +8,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.colors import normalize_color
 from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
 from app.schemas import ProjectCreate, ProjectPatch
 
 SETTING_FIELDS = tuple(ProjectPatch.model_fields)
+_COLOR_FIELDS = ("subtitle_text_color", "subtitle_outline_color")
 
 
 def configuration(project: Project) -> dict[str, Any]:
@@ -24,11 +26,29 @@ def validate_settings(project: Project, updates: dict[str, Any]) -> dict[str, An
     patch = ProjectPatch.model_validate(updates, strict=True).model_dump(exclude_unset=True)
     if any(value is None for value in patch.values()):
         raise ValueError("設定を空にすることはできません")
-    complete = ProjectCreate.model_validate({**configuration(project), **patch,
+    stored = configuration(project)
+    repaired = _repair_legacy_colors(stored, patch)
+    complete = ProjectCreate.model_validate({**stored, **repaired, **patch,
                                             "source_script": project.source_script,
                                             "use_fake_providers": project.use_fake_providers}, strict=True)
     normalized = complete.model_dump()
-    return {field: normalized[field] for field in patch}
+    return {field: normalized[field] for field in {**repaired, **patch}}
+
+
+def _repair_legacy_colors(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """The v0 API stored any string as a subtitle colour (``navy``, ``rgba(...)``).
+
+    Revalidating those would reject every later save of the project, so an
+    unreadable stored colour falls back to its default and is saved with it.
+    """
+    repaired: dict[str, Any] = {}
+    for field in _COLOR_FIELDS:
+        value = stored.get(field)
+        if field in patch or not isinstance(value, str):
+            continue
+        if normalize_color(value) is None:
+            repaired[field] = ProjectCreate.model_fields[field].default
+    return repaired
 
 
 def record_settings(db: Session, project: Project, changed_fields: set[str] | None = None,

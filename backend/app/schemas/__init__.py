@@ -156,7 +156,7 @@ class ProjectCreate(QualitySettings):
     # VOICEVOX endpoint and synthesis controls. A field the request omits is
     # filled from the server's VOICEVOX_* settings by the create route.
     voicevox_url: str = Field(default="http://127.0.0.1:50021")
-    voicevox_speaker_id: int = Field(default=1, ge=0)
+    voicevox_speaker_id: int = Field(default=1, ge=0, le=2**31 - 1)
     voicevox_speed_scale: float = Field(default=1.0, ge=0.5, le=2.0)
     voicevox_pitch_scale: float = Field(default=0.0, ge=-1.0, le=1.0)
     voicevox_intonation_scale: float = Field(default=1.0, ge=0.0, le=2.0)
@@ -244,7 +244,7 @@ class QuickCreate(QualitySettings):
     title: str | None = Field(default=None, max_length=255)
     # Omitted: the server's VOICEVOX_URL / VOICEVOX_SPEAKER_ID.
     voicevox_url: str = Field(default="http://127.0.0.1:50021")
-    voicevox_speaker_id: int = Field(default=1, ge=0)
+    voicevox_speaker_id: int = Field(default=1, ge=0, le=2**31 - 1)
     use_fake_providers: bool = Field(default=False)
 
     # Pacing. ``None`` means "leave the project default alone", so the UI can
@@ -288,7 +288,7 @@ class ProjectPatch(QualitySettings):
 
     title: str | None = None
     voicevox_url: str | None = None
-    voicevox_speaker_id: int | None = Field(default=None, ge=0)
+    voicevox_speaker_id: int | None = Field(default=None, ge=0, le=2**31 - 1)
     voicevox_speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
     voicevox_pitch_scale: float | None = Field(default=None, ge=-1.0, le=1.0)
     voicevox_intonation_scale: float | None = Field(default=None, ge=0.0, le=2.0)
