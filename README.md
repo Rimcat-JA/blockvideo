@@ -71,8 +71,15 @@
 - **YOLO モード**: 入力欄の「確認なしで最後まで実行（YOLO）」をオンにすると（既定はオフ）、確認や質問をせず、
   書かれていない値は推測して最後まで実行し、推測した箇所を報告します。明示した否定や書いた値は守られます。
 - **準備**: LM Studio でモデルを読み込み、`backend/.env` に `LANGUAGE_MODEL`（モデル名）を設定します。
-  検索（RAG）を使うには索引を作り（`python -m scripts.operation_index build …`）、`LANGUAGE_RETRIEVAL_INDEX`
+  検索（RAG）を使うには、`backend` で検索用の追加パッケージを入れて索引を作り、`LANGUAGE_RETRIEVAL_INDEX`
   に索引のフォルダーを指定します。未設定のときは全操作をモデルに渡す All Tools 方式で動きます。
+  ```bash
+  uv sync --extra dev --extra retrieval
+  uv run python -m scripts.operation_index build --index storage/operation-index-e5 --weights storage/embedding-models/multilingual-e5-small/model.onnx
+  ```
+  `model.onnx` と `tokenizer.json` は Hugging Face の `intfloat/multilingual-e5-small`（`app/retrieval/e5-profile.json`
+  に記載のリビジョン）から取得し、同じフォルダーに置きます。SHA-256 が一致しないと索引は作られません。
+  `make install` は追加パッケージを含めずに同期し直すので、その後は `uv sync --extra dev --extra retrieval` をもう一度実行します。
   LM Studio のローカルサーバー（既定 `http://127.0.0.1:1234/v1`）以外の接続先は使えません。
 
 ## 拡張性の設計（操作カタログ・RAG・YOLO）
@@ -88,8 +95,8 @@
   | `operation_annotations.json` | 日本語の言い方・同義語・使う場面（検索用） |
   | `search_scope.json` | 操作ごとの能力（検索の範囲） |
   | `../interpretation/prompt_rules.json` | モデルへの規則（操作ごと・モードごと） |
-- **操作を追加する手順**: 上のファイルに書き足し、処理を 1 つ登録し、`python -m scripts.check_catalog`
-  （`backend` で実行）で整合を確かめ、検索インデックスを作り直します（`python -m scripts.operation_index build`）。
+- **操作を追加する手順**: 上のファイルに書き足し、処理を 1 つ登録し、`uv run python -m scripts.check_catalog`
+  （`backend` で実行）で整合を確かめ、検索インデックスを作り直します（上の `uv run python -m scripts.operation_index build …`）。
   方針の無い操作は起動時に拒否されます。
 - **規模の上限**: カタログ 4,096 操作、インデックス 16,384 文書、1 回のモデル呼び出しに載せる候補は 32 件まで
   （`backend/app/operations/limits.py`）。
