@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from app import __version__
 from app.core.config import get_settings
+from app.core.security import plain_http_url
 from app.core.startup_status import get_startup_status
 from app.providers.llm import ProviderError
 from app.providers.voicevox import VoicevoxClient
@@ -62,6 +63,9 @@ async def voicevox_speakers(url: str | None = None) -> SpeakersEnvelope:
     """
     settings = get_settings()
     base_url = (url or settings.voicevox_url).rstrip("/")
+    if url is not None and not plain_http_url(base_url):
+        # A query or fragment would let the caller replace the /speakers path.
+        raise HTTPException(status_code=422, detail="VOICEVOX の URL は http(s)://ホスト[:ポート] の形式で指定してください")
     client = VoicevoxClient(base_url)
     try:
         speakers = await client.speakers()

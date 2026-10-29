@@ -47,3 +47,39 @@ def test_redact_keeps_ordinary_words_and_long_paths() -> None:
     path = "C:/Users/x/a_very_long_folder_name_without_any_digits_here_ok/file"
     assert redact(path) == path
     assert "sk-abcdefghijklmnop123" not in redact("key sk-abcdefghijklmnop123 end")
+
+
+def test_host_and_cross_site_guards() -> None:
+    from fastapi.testclient import TestClient
+
+    from app.core.security import host_allowed, plain_http_url
+    from app.main import create_app
+
+    allowed = ["localhost", "127.0.0.1", "::1"]
+    assert host_allowed("localhost:8000", allowed)
+    assert host_allowed("[::1]:8000", allowed)
+    assert not host_allowed("rebind.attacker.example:8000", allowed)
+    assert not host_allowed(None, allowed)
+    assert plain_http_url("http://host.docker.internal:50021")
+    for url in ("http://192.168.0.1/cgi-bin?x=", "http://h/#frag", "ftp://h", "http://u:p@h", "http://h:99999"):
+        assert not plain_http_url(url)
+
+    client = TestClient(create_app())
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/health", headers={"host": "rebind.attacker.example"}).status_code == 400
+    assert client.get("/api/health", headers={"origin": "http://localhost:5173"}).status_code == 200
+    assert client.post("/api/projects/1/generate", headers={"origin": "https://attacker.example"}).status_code == 403
+    assert client.post("/api/projects/1/generate", headers={"sec-fetch-site": "cross-site"}).status_code == 403
+    assert client.get("/api/voicevox/speakers", params={"url": "http://192.168.0.1/admin?x="}).status_code == 422
+
+
+def test_deeply_nested_language_request_is_422(temp_storage) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    body = "[" * 100_000 + "]" * 100_000
+    with TestClient(create_app()) as client:
+        response = client.post("/api/language/requests", content=body,
+                               headers={"content-type": "application/json"})
+    assert response.status_code == 422

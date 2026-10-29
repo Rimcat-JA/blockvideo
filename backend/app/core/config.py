@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    # Host names the API answers to; anything else (a DNS-rebinding page) gets 400.
+    # "testserver" is the Host of in-process test clients.
+    allowed_hosts: list[str] = ["localhost", "127.0.0.1", "::1", "testserver"]
 
     # LLM fallbacks (env-var only)
     llm_api_key: str | None = None
