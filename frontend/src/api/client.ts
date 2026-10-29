@@ -3,6 +3,7 @@ import type {
   BlockSummary,
   CreateProjectInput,
   JobSummary,
+  ProjectDefaults,
   ProjectDetail,
   ProjectSummary,
   SpeakersEnvelope,
@@ -91,6 +92,8 @@ export const api = {
   /** Fetch VOICEVOX speakers from an optional engine URL. */
   speakers: (url?: string) =>
     request<SpeakersEnvelope>(`/voicevox/speakers${url ? `?url=${encodeURIComponent(url)}` : ''}`),
+  /** Fetch the server defaults that the creation forms display. */
+  projectDefaults: () => request<ProjectDefaults>('/projects/defaults'),
   /** List persisted projects. */
   listProjects: () => request<ProjectSummary[]>('/projects'),
   /** Fetch one project and its configuration fields. */

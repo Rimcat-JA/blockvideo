@@ -420,6 +420,20 @@ def list_projects(db: Session = Depends(get_db)) -> list[ProjectSummary]:
     return [_project_summary(p) for p in projects]
 
 
+@router.get("/defaults")
+def project_defaults() -> dict[str, float | int]:
+    """Return the checked server defaults used when a create request omits a field.
+
+    The forms show these values, so what the user sees is what the project gets,
+    and choosing a value that equals the built-in default is still honored.
+    """
+    settings = get_settings()
+    return {field: _server_default(field, getattr(settings, field)) for field in (
+        "voicevox_speaker_id", "voicevox_speed_scale", "voicevox_pitch_scale",
+        "voicevox_intonation_scale", "voicevox_volume_scale", "narration_sentence_pause_seconds",
+    )}
+
+
 @router.get("/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail:
     """Return one project's detail or a 404 response.

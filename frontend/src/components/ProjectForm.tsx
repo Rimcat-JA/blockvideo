@@ -1,8 +1,8 @@
 /** Detailed project-creation form for scripts, providers, VOICEVOX, and ASS. */
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useState } from 'react';
-import { useCreateProject, useSpeakers } from '@/api/hooks';
+import { useEffect, useState } from 'react';
+import { useCreateProject, useProjectDefaults, useSpeakers } from '@/api/hooks';
 import { useNavigate } from 'react-router-dom';
 import { createProjectSchema, DEFAULT_QUALITY, type CreateProjectForm, type CreateProjectInput } from '@/lib/validation';
 import { QualitySettingsFields } from '@/components/QualitySettingsFields';
@@ -24,6 +24,8 @@ export function ProjectForm() {
     formState: { errors, isSubmitting, dirtyFields },
     watch,
     setValue,
+    getValues,
+    reset,
   } = useForm<CreateProjectForm, unknown, CreateProjectInput>({
     resolver: zodResolver(createProjectSchema),
     defaultValues: {
@@ -51,6 +53,13 @@ export function ProjectForm() {
       use_fake_providers: false,
     },
   });
+
+  // Show the server's .env defaults, so an untouched field displays what the
+  // project will get and a deliberately chosen equal value is still honored.
+  const serverDefaults = useProjectDefaults().data;
+  useEffect(() => {
+    if (serverDefaults) reset({ ...getValues(), ...serverDefaults }, { keepDirtyValues: true });
+  }, [serverDefaults, reset, getValues]);
 
   const useFake = watch('use_fake_providers');
   const voicevoxUrl = watch('voicevox_url');
@@ -191,7 +200,9 @@ export function ProjectForm() {
             <select
               id="voicevox_speaker_id"
               className="input"
-              {...register('voicevox_speaker_id', { valueAsNumber: true })}
+              // Controlled: when the speaker list loads, the browser would otherwise
+              // show its first option while the form still holds another id.
+              value={String(watch('voicevox_speaker_id'))}
               onChange={(e) => setValue('voicevox_speaker_id', Number(e.target.value), { shouldDirty: true })}
             >
               {(speakers.data?.speakers ?? []).flatMap((s) =>
@@ -202,7 +213,13 @@ export function ProjectForm() {
                   </option>
                 )),
               )}
-              {speakers.data == null && <option value={watch('voicevox_speaker_id')}>話者ID {watch('voicevox_speaker_id')}（VOICEVOX未接続）</option>}
+              {!(speakers.data?.speakers ?? []).some((s) =>
+                (s.styles.length ? s.styles.map((style) => style.id) : [s.speaker_id]).includes(watch('voicevox_speaker_id')),
+              ) && (
+                <option value={watch('voicevox_speaker_id')}>
+                  話者ID {watch('voicevox_speaker_id')}{speakers.data == null ? '（VOICEVOX未接続）' : ''}
+                </option>
+              )}
             </select>
             {speakers.error && (
               <p className="text-xs text-amber-600">VOICEVOX Engineに接続できません。</p>

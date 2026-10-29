@@ -255,6 +255,16 @@ export interface SpeakerInfo {
   styles: Array<{ id: number; name?: string }>;
 }
 
+/** Checked server defaults used when a create request omits these fields. */
+export interface ProjectDefaults {
+  voicevox_speaker_id: number;
+  voicevox_speed_scale: number;
+  voicevox_pitch_scale: number;
+  voicevox_intonation_scale: number;
+  voicevox_volume_scale: number;
+  narration_sentence_pause_seconds: number;
+}
+
 /** Speaker discovery response returned by the backend. */
 export interface SpeakersEnvelope {
   url: string;

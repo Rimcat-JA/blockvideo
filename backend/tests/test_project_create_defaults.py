@@ -77,3 +77,10 @@ def test_quick_create_uses_server_voice_scales(temp_storage: Any, monkeypatch: A
                                                         "use_fake_providers": True}).json()["project"]
     assert project["voicevox_pitch_scale"] == 0.1
     assert project["voicevox_volume_scale"] == 1.5
+
+
+def test_defaults_endpoint_reports_the_server_defaults(client: TestClient) -> None:
+    defaults = client.get("/api/projects/defaults").json()
+    assert defaults["voicevox_speaker_id"] == 3
+    assert defaults["narration_sentence_pause_seconds"] == 0.8
+    assert defaults["voicevox_speed_scale"] == 1.0
