@@ -118,6 +118,17 @@
 Windows で ffmpeg が PATH に無い場合は `backend/.env` に絶対パスを書けます。
 `GET /api/health` の `ffmpeg_available` で確認できます。
 
+以下の手順は `make` を使います。Windows には GNU make が付属しないため、Git Bash や
+MSYS2 などの POSIX シェルに GNU make を入れて実行してください（`winget install ezwinports.make`
+など）。make を使わない場合は、それぞれ次のコマンドと同じです。
+
+| make | 同じ内容のコマンド |
+|---|---|
+| `make install` | `uv sync --project backend --extra dev` と `cd frontend && pnpm install` |
+| `make backend` | `cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000` |
+| `make frontend` | `cd frontend && pnpm dev` |
+| `make demo` | `uv run --project backend python scripts/demo_run.py --serve` |
+
 ---
 
 ## セットアップ

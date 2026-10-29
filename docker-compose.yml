@@ -4,6 +4,17 @@
 # It does NOT include VOICEVOX — install VOICEVOX Engine natively on the host
 # because it needs GPU access for fast synthesis.
 #
+# The backend container reads backend/.env (API keys, models, FFMPEG_PATH)
+# like a native run; the values under `environment:` below take precedence.
+#
+# Linux hosts: host.docker.internal resolves to the Docker bridge, and VOICEVOX
+# Engine listens only on 127.0.0.1 by default. Start it with `--host 0.0.0.0`
+# (and keep port 50021 closed to other machines in your firewall).
+#
+# The natural-language panel (LANGUAGE_*, LM Studio) is not available inside
+# the container: its adapter only talks to a loopback address, which there is
+# the container itself.
+#
 # Usage:
 #   docker compose up backend    # FastAPI on :8000
 #   docker compose up frontend   # Vite dev server on :5173
@@ -15,13 +26,17 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     image: blockvideo-backend:dev
+    env_file:
+      - path: ./backend/.env
+        required: false
     environment:
       STORAGE_ROOT: /data/storage
       # Keep the database in the mounted volume together with the media it describes.
       DATABASE_URL: sqlite:////data/storage/blockvideo.db
-      API_HOST: 0.0.0.0
-      API_PORT: "8000"
       VOICEVOX_URL: ${VOICEVOX_URL:-http://host.docker.internal:50021}
+      # Paths from a host .env do not exist in the image; use its own binaries.
+      FFMPEG_PATH: ""
+      FFPROBE_PATH: ""
       CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173"]'
       # The frontend container's dev proxy reaches the API as "backend".
       ALLOWED_HOSTS: '["localhost","127.0.0.1","::1","backend"]'
@@ -36,14 +51,19 @@ services:
   frontend:
     image: node:22-alpine
     working_dir: /app
-    command: sh -c "corepack enable && pnpm install && pnpm dev --host 0.0.0.0"
+    # CI=true keeps pnpm from prompting (there is no TTY) and --frozen-lockfile
+    # installs exactly what pnpm-lock.yaml records.
+    command: sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0"
     environment:
       NODE_ENV: development
+      CI: "true"
       # Inside this container 127.0.0.1 is the frontend itself.
       VITE_API_PROXY_TARGET: http://backend:8000
     ports:
       - "127.0.0.1:5173:5173"
     volumes:
       - ./frontend:/app
+      # The container's own Linux node_modules; never overwrite the host's.
+      - /app/node_modules
     depends_on:
       - backend

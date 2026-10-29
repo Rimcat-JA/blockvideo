@@ -10,7 +10,7 @@ from typing import Any
 
 from app.interpretation.contracts import CandidateRef, DialogueContextTurn, InterpretationInput, MinimalState
 from app.interpretation.local_chat import LocalChatAdapter
-from app.interpretation.service import Interpreter, _SYSTEM
+from app.interpretation.service import Interpreter, system_prompt
 from app.operations.catalog import load_catalog
 from scripts.probe_language_variants import CASES, matches
 
@@ -55,7 +55,7 @@ async def run(model: str, output: Path) -> bool:
                             'context': [turn.model_dump(mode='json') for turn in dialogue], 'actual': actual, 'passed': passed})
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps({'model': model, 'synthetic_only': True, 'executes_operations': False,
-                'system_prompt_sha256': hashlib.sha256(_SYSTEM.encode()).hexdigest(),
+                'system_prompt_sha256': hashlib.sha256(system_prompt({d.operation_id for d in catalog.definitions}).encode()).hexdigest(),
                 'passed': sum(record['passed'] for record in records), 'total': len(cases), 'completed': len(records),
                 'records': records}, ensure_ascii=False, indent=2), encoding='utf-8')
             print(f'{len(records):02d} {"PASS" if passed else "FAIL"} {expected}', flush=True)

@@ -18,7 +18,7 @@ import httpx
 from app.interpretation.contracts import CandidateRef, DialogueContextTurn, InterpretationInput, MinimalState
 from app.interpretation.errors import InterpretationError
 from app.interpretation.local_chat import MAX_HTTP_RESPONSE_BYTES, LocalChatAdapter
-from app.interpretation.service import Interpreter, _SYSTEM
+from app.interpretation.service import Interpreter, system_prompt
 from app.operations.catalog import load_catalog
 from scripts.probe_interpretation import CASES
 
@@ -119,7 +119,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     evidence: dict[str, Any] = {"created_at": datetime.now(timezone.utc).isoformat(),
         "synthetic_only": True, "executes_operations": False, "model": args.model, "base_url": args.base_url,
         "catalog_sha256": hashlib.sha256(CATALOG.read_bytes()).hexdigest(),
-        "system_prompt_sha256": hashlib.sha256(_SYSTEM.encode()).hexdigest(),
+        "system_prompt_sha256": hashlib.sha256(system_prompt({d.operation_id for d in catalog.definitions}).encode()).hexdigest(),
         "parameters": {"context_observed_separately": True, "temperature": 0, "max_tokens": 768, "reasoning_effort": "none"},
         "memory_scope": "Windows system-wide snapshots before/after each call; not peak, GPU, or model-only memory",
         "records": []}

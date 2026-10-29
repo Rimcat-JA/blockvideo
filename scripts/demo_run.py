@@ -5,11 +5,12 @@ BlockVideo backend, then polls until the project reaches the ``completed`` state
 (or fails) and prints the final artifact paths.
 
 Requires:
-    * Backend already running on http://127.0.0.1:8000 (started by the Makefile)
+    * A backend on http://127.0.0.1:8000, or ``--serve`` to start one
     * Python 3.10+ (no third-party deps — uses urllib only)
 
 Usage:
-    python scripts/demo_run.py
+    python scripts/demo_run.py            # against a running backend
+    python scripts/demo_run.py --serve    # start, use and always stop a backend
 
 Imports:
     ``json`` encodes request bodies and decodes API responses.
@@ -21,8 +22,13 @@ Imports:
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
 import json
 import os
+import shutil
+import signal
+import subprocess
 import sys
 import time
 import urllib.error
@@ -36,6 +42,8 @@ SCRIPT_PATH = Path(__file__).resolve().parent.parent / "samples" / "compose_mult
 # Polling cadence and overall demo deadline.
 POLL_INTERVAL_SEC = 1.0
 TIMEOUT_SEC = 180.0
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HEALTH_TIMEOUT_SEC = 60.0
 
 
 def _request(
@@ -113,6 +121,57 @@ def _wait_for_status(project_id: int, target: set[str], timeout: float) -> dict:
     raise SystemExit(f"timed out after {timeout}s waiting for {target}")
 
 
+def _stop_tree(process: subprocess.Popen) -> None:
+    """Stop the backend and its children; ``uv run`` leaves uvicorn as a child."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=10)
+
+
+@contextlib.contextmanager
+def _served_backend():
+    """Start a backend for the demo and stop it however the demo ends."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if uv is None:
+        raise SystemExit("uv not found (needed to start the backend)")
+    storage = REPO_ROOT / "storage"
+    storage.mkdir(exist_ok=True)
+    port = API_BASE.rsplit(":", 1)[-1].split("/", 1)[0]
+    with (storage / "demo-backend.log").open("wb") as log:
+        process = subprocess.Popen(
+            [uv, "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", port],
+            cwd=REPO_ROOT / "backend", stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            deadline = time.monotonic() + HEALTH_TIMEOUT_SEC
+            while True:
+                if process.poll() is not None:
+                    raise SystemExit("backend exited during startup; see storage/demo-backend.log")
+                with contextlib.suppress(urllib.error.URLError, OSError):
+                    if _request("GET", "/api/health")[0] == 200:
+                        break
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"backend not healthy after {HEALTH_TIMEOUT_SEC:.0f}s; see storage/demo-backend.log")
+                time.sleep(POLL_INTERVAL_SEC)
+            yield
+        finally:
+            print("[demo] stopping backend...")
+            _stop_tree(process)
+
+
 def main() -> int:
     """Run the fake-provider sample and print generated artifact paths.
 
@@ -185,4 +244,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="BlockVideo fake-provider demo")
+    parser.add_argument("--serve", action="store_true", help="start a backend and stop it afterwards")
+    if parser.parse_args().serve:
+        print("[demo] starting backend (log: storage/demo-backend.log)...")
+        with _served_backend():
+            sys.exit(main())
     sys.exit(main())

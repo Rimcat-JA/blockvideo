@@ -71,7 +71,10 @@ def main(path: Path) -> int:
             problems += 1
 
     for katakana in KATAKANA_IDENTIFIERS:
-        count = narration.count(katakana)
+        # Whole words only: a plain substring count flagged コンストラクタ,
+        # コンスタント and ラムダ式, failing correct scripts.
+        count = len(re.findall(
+            rf"(?<![ァ-ヶー]){re.escape(katakana)}(?![ァ-ヶー]|式|計算|関数)", narration))
         if count:
             print(f"カタカナ表記 「{katakana}」×{count} — 英字のまま書いてください")
             problems += 1
