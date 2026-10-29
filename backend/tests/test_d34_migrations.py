@@ -875,7 +875,7 @@ def test_schema_version_lease_is_bound_to_one_database_and_release_is_idempotent
     assert released_error.value.reason_code == "database_lease_unavailable"
 
 
-def test_lease_file_is_exclusive_bounded_and_never_removed_as_stale(
+def test_lease_file_is_exclusive_bounded_and_stale_files_are_taken_over(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "lease.db"
@@ -894,11 +894,34 @@ def test_lease_file_is_exclusive_bounded_and_never_removed_as_stale(
     finally:
         lease.release()
 
+    # A file nobody holds the OS lock on was left by a crashed backend.
     lease.lock_path.write_text("stale", encoding="ascii")
-    with pytest.raises(MigrationError) as stale_error:
-        acquire_database_lease(url)
-    assert stale_error.value.reason_code == "database_lease_unavailable"
-    assert lease.lock_path.read_text(encoding="ascii") == "stale"
+    taken_over = acquire_database_lease(url)
+    try:
+        assert re.fullmatch(r"pid=\d+\nutc=[^\n]+\ntoken=[0-9a-f]{32}\n",
+                            taken_over.lock_path.read_text(encoding="ascii"))
+        taken_over.assert_held_for(url)
+    finally:
+        taken_over.release()
+    assert not taken_over.lock_path.exists()
+    assert not list(tmp_path.glob("*.stale-*"))
+
+
+def test_lease_left_by_killed_process_is_taken_over(tmp_path: Path) -> None:
+    database = tmp_path / "killed.db"
+    ready = tmp_path / "ready"
+    holder = _start_lease_holder(database, ready, tmp_path / "never-released")
+    _wait_for(ready, holder)
+    holder.kill()
+    holder.communicate(timeout=30)
+    lock_path = database.with_name(f"{database.name}.migration.lock")
+    assert lock_path.exists()
+
+    lease = acquire_database_lease(_url(database))
+    try:
+        assert f"pid={os.getpid()}\n" in lock_path.read_text(encoding="ascii")
+    finally:
+        lease.release()
 
 
 def test_lease_assert_rejects_in_place_payload_tamper(tmp_path: Path) -> None:

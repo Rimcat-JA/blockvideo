@@ -12,6 +12,12 @@ from sqlalchemy.engine import make_url
 
 from app.migrations.contracts import MigrationError
 
+# The holder also keeps an OS lock on the lease file, which the OS drops when the
+# process dies. A lease file nobody holds that lock on was left behind by a crash
+# and may be taken over. Windows byte-range locks are mandatory, so the locked
+# byte sits far past the payload that _descriptor_bytes reads.
+_HOLDER_LOCK_OFFSET = 1 << 20
+
 
 def database_path_from_url(database_url: str) -> Path:
     """Return the canonical path for a supported file-backed SQLite URL."""
@@ -42,6 +48,63 @@ def _path_identity_and_bytes(path: Path) -> tuple[tuple[int, int], bytes]:
         return (path_stat.st_dev, path_stat.st_ino), _descriptor_bytes(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _try_holder_lock(descriptor: int) -> bool:
+    """Take the non-blocking holder lock; False when a live process holds it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, _HOLDER_LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _remove_stale_lease(lock_path: Path) -> None:
+    """Remove a lease file whose holder died without releasing it, or raise."""
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor: int | None = os.open(lock_path, flags)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise MigrationError("database_lease_unavailable") from exc
+    tombstone = lock_path.with_name(f"{lock_path.name}.stale-{uuid.uuid4().hex}")
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_stat.st_mode) or not _try_holder_lock(descriptor):
+            raise MigrationError("database_lease_unavailable")
+        stale_identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+        if os.name == "nt":
+            # Windows cannot rename a file while it is open. A live holder's
+            # open handle still blocks the rename below, so closing is safe.
+            os.close(descriptor)
+            descriptor = None
+        os.replace(lock_path, tombstone)
+    except MigrationError:
+        raise
+    except OSError as exc:
+        raise MigrationError("database_lease_unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        moved_identity, _ = _path_identity_and_bytes(tombstone)
+        if moved_identity != stale_identity:
+            # Another process replaced the file in between: put it back.
+            os.link(tombstone, lock_path)
+            tombstone.unlink()
+            raise MigrationError("database_lease_unavailable")
+        tombstone.unlink()
+    except OSError as exc:
+        raise MigrationError("database_lease_unavailable") from exc
 
 
 @dataclass
@@ -132,9 +195,17 @@ def acquire_database_lease(database_url: str) -> DatabaseLease:
     flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0)
     try:
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(lock_path, flags, 0o600)
+        try:
+            descriptor = os.open(lock_path, flags, 0o600)
+        except FileExistsError:
+            _remove_stale_lease(lock_path)
+            descriptor = os.open(lock_path, flags, 0o600)
     except OSError as exc:
         raise MigrationError("database_lease_unavailable") from exc
+    if not _try_holder_lock(descriptor):
+        os.close(descriptor)
+        raise MigrationError("database_lease_unavailable")
+    os.lseek(descriptor, 0, os.SEEK_SET)
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     token = uuid.uuid4().hex
     payload = f"pid={os.getpid()}\nutc={timestamp}\ntoken={token}\n".encode("ascii")
