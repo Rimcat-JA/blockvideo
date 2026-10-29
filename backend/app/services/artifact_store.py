@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,17 +37,43 @@ def safe_storage_path(path: Path | str) -> Path:
     return candidate
 
 
+# Digest cache keyed by the file's stat identity. History polling and the
+# render guards hash the same unchanged videos and slides over and over.
+_DIGEST_CACHE: dict[Path, tuple[tuple[int, ...], str]] = {}
+_DIGEST_CACHE_LIMIT = 4096
+# A file modified this recently may change again within one timestamp tick
+# (NTFS can be ~16 ms coarse) without its stat changing, so it is never cached
+# — the same "racy" rule git applies to its index.
+_RACY_WINDOW_NS = 2_000_000_000
+
+
+def _stat_key(value: os.stat_result) -> tuple[int, ...]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
 def file_identity(path: Path | str) -> dict[str, Any]:
     """Measure real file content, never infer validity merely from a saved path."""
     candidate = safe_storage_path(path)
     if not candidate.is_file() or candidate.stat().st_size <= 0:
         raise FileNotFoundError("artifact file is missing or empty")
-    digest = hashlib.sha256()
     with candidate.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        cached = _DIGEST_CACHE.get(candidate)
+        if cached is not None and cached[0] == _stat_key(before):
+            return {"path": relpath_for_db(candidate), "size": before.st_size, "sha256": cached[1]}
+        digest = hashlib.sha256()
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    return {"path": relpath_for_db(candidate), "size": candidate.stat().st_size,
-            "sha256": digest.hexdigest()}
+        after = os.fstat(stream.fileno())
+    sha256 = digest.hexdigest()
+    key = _stat_key(after)
+    if key == _stat_key(before) and time.time_ns() - after.st_mtime_ns > _RACY_WINDOW_NS:
+        if len(_DIGEST_CACHE) >= _DIGEST_CACHE_LIMIT:
+            _DIGEST_CACHE.clear()
+        _DIGEST_CACHE[candidate] = (key, sha256)
+    else:
+        _DIGEST_CACHE.pop(candidate, None)
+    return {"path": relpath_for_db(candidate), "size": after.st_size, "sha256": sha256}
 
 
 def collect_render_materials(project: Project) -> list[dict[str, Any]]:
@@ -364,3 +392,22 @@ async def publish_artifact(
         db.flush()
         db.expunge(artifact)
         return artifact
+
+
+def discard_unpublished_output(job_id: int, directory: Path) -> None:
+    """Remove a failed or cancelled job's history directory nothing refers to.
+
+    Each attempt renders into its own ``history/job-N`` directory, so a
+    candidate left by an unsuccessful job is never picked up again; without
+    this, every failed final render left a full-size video behind.
+    """
+    try:
+        directory = safe_storage_path(directory)
+    except ValueError:
+        return
+    if not directory.is_dir():
+        return
+    with get_session_factory()() as db:
+        if _destination_is_referenced(db, job_id, relpath_for_db(directory / "video.mp4")):
+            return
+    shutil.rmtree(directory, ignore_errors=True)

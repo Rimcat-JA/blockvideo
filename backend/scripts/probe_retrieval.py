@@ -68,7 +68,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     report: dict[str, Any] = {"created_at": datetime.now(timezone.utc).isoformat(),
         "scope": "approved_development_only", "approval_gate": gate, "eligible_subset_sha256": corpus_digest(cases),
         "profile": profile.model_dump(mode="json"), "index_manifest": index.manifest.model_dump(mode="json"),
-        "prompt_sha256": digest(interpretation_service._SYSTEM.encode()), "model": args.model,
+        "prompt_sha256": digest(interpretation_service.system_prompt({d.operation_id for d in catalog.definitions}).encode()), "model": args.model,
         "parameters": {"temperature": 0, "max_tokens": 768, "reasoning_effort": "none"},
         "implementation_sha256": {name: digest((Path(__file__).parents[1] / name).read_bytes()) for name in (
             "app/semantic_interpretation/service.py", "app/retrieval/ranking.py", "app/interpretation/candidates.py")},

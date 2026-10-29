@@ -105,9 +105,9 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled, default
         <QualitySettingsFields value={value} onChange={(quality) => onChange({ ...value, ...quality })} disabled={disabled} />
         <Slider
           label="文末の息継ぎ"
-          hint="「。」ごとに置く間。長いほど落ち着いた印象になります（0 で VOICEVOX 標準の約0.4秒）。"
+          hint="「。」ごとに置く間。長いほど落ち着いた印象になります（0 で文の間を入れません）。"
           value={value.narration_sentence_pause_seconds}
-          min={0} max={3} step={0.1} unit="秒"
+          min={0} max={5} step={0.1} unit="秒"
           fallback={defaults.narration_sentence_pause_seconds}
           disabled={disabled || value.narration_pacing_mode !== 'fixed'}
           onChange={(v) => set('narration_sentence_pause_seconds', v)}
@@ -134,7 +134,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled, default
           label="1ブロックの最大スライド枚数"
           hint="1枚あたりの表示時間を確保するための上限。超えたぶんは作られません（1枚なら図だけを最後まで見せます）。"
           value={value.max_slides_per_block}
-          min={1} max={8} step={1} unit="枚"
+          min={1} max={9} step={1} unit="枚"
           fallback={defaults.max_slides_per_block}
           disabled={disabled}
           onChange={(v) => set('max_slides_per_block', v)}
@@ -143,7 +143,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled, default
           label="字幕の文字サイズ"
           hint="収まらない場合は自動で縮みます。これは上限です。"
           value={value.subtitle_font_size}
-          min={24} max={72} step={2} unit="px"
+          min={16} max={120} step={2} unit="px"
           fallback={defaults.subtitle_font_size}
           disabled={disabled}
           onChange={(v) => set('subtitle_font_size', v)}

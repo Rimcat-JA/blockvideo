@@ -25,6 +25,7 @@ from app.migrations.schema import (
     CRITICAL_TABLES,
     apply_v0_to_v1,
     critical_identity_snapshot,
+    repair_legacy_orphans,
     validate_critical_references,
     validate_schema_compatibility,
 )
@@ -99,7 +100,7 @@ def migrate_database(
                     backup_sha256=None,
                 )
 
-            validate_critical_references(connection)
+            validate_critical_references(connection, after_legacy_repair=True)
             before = critical_identity_snapshot(connection, metadata)
             backup = None
             if table_count:
@@ -115,6 +116,9 @@ def migrate_database(
                 backup_available = True
 
             lease.assert_held_for(database_url)
+            if repair_legacy_orphans(connection):
+                # The backup keeps the original rows; verify against what remains.
+                before = critical_identity_snapshot(connection, metadata)
             apply_v0_to_v1(connection, metadata)
             _verify_database(connection, metadata, before)
             return MigrationResult(
@@ -254,7 +258,9 @@ def _validate_restore_candidate(
             validate_schema_compatibility(
                 connection, metadata, version=expected_schema_version
             )
-            validate_critical_references(connection)
+            validate_critical_references(
+                connection, after_legacy_repair=expected_schema_version == 0
+            )
             if critical_identity_snapshot(connection, metadata) != expected_identities:
                 raise MigrationError("backup_invalid")
     except MigrationError as exc:

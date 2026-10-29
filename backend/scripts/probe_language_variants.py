@@ -10,7 +10,7 @@ from typing import Any
 
 from app.interpretation.contracts import CandidateRef, InterpretationInput, MinimalState
 from app.interpretation.local_chat import LocalChatAdapter
-from app.interpretation.service import Interpreter, _SYSTEM
+from app.interpretation.service import Interpreter, system_prompt
 from app.operations.catalog import load_catalog
 
 # Development cases only, not a held-out evaluation or a general accuracy claim.
@@ -77,7 +77,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             "actual": actual, "passed": passed})
             print(f"{len(records):02d} {'PASS' if passed else 'FAIL'} {expected}", flush=True)
     return {"model": args.model, "mode": "all_tools", "candidate_count": len(refs),
-            "system_prompt_sha256": hashlib.sha256(_SYSTEM.encode()).hexdigest(),
+            "system_prompt_sha256": hashlib.sha256(system_prompt({d.operation_id for d in catalog.definitions}).encode()).hexdigest(),
             "synthetic_only": True, "executes_operations": False, "external_api_cost_yen": 0,
             "passed": sum(record["passed"] for record in records), "total": len(records), "records": records}
 

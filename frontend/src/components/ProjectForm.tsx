@@ -1,7 +1,7 @@
 /** Detailed project-creation form for scripts, providers, VOICEVOX, and ASS. */
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useCreateProject, useProjectDefaults, useSpeakers } from '@/api/hooks';
 import { useNavigate } from 'react-router-dom';
 import { createProjectSchema, DEFAULT_QUALITY, type CreateProjectForm, type CreateProjectInput } from '@/lib/validation';
@@ -12,6 +12,21 @@ const SERVER_DEFAULTED = [
   'voicevox_speaker_id', 'voicevox_speed_scale', 'voicevox_pitch_scale', 'voicevox_intonation_scale',
   'voicevox_volume_scale', 'narration_sentence_pause_seconds',
 ] as const;
+
+type NumberFieldName =
+  | 'voicevox_speed_scale' | 'voicevox_pitch_scale' | 'voicevox_intonation_scale' | 'voicevox_volume_scale'
+  | 'narration_sentence_pause_seconds' | 'max_slides_per_block' | 'subtitle_font_size'
+  | 'subtitle_max_chars_per_line' | 'pre_margin_seconds' | 'post_margin_seconds' | 'min_display_seconds';
+
+/** Wait until typing pauses, so the speaker list is not fetched for every partial URL. */
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return settled;
+}
 
 export function ProjectForm() {
   /** Validate the form, submit provider settings, and navigate to the project. */
@@ -58,13 +73,28 @@ export function ProjectForm() {
   // project will get and a deliberately chosen equal value is still honored.
   const serverDefaults = useProjectDefaults().data;
   useEffect(() => {
-    if (serverDefaults) reset({ ...getValues(), ...serverDefaults }, { keepDirtyValues: true });
+    if (serverDefaults) reset({ ...getValues(), ...serverDefaults }, { keepDirtyValues: true, keepErrors: true });
   }, [serverDefaults, reset, getValues]);
 
   const useFake = watch('use_fake_providers');
-  const voicevoxUrl = watch('voicevox_url');
+  const voicevoxUrl = useDebounced(watch('voicevox_url'), 500);
   // List the speakers of the engine this project will use (blank: the server default).
   const speakers = useSpeakers(/^https?:\/\/[^\s/]+/.test(voicevoxUrl ?? '') ? voicevoxUrl : undefined);
+
+  /** A number input with a linked label and its validation message. */
+  const numberField = (
+    name: NumberFieldName,
+    label: ReactNode,
+    attrs: { min: number; max: number; step?: number; disabled?: boolean },
+    hint?: ReactNode,
+  ) => (
+    <div className="space-y-1">
+      <label className="label" htmlFor={name}>{label}</label>
+      <input id={name} type="number" className="input" {...attrs} {...register(name, { valueAsNumber: true })} />
+      {hint}
+      {errors[name] && <p className="text-xs text-red-600">{errors[name]?.message}</p>}
+    </div>
+  );
 
   const onSubmit = handleSubmit(async (form) => {
     const llmApiKey = (document.getElementById('llm_api_key') as HTMLInputElement | null)?.value ?? '';
@@ -91,7 +121,7 @@ export function ProjectForm() {
   });
 
   return (
-    <form onSubmit={onSubmit} className="space-y-6">
+    <form onSubmit={onSubmit} className="space-y-6" noValidate>
       <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-slate-800">台本</h2>
         <div className="space-y-1">
@@ -225,50 +255,10 @@ export function ProjectForm() {
               <p className="text-xs text-amber-600">VOICEVOX Engineに接続できません。</p>
             )}
           </div>
-          <div className="space-y-1">
-            <label className="label">話速 (speedScale)</label>
-            <input
-              type="number"
-              step={0.1}
-              min={0.5}
-              max={2}
-              className="input"
-              {...register('voicevox_speed_scale', { valueAsNumber: true })}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="label">音高 (pitchScale)</label>
-            <input
-              type="number"
-              step={0.05}
-              min={-1}
-              max={1}
-              className="input"
-              {...register('voicevox_pitch_scale', { valueAsNumber: true })}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="label">抑揚 (intonationScale)</label>
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={2}
-              className="input"
-              {...register('voicevox_intonation_scale', { valueAsNumber: true })}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="label">音量 (volumeScale)</label>
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={2}
-              className="input"
-              {...register('voicevox_volume_scale', { valueAsNumber: true })}
-            />
-          </div>
+          {numberField('voicevox_speed_scale', '話速 (speedScale)', { min: 0.5, max: 2, step: 0.1 })}
+          {numberField('voicevox_pitch_scale', '音高 (pitchScale)', { min: -1, max: 1, step: 0.05 })}
+          {numberField('voicevox_intonation_scale', '抑揚 (intonationScale)', { min: 0, max: 2, step: 0.1 })}
+          {numberField('voicevox_volume_scale', '音量 (volumeScale)', { min: 0, max: 2, step: 0.1 })}
         </div>
       </section>
 
@@ -289,18 +279,10 @@ export function ProjectForm() {
           disabled={isSubmitting || create.isPending}
         />
         <div className="grid gap-4 md:grid-cols-2">
-          <label className="label">
-            文末の息継ぎ（秒）
-            <input type="number" className="input mt-1" min={0} max={5} step={0.1}
-              disabled={watch('narration_pacing_mode') !== 'fixed'}
-              {...register('narration_sentence_pause_seconds', { valueAsNumber: true })} />
-            <span className="mt-1 block text-xs font-normal text-slate-500">一定の間を置く場合に使用します。0でVOICEVOX標準。</span>
-          </label>
-          <label className="label">
-            1ブロックの最大スライド枚数
-            <input type="number" className="input mt-1" min={1} max={9}
-              {...register('max_slides_per_block', { valueAsNumber: true })} />
-          </label>
+          {numberField('narration_sentence_pause_seconds', '文末の息継ぎ（秒）',
+            { min: 0, max: 5, step: 0.1, disabled: watch('narration_pacing_mode') !== 'fixed' },
+            <span className="block text-xs text-slate-500">一定の間を置く場合に使用します。0で文間に間を入れません。</span>)}
+          {numberField('max_slides_per_block', '1ブロックの最大スライド枚数', { min: 1, max: 9 })}
         </div>
       </section>
 
@@ -311,41 +293,23 @@ export function ProjectForm() {
           字幕を表示する
         </label>
         <div className="grid gap-4 md:grid-cols-3">
+          {numberField('subtitle_font_size', 'フォントサイズ', { min: 16, max: 120 })}
           <div className="space-y-1">
-            <label className="label">フォントサイズ</label>
-            <input
-              type="number"
-              className="input"
-              min={16}
-              max={120}
-              {...register('subtitle_font_size', { valueAsNumber: true })}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="label">位置</label>
-            <select className="input" {...register('subtitle_position')}>
+            <label className="label" htmlFor="subtitle_position">位置</label>
+            <select id="subtitle_position" className="input" {...register('subtitle_position')}>
               <option value="top">上</option>
               <option value="middle">中央</option>
               <option value="bottom">下</option>
             </select>
           </div>
+          {numberField('subtitle_max_chars_per_line', '1行の最大文字数', { min: 8, max: 120 })}
           <div className="space-y-1">
-            <label className="label">1行の最大文字数</label>
-            <input
-              type="number"
-              className="input"
-              min={8}
-              max={120}
-              {...register('subtitle_max_chars_per_line', { valueAsNumber: true })}
-            />
+            <label className="label" htmlFor="subtitle_text_color">文字色</label>
+            <input id="subtitle_text_color" type="color" className="input h-10 p-1" {...register('subtitle_text_color')} />
           </div>
           <div className="space-y-1">
-            <label className="label">文字色</label>
-            <input type="color" className="input h-10 p-1" {...register('subtitle_text_color')} />
-          </div>
-          <div className="space-y-1">
-            <label className="label">縁取り色</label>
-            <input type="color" className="input h-10 p-1" {...register('subtitle_outline_color')} />
+            <label className="label" htmlFor="subtitle_outline_color">縁取り色</label>
+            <input id="subtitle_outline_color" type="color" className="input h-10 p-1" {...register('subtitle_outline_color')} />
           </div>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" {...register('subtitle_background')} />
@@ -353,39 +317,9 @@ export function ProjectForm() {
           </label>
         </div>
         <div className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-1">
-            <label className="label">前余白 (秒)</label>
-            <input
-              type="number"
-              step={0.05}
-              min={0}
-              max={5}
-              className="input"
-              {...register('pre_margin_seconds', { valueAsNumber: true })}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="label">後余白 (秒)</label>
-            <input
-              type="number"
-              step={0.05}
-              min={0}
-              max={5}
-              className="input"
-              {...register('post_margin_seconds', { valueAsNumber: true })}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="label">最低表示時間 (秒)</label>
-            <input
-              type="number"
-              step={0.5}
-              min={0.5}
-              max={10}
-              className="input"
-              {...register('min_display_seconds', { valueAsNumber: true })}
-            />
-          </div>
+          {numberField('pre_margin_seconds', '前余白 (秒)', { min: 0, max: 5, step: 0.05 })}
+          {numberField('post_margin_seconds', '後余白 (秒)', { min: 0, max: 5, step: 0.05 })}
+          {numberField('min_display_seconds', '最低表示時間 (秒)', { min: 0.5, max: 10, step: 0.5 })}
         </div>
       </section>
 

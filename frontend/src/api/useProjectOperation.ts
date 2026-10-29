@@ -66,6 +66,36 @@ export function useProjectOperation(projectId: number) {
     }
   }, [projectId, qc, remember]);
 
+  /** Ask the server whether an unconfirmed request committed; forget it only if it did not. */
+  const discard = useCallback(async () => {
+    const intent = pendingRef.current;
+    if (!intent || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await api.operationResult(intent.request.request_id);
+      remember(null, intent.request.request_id);
+      setMessage(`${intent.label}は受け付け済みでした。`);
+    } catch (cause) {
+      // A server error rolls back, so a repeatable 5xx would otherwise lock the page for good.
+      if (cause instanceof ApiError && cause.status === 404) {
+        remember(null, intent.request.request_id);
+        setMessage(`「${intent.label}」は実行されていなかったため、要求を取り消しました。`);
+      } else {
+        setError('サーバーに確認できませんでした。時間をおいて再度お試しください。');
+      }
+    } finally {
+      await Promise.allSettled([
+        qc.invalidateQueries({ queryKey: ['project', projectId] }),
+        qc.invalidateQueries({ queryKey: ['history', projectId] }),
+      ]);
+      inFlight.current = false;
+      setSending(false);
+    }
+  }, [projectId, qc, remember]);
+
   const execute = useCallback((operationId: ProjectOperationId, revision: number,
     args: Record<string, unknown>, label: string) => {
     if (inFlight.current || pendingRef.current) return;
@@ -83,5 +113,6 @@ export function useProjectOperation(projectId: number) {
     execute, isSending, error, message, pending,
     locked: isSending || pending != null,
     resend: () => { if (pendingRef.current) void send(pendingRef.current); },
+    discard: () => { void discard(); },
   };
 }

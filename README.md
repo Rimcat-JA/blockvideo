@@ -118,6 +118,17 @@
 Windows で ffmpeg が PATH に無い場合は `backend/.env` に絶対パスを書けます。
 `GET /api/health` の `ffmpeg_available` で確認できます。
 
+以下の手順は `make` を使います。Windows には GNU make が付属しないため、Git Bash や
+MSYS2 などの POSIX シェルに GNU make を入れて実行してください（`winget install ezwinports.make`
+など）。make を使わない場合は、それぞれ次のコマンドと同じです。
+
+| make | 同じ内容のコマンド |
+|---|---|
+| `make install` | `uv sync --project backend --extra dev` と `cd frontend && pnpm install` |
+| `make backend` | `cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000` |
+| `make frontend` | `cd frontend && pnpm dev` |
+| `make demo` | `uv run --project backend python scripts/demo_run.py --serve` |
+
 ---
 
 ## セットアップ
@@ -390,6 +401,24 @@ backend/app/
 - DB は起動時に `app/migrations/` が版を確認して移行します（移行前にバックアップを作成）。
   `init_db()` は `create_all` だけで既存テーブルに列を足さないため、モデルに列を
   追加するときは移行処理も追加してください
+
+### DB の移行に失敗したとき（バックアップの復元）
+
+移行前のバックアップは DB と同じフォルダの `.backups/`（既定では `storage/.backups/`）に、
+検証用のメタデータ（`*.metadata.json`）と一緒に保存されます。画面に「バックアップ復元手順」と
+表示されたら、バックエンドを止めたまま `backend/` で次を実行します。
+
+```bash
+uv run python -m scripts.restore_backup
+```
+
+```bash
+uv run python -m scripts.restore_backup --latest
+```
+
+1 つ目はバックアップの一覧（新しい順）を表示し、2 つ目は最新のものを復元します。特定の
+ファイルを戻すときはパスを渡します。復元はメタデータの SHA-256 と内容を検証してから
+DB を置き換え、検証できないバックアップは使いません。復元後にアプリを再起動してください。
 
 ---
 

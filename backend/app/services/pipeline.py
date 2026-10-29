@@ -13,6 +13,7 @@ Imports:
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -450,14 +451,22 @@ async def _render_block_image(
                 block.source_text,
                 max_slides=ctx.project.max_slides_per_block,
             )
-            for slot, slide_plan in enumerate(sequence):
-                image_renderer.render_visual_plan(
-                    slide_plan,
-                    block_image_path(ctx.project.id, block.index, slot),
-                    width=settings.output_width,
-                    height=slide_height,
-                    fallback_summary=block.tts_text,
-                )
+            project_id, block_index, summary = ctx.project.id, block.index, block.tts_text
+
+            def render_slides() -> None:
+                for slot, slide_plan in enumerate(sequence):
+                    image_renderer.render_visual_plan(
+                        slide_plan,
+                        block_image_path(project_id, block_index, slot),
+                        width=settings.output_width,
+                        height=slide_height,
+                        fallback_summary=summary,
+                    )
+
+            # PIL drawing and the Mermaid CLI (up to its 90 s timeout) are
+            # blocking; on the event loop they froze every request, /cancel
+            # and progress polling included, for the whole stage.
+            await asyncio.to_thread(render_slides)
             # Any slides left over from a previous, longer sequence would
             # otherwise be picked up by the render stage.
             for stale in range(len(sequence), len(sequence) + 8):
@@ -670,7 +679,8 @@ async def run_render_stage(ctx: StageContext | RenderContext, db: Session) -> Pa
                 slide_height = settings.output_height
                 if ctx.project.subtitle_enabled:
                     slide_height = max(120, slide_height - settings.subtitle_band_height)
-                slides = presentation.focus_slides(
+                slides = await asyncio.to_thread(
+                    presentation.focus_slides,
                     plan=block.visual_plan_json or {}, text=block.tts_text,
                     measured=spans, audio_ms=block.duration_ms or 0,
                     display_ms=block.display_duration_ms, primary=image,
@@ -1321,7 +1331,7 @@ async def run_generation_job(job_id: int, cancel_check: Callable[[], bool]) -> N
     from app.db import get_session_factory
     from app.models.job import GenerationJob, JobStatus
     from app.services.artifact_store import (
-        collect_completed_materials, collect_render_materials, file_identity,
+        collect_completed_materials, collect_render_materials, discard_unpublished_output, file_identity,
         preserve_legacy_video, publish_artifact, verify_materials,
     )
     from app.services.generation_plan import build_generation_plan
@@ -1477,6 +1487,9 @@ async def run_generation_job(job_id: int, cancel_check: Callable[[], bool]) -> N
             project.progress = 1.0
             project.status = ProjectStatus.completed
             db.commit()
+        except BaseException:
+            discard_unpublished_output(job_id, output_directory)
+            raise
         finally:
             if bundle is not None:
                 closed: set[int] = set()

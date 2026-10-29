@@ -36,7 +36,7 @@ $env:MERMAID_PUPPETEER_CONFIG = "<path-to-repo>\tools\mermaid\puppeteer-config.j
 1. 設定 `mermaid_mmdc_path`(`.env` で `MERMAID_MMDC_PATH=...`)
 2. 環境変数 `MERMAID_MMDC_PATH`
 3. PATH 上の `mmdc`
-4. なければ `npx --yes mmdc`
+4. どれも見つからなければ、図は内蔵の PIL レンダラーで描きます（`npx` で自動インストールはしません）
 
 例(`tools/mermaid/node_modules/.bin/mmdc.cmd` を直接指定):
 
@@ -46,6 +46,6 @@ MERMAID_MMDC_PATH=<path-to-repo>\tools\mermaid\node_modules\.bin\mmdc.cmd
 
 ## セキュリティ
 
-- mmdc は `asyncio.create_subprocess_exec` の **argv 配列** で起動(`shell=False`)。
+- mmdc は `subprocess.run` の **argv 配列** で起動(`shell=False`)。
 - Mermaid ソースは一時 `.mmd` ファイル経由で渡し、シェルに展開しません。
 - LLM 出力は Pydantic `VisualPlan` で検証済みのものだけ渡します(`diagram` 上限 20000 字)。

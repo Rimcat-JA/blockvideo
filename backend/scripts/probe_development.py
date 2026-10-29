@@ -30,13 +30,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     refs = tuple(CandidateRef(operation_id=d.operation_id, operation_version=d.operation_version) for d in catalog.definitions)
     if args.prompt_file:
         # Development-only baseline replay, never a product setting or API input.
-        interpretation_service._SYSTEM = args.prompt_file.read_text(encoding="utf-8")
+        # The Interpreter builds its prompt through system_prompt(); replacing
+        # that is what makes the replay actually send the given prompt.
+        replay = args.prompt_file.read_text(encoding="utf-8")
+        interpretation_service.system_prompt = lambda *_args, **_kwargs: replay
+    prompt = interpretation_service.system_prompt({d.operation_id for d in catalog.definitions})
     args.output.mkdir(parents=True)
     report: dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(), "scope": "approved_development_interpretation_only",
         "approval_gate": gate, "eligible_subset_sha256": corpus_digest(cases),
         "catalog_sha256": hashlib.sha256(CATALOG.read_bytes()).hexdigest(),
-        "prompt_sha256": hashlib.sha256(interpretation_service._SYSTEM.encode()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "response_schema_ordered_sha256": hashlib.sha256(json.dumps(response_schema(catalog.definitions), ensure_ascii=False).encode()).hexdigest(),
         "candidate_payload_ordered_sha256": hashlib.sha256(json.dumps([candidate_payload(d) for d in catalog.definitions], ensure_ascii=False).encode()).hexdigest(),
         "model": args.model, "base_url": args.base_url,

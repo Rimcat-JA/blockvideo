@@ -512,8 +512,118 @@ def _require_no_rows(connection: sqlite3.Connection, query: str) -> None:
         raise MigrationError("migration_verification_failed")
 
 
-def validate_critical_references(connection: sqlite3.Connection) -> None:
-    """Validate declared and D34 semantic ownership references when present."""
+def _delete_legacy_orphans(connection: sqlite3.Connection) -> int:
+    """Remove rows a v0 app could leave behind once their owner was deleted.
+
+    The v0 app never enabled ``PRAGMA foreign_keys`` and let a project be
+    deleted while its split stage was still running, so blocks, jobs and the
+    rows hanging off those jobs can outlive the project. Nothing can reach
+    them, and the backup taken beforehand keeps the original bytes.
+    """
+    schemas = _schema_identifiers(connection)
+
+    def name(table_name: str) -> str:
+        return _quote(schemas[_normalized_identifier(table_name)][0])
+
+    def bare(table_name: str, column_name: str) -> str:
+        columns = schemas[_normalized_identifier(table_name)][1]
+        return _quote(columns[_normalized_identifier(column_name)])
+
+    def column(table_name: str, column_name: str, alias: str | None = None) -> str:
+        return f"{alias or name(table_name)}.{bare(table_name, column_name)}"
+
+    def has(table_name: str, *columns: str) -> bool:
+        return _has_columns(schemas, table_name, set(columns))
+
+    def owner_missing(child: str, child_column: str, owner: str) -> str:
+        return (
+            f"NOT EXISTS (SELECT 1 FROM {name(owner)} AS owner WHERE "
+            f"{column(owner, 'id', 'owner')}={column(child, child_column)})"
+        )
+
+    removed = 0
+
+    def run(statement: str) -> int:
+        nonlocal removed
+        changed = connection.execute(statement).rowcount
+        removed += max(changed, 0)
+        return changed
+
+    if has("generation_jobs", "id", "project_id") and has("projects", "id"):
+        run(
+            f"DELETE FROM {name('generation_jobs')} WHERE "
+            f"{owner_missing('generation_jobs', 'project_id', 'projects')}"
+        )
+        if has("generation_jobs", "parent_job_id"):
+            parent = column("generation_jobs", "parent_job_id")
+            while run(
+                f"DELETE FROM {name('generation_jobs')} WHERE {parent} IS NOT NULL AND "
+                f"{owner_missing('generation_jobs', 'parent_job_id', 'generation_jobs')}"
+            ):
+                pass
+    if has("external_calls", "job_id") and has("generation_jobs", "id"):
+        run(
+            f"DELETE FROM {name('external_calls')} WHERE "
+            f"{owner_missing('external_calls', 'job_id', 'generation_jobs')}"
+        )
+    if has("generation_artifacts", "project_id", "job_id") and has("projects", "id"):
+        run(
+            f"DELETE FROM {name('generation_artifacts')} WHERE "
+            f"{owner_missing('generation_artifacts', 'project_id', 'projects')}"
+        )
+        if has("generation_jobs", "id"):
+            job = column("generation_artifacts", "job_id")
+            run(
+                f"UPDATE {name('generation_artifacts')} SET {bare('generation_artifacts', 'job_id')}=NULL "
+                f"WHERE {job} IS NOT NULL AND "
+                f"{owner_missing('generation_artifacts', 'job_id', 'generation_jobs')}"
+            )
+    for child in ("blocks", "settings_revisions"):
+        if has(child, "project_id") and has("projects", "id"):
+            run(
+                f"DELETE FROM {name(child)} WHERE "
+                f"{owner_missing(child, 'project_id', 'projects')}"
+            )
+    return removed
+
+
+def repair_legacy_orphans(connection: sqlite3.Connection) -> int:
+    """Commit the v0 orphan cleanup; returns the number of rows changed."""
+    if connection.in_transaction:
+        raise MigrationError("migration_failed")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        removed = _delete_legacy_orphans(connection)
+        connection.commit()
+    except MigrationError:
+        connection.rollback()
+        raise
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise MigrationError("migration_failed") from exc
+    return removed
+
+
+def validate_critical_references(
+    connection: sqlite3.Connection, *, after_legacy_repair: bool = False
+) -> None:
+    """Validate declared and D34 semantic ownership references when present.
+
+    With ``after_legacy_repair`` the check judges the database as the v0
+    migration will leave it: the orphan cleanup runs inside a transaction
+    that is always rolled back, so not a byte of the file changes (a released
+    savepoint would commit and bump the file change counter).
+    """
+    if after_legacy_repair:
+        if connection.in_transaction:
+            raise MigrationError("migration_failed")
+        connection.execute("BEGIN")
+        try:
+            _delete_legacy_orphans(connection)
+            validate_critical_references(connection)
+        finally:
+            connection.rollback()
+        return
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise MigrationError("migration_verification_failed")
     schemas = _schema_identifiers(connection)

@@ -129,7 +129,7 @@ class FakeLLMProvider(LLMProvider):
         if not normalized:
             return []
         # Split into sentences on 。？！. but keep the delimiter.
-        parts = re.findall(r"[^。？！.!?\n]+[。？！.!?]?", normalized)
+        parts = re.findall(r"[^。？！.!?]*[。？！.!?]+|[^。？！.!?]+", normalized)
         chunks: list[str] = []
         buf = ""
         for part in parts:

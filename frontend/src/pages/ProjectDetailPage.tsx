@@ -17,9 +17,12 @@ import { ProjectSettingsEditor } from '@/components/ProjectSettingsEditor';
 import { ProjectOutputHistory } from '@/components/ProjectOutputHistory';
 import { SettingsHistory } from '@/components/SettingsHistory';
 import { GenerationHistory } from '@/components/GenerationHistory';
+import { NotFoundPage } from '@/pages/NotFoundPage';
 
 export function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
+  // Number('abc') is NaN, which would reach every query as /api/projects/NaN.
+  if (!/^[1-9]\d*$/.test(params.id ?? '')) return <NotFoundPage />;
   const id = Number(params.id);
   return <ProjectMonitor key={id} id={id} />;
 }
@@ -175,7 +178,10 @@ function ProjectMonitor({ id }: { id: number }) {
       {command.message && <p role="status" className="mt-4 text-sm text-green-700">{command.message}</p>}
       {command.pending && !command.isSending && <div className="mt-4 space-y-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
         <p>「{command.pending.label}」の応答が未確認です。同じ要求を再送して結果を確認できます。二重には実行されません。</p>
-        <button type="button" className="btn-secondary" onClick={command.resend}>同じ要求を再送する</button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="btn-secondary" onClick={command.resend}>同じ要求を再送する</button>
+          <button type="button" className="btn-secondary" onClick={command.discard}>実行されていなければ取り消す</button>
+        </div>
       </div>}
       {history.data && <ProjectOutputHistory projectId={id} history={history.data} legacyVideo={!!p.output_video_path}
         disabled={blocked} onRestore={(artifactId) => command.execute('project.artifact.restore', revision, { artifact_id: artifactId }, '完成動画を戻す')} />}

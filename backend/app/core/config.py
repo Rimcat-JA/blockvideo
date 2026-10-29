@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     Attributes:
         app_name, app_version, environment: Identity and runtime mode.
         storage_root, database_url: Local persistence locations.
-        api_host, api_port, cors_origins: HTTP listener and browser origins.
+        cors_origins, allowed_hosts: Browser origins and Host names accepted.
         llm_* and image_*: Optional provider fallback configuration.
         voicevox_*: Default VOICEVOX synthesis controls.
         output_* and crossfade_seconds: Video frame/encoding defaults.
@@ -77,9 +77,7 @@ class Settings(BaseSettings):
     storage_root: Path = STORAGE_ROOT
     database_url: str = f"sqlite:///{(STORAGE_ROOT / 'blockvideo.db').as_posix()}"
 
-    # HTTP
-    api_host: str = "127.0.0.1"
-    api_port: int = 8000
+    # HTTP (the listen address is the uvicorn command line, not a setting)
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     # Host names the API answers to; anything else (a DNS-rebinding page) gets 400.
     # "testserver" is the Host of in-process test clients.
@@ -180,6 +178,24 @@ class Settings(BaseSettings):
         """Keep frame and band sizes even: yuv420p/libx264 and the slide pad need it."""
         return value - (value % 2)
 
+    @field_validator("storage_root")
+    @classmethod
+    def _anchor_storage_root(cls, value: Path) -> Path:
+        """Resolve a relative STORAGE_ROOT against backend/, not the process CWD.
+
+        .env is found by absolute path, so ``STORAGE_ROOT=../storage`` used to
+        mean a different folder whenever the server was started from
+        somewhere other than backend/.
+        """
+        return value if value.is_absolute() else (PROJECT_ROOT / value).resolve()
+
+    @model_validator(mode="after")
+    def _database_follows_storage(self) -> "Settings":
+        """Keep the default database inside the configured storage root."""
+        if "database_url" not in self.model_fields_set:
+            self.database_url = f"sqlite:///{(self.storage_root / 'blockvideo.db').as_posix()}"
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -256,8 +272,8 @@ def resolve_mmdc(settings: Settings | None = None) -> str:
 
     Returns:
         Explicit ``mermaid_mmdc_path`` -> ``MERMAID_MMDC_PATH`` -> the bare
-        ``"mmdc"`` executable name.  The renderer itself falls back to
-        ``npx --yes mmdc`` when that bare name is not on PATH.
+        ``"mmdc"`` executable name.  When that bare name is not on PATH,
+        diagrams use the built-in PIL renderer.
 
     """
     settings = settings or get_settings()
