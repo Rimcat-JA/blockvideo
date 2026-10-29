@@ -77,7 +77,12 @@ def mark_interrupted_operation_jobs() -> int:
     with get_session_factory()() as db, atomic_write(db):
         mark_interrupted_calls(db)
         db.flush()
-        jobs = list(db.scalars(select(GenerationJob).where(GenerationJob.status == JobStatus.running)))
+        # Jobs without input_revision predate D15: the dispatcher never picks
+        # them up, so a pending one would hold its project busy forever.
+        jobs = list(db.scalars(select(GenerationJob).where(
+            (GenerationJob.status == JobStatus.running)
+            | ((GenerationJob.status == JobStatus.pending) & GenerationJob.input_revision.is_(None))
+        ).order_by(GenerationJob.id)))
         for job in jobs:
             project = db.get(Project, job.project_id)
             if has_unresolved_calls(db, job.id):
@@ -97,7 +102,9 @@ def mark_interrupted_operation_jobs() -> int:
             job.error_message = None if job.status == JobStatus.pending else message
             if job.status != JobStatus.pending:
                 job.finished_at = datetime.now(timezone.utc)
-            if project is not None and project.revision == job.input_revision:
+            if project is not None and (
+                job.input_revision is None or project.revision == job.input_revision
+            ):
                 project.status = {
                     JobStatus.pending: ProjectStatus.generating,
                     JobStatus.cancelled: ProjectStatus.cancelled,

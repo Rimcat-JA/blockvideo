@@ -1286,12 +1286,14 @@ def test_runner_surfaces_post_migration_verification_failures_with_backup(
         original_references = runner.validate_critical_references
         calls = 0
 
-        def fail_post_references(connection: sqlite3.Connection) -> None:
+        def fail_post_references(
+            connection: sqlite3.Connection, *, after_legacy_repair: bool = False
+        ) -> None:
             nonlocal calls
             calls += 1
             if calls >= 2:
                 raise MigrationError("migration_verification_failed")
-            original_references(connection)
+            original_references(connection, after_legacy_repair=after_legacy_repair)
 
         monkeypatch.setattr(runner, "validate_critical_references", fail_post_references)
 
@@ -1800,3 +1802,57 @@ def test_lease_release_collision_never_deletes_other_owner(
     tombstones = tuple(tmp_path.glob("*.release-*"))
     assert len(tombstones) == 1
     assert tombstones[0].read_bytes() == replacement
+
+
+def _add_legacy_orphans(database: Path) -> None:
+    """Rows the v0 app committed when a project was deleted mid-split."""
+    with closing(sqlite3.connect(database)) as connection:
+        connection.executescript(
+            "INSERT INTO blocks (id, project_id, \"index\", source_text, tts_text, "
+            "visual_type, status_split, status_visual_plan, status_image, status_audio, "
+            "status_render, created_at, updated_at) VALUES (7, 999, 0, 's', 't', 'text', "
+            "'done', 'pending', 'pending', 'pending', 'pending', "
+            "'2026-01-02 03:04:05', '2026-01-02 03:04:05');"
+            "INSERT INTO generation_jobs (id, project_id, current_stage, status, progress, "
+            "stage_progress, cancel_requested, created_at) VALUES (8, 999, 'split', "
+            "'running', 0, 0, 0, '2026-01-02 03:04:05');"
+            "INSERT INTO generation_jobs (id, project_id, current_stage, status, progress, "
+            "stage_progress, cancel_requested, parent_job_id, created_at) VALUES (9, 101, "
+            "'split', 'failed', 0, 0, 0, 8, '2026-01-02 03:04:05');"
+            "INSERT INTO external_calls (id, job_id, fingerprint, provider, endpoint, "
+            "remote_side_effect, status, attempts, started_at) VALUES (5, 8, 'f', 'llm', "
+            "'e', 1, 'completed', 1, '2026-01-02 03:04:05');"
+        )
+        connection.commit()
+
+
+def test_v0_orphans_left_by_a_deleted_project_are_removed_after_backup(
+    tmp_path: Path,
+) -> None:
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    _add_legacy_orphans(database)
+    with closing(sqlite3.connect(database)) as connection:
+        with pytest.raises(MigrationError):
+            validate_critical_references(connection)
+        validate_critical_references(connection, after_legacy_repair=True)
+        # The dry run never changes the database.
+        assert connection.execute("SELECT COUNT(*) FROM blocks").fetchone() == (1,)
+
+    result = _migrate(database)
+
+    assert result.status == "migrated"
+    (backup,) = _published_backups(tmp_path / ".backups")
+    with closing(sqlite3.connect(backup)) as kept, closing(sqlite3.connect(database)) as migrated:
+        assert kept.execute("SELECT COUNT(*) FROM blocks").fetchone() == (1,)
+        assert migrated.execute("SELECT COUNT(*) FROM blocks").fetchone() == (0,)
+        assert migrated.execute("SELECT id FROM generation_jobs").fetchall() == []
+        assert migrated.execute("SELECT COUNT(*) FROM external_calls").fetchone() == (0,)
+        assert migrated.execute("SELECT id FROM projects").fetchall() == [(101,)]
+        assert migrated.execute("PRAGMA user_version").fetchone() == (1,)
+        validate_critical_references(migrated)
+
+    assert _migrate(database).status == "current"
+    restore_database_backup(_url(database), backup, result.backup_sha256, Base.metadata)
+    with closing(sqlite3.connect(database)) as restored:
+        assert restored.execute("PRAGMA user_version").fetchone() == (0,)
+        assert restored.execute("SELECT COUNT(*) FROM blocks").fetchone() == (1,)
