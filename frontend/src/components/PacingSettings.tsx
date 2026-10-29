@@ -73,6 +73,8 @@ interface Props {
   onChange: (next: Pacing) => void;
   voicevoxUrl?: string;
   disabled?: boolean;
+  /** Values shown as 既定 and restored by 既定値に戻す (the server's when known). */
+  defaults?: Pacing;
 }
 
 /**
@@ -82,12 +84,12 @@ interface Props {
  * video about to be made — an existing project keeps whatever it was built
  * with.
  */
-export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props) {
+export function PacingSettings({ value, onChange, voicevoxUrl, disabled, defaults = DEFAULT_PACING }: Props) {
   const speakers = useSpeakers(voicevoxUrl);
   const set = <K extends keyof Pacing>(key: K, next: Pacing[K]) =>
     onChange({ ...value, [key]: next });
-  const isDefault = (Object.keys(DEFAULT_PACING) as Array<keyof Pacing>).every(
-    (key) => JSON.stringify(value[key]) === JSON.stringify(DEFAULT_PACING[key]),
+  const isDefault = (Object.keys(defaults) as Array<keyof Pacing>).every(
+    (key) => JSON.stringify(value[key]) === JSON.stringify(defaults[key]),
   );
 
   return (
@@ -106,7 +108,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
           hint="「。」ごとに置く間。長いほど落ち着いた印象になります（0 で VOICEVOX 標準の約0.4秒）。"
           value={value.narration_sentence_pause_seconds}
           min={0} max={3} step={0.1} unit="秒"
-          fallback={DEFAULT_PACING.narration_sentence_pause_seconds}
+          fallback={defaults.narration_sentence_pause_seconds}
           disabled={disabled || value.narration_pacing_mode !== 'fixed'}
           onChange={(v) => set('narration_sentence_pause_seconds', v)}
         />
@@ -115,7 +117,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
           hint="1.0 が標準。上げると全体が短くなります。"
           value={value.voicevox_speed_scale}
           min={0.5} max={2} step={0.05} unit="倍"
-          fallback={DEFAULT_PACING.voicevox_speed_scale}
+          fallback={defaults.voicevox_speed_scale}
           disabled={disabled}
           onChange={(v) => set('voicevox_speed_scale', v)}
         />
@@ -124,7 +126,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
           hint="読み終えてから次のスライドへ移るまで、図を見る時間。"
           value={value.post_margin_seconds}
           min={0} max={5} step={0.1} unit="秒"
-          fallback={DEFAULT_PACING.post_margin_seconds}
+          fallback={defaults.post_margin_seconds}
           disabled={disabled}
           onChange={(v) => set('post_margin_seconds', v)}
         />
@@ -133,7 +135,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
           hint="1枚あたりの表示時間を確保するための上限。超えたぶんは作られません（1枚なら図だけを最後まで見せます）。"
           value={value.max_slides_per_block}
           min={1} max={8} step={1} unit="枚"
-          fallback={DEFAULT_PACING.max_slides_per_block}
+          fallback={defaults.max_slides_per_block}
           disabled={disabled}
           onChange={(v) => set('max_slides_per_block', v)}
         />
@@ -142,7 +144,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
           hint="収まらない場合は自動で縮みます。これは上限です。"
           value={value.subtitle_font_size}
           min={24} max={72} step={2} unit="px"
-          fallback={DEFAULT_PACING.subtitle_font_size}
+          fallback={defaults.subtitle_font_size}
           disabled={disabled}
           onChange={(v) => set('subtitle_font_size', v)}
         />
@@ -184,7 +186,7 @@ export function PacingSettings({ value, onChange, voicevoxUrl, disabled }: Props
           type="button"
           className="text-xs text-slate-500 underline disabled:opacity-50"
           disabled={disabled || isDefault}
-          onClick={() => onChange(DEFAULT_PACING)}
+          onClick={() => onChange(defaults)}
         >
           既定値に戻す
         </button>

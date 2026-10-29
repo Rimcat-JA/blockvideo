@@ -28,7 +28,7 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.core.logging import log
-from app.providers.llm import LLMProvider, LLMRequest, LLMMessage
+from app.providers.llm import LLMProvider, LLMRequest, LLMMessage, ProviderError
 from app.services.external_calls import ExternalOutcomeUnknown
 from app.services.stage_schemas import SplitBlock, SplitPayload
 
@@ -183,8 +183,12 @@ _CODE_FENCE_RX = re.compile(r"```[\s\S]*?```")
 _CODE_TOKEN = "〔コード{n}〕"
 _CODE_TOKEN_RX = re.compile(r"〔コード(\d+)〕")
 # Models often re-type the token without its brackets when writing tts_text
-# ("コード2"), which would otherwise be read aloud. Strip both shapes.
-_CODE_TOKEN_LOOSE_RX = re.compile(r"〔?\s*コード\s*\d+\s*〕?")
+# ("コード2"), which would otherwise be read aloud. The bracketed shape never
+# occurs in prose; the bare shape does (ステータスコード404, このコード1行で), so
+# it is stripped only for numbers of tokens this script actually issued and
+# only when it does not continue a word.
+_CODE_TOKEN_BRACKETED_RX = re.compile(r"〔\s*コード\s*\d+\s*〕")
+_CODE_TOKEN_BARE_RX = re.compile(r"(?<![゠-ヿ一-鿿A-Za-z0-9])〔?\s*コード\s*(\d+)(?!\d)\s*〕?")
 
 
 def mask_code_blocks(text: str) -> tuple[str, list[str]]:
@@ -222,14 +226,20 @@ _AA_LINE_RX = re.compile(rf"^[\s{re.escape(_AA_CHARS)}()\[\]|/\\+*'\"-]*$")
 # because they carry meaning outside Markdown (``#f`` is Scheme's false, and a
 # stray ``>`` may be an arrow), and blanket-stripping them turned ``#f`` into
 # the spoken letter "f".
-_MD_INLINE_RX = re.compile(r"[*_`~]+")
+# Only paired delimiters are markup; a lone ``*`` or ``~`` between operands is
+# an operator or a range ("2 * 3", "3~5分") and must survive.
+_MD_PAIRED_RX = re.compile(r"(\*{1,3}|_{1,3}|~~)(?=\S)(.+?)(?<=\S)\1")
+_MD_CODE_RX = re.compile(r"`+")
+_ASCII_RANGE_RX = re.compile(r"(?<=\d)\s*~\s*(?=\d)")
 _LIST_MARKER_RX = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+", re.MULTILINE)
 # Markdown structure. These must also match mid-string: by the time narration
 # is sanitised the block text has usually had its newlines collapsed, so
 # line-anchored patterns alone let ``---`` through into the audio.
 _HEADING_RX = re.compile(r"(?:^|(?<=\s))#{1,6}[ \t]+(?:\d+\s*[．.、]\s*)?")
 _HRULE_RX = re.compile(r"(?:^|(?<=\s))(?:-{3,}|={3,}|\*{3,})(?=\s|$)")
-_BLOCKQUOTE_RX = re.compile(r"(?:^|(?<=\s))>+[ \t]*")
+# A quote marker starts a line, or follows a sentence end once newlines are
+# collapsed; ``n > 0`` and ``x >= 10`` are comparisons and stay.
+_BLOCKQUOTE_RX = re.compile(r"(?:^|(?<=[。．！？!?]\s))[ \t]*>+(?!=)[ \t]*", re.MULTILINE)
 # Scheme literals that would otherwise be read letter by letter.
 _SCHEME_LITERALS = {"#t": "真", "#f": "偽"}
 _SCHEME_LITERAL_RX = re.compile(r"#[tf]\b")
@@ -242,7 +252,7 @@ _STAGE_DIRECTION_RX = re.compile(
 )
 
 
-def sanitize_for_narration(text: str) -> str:
+def sanitize_for_narration(text: str, *, code_count: int = 0) -> str:
     """Strip everything that should be *shown* rather than *spoken*.
 
     Code listings, hand-drawn ASCII diagrams, Markdown markup and stage
@@ -253,6 +263,8 @@ def sanitize_for_narration(text: str) -> str:
 
     Args:
         text: Source/narration text potentially containing display-only syntax.
+        code_count: Number of code placeholders issued for this script; bare
+            ``コードN`` is removed only for ``1 <= N <= code_count``.
 
     Returns:
         Whitespace-normalized prose with code fences, diagrams, Markdown
@@ -261,7 +273,10 @@ def sanitize_for_narration(text: str) -> str:
     """
     body = text or ""
     body = _CODE_FENCE_RX.sub(" ", body)
-    body = _CODE_TOKEN_LOOSE_RX.sub(" ", body)
+    body = _CODE_TOKEN_BRACKETED_RX.sub(" ", body)
+    if code_count:
+        body = _CODE_TOKEN_BARE_RX.sub(
+            lambda m: " " if 1 <= int(m.group(1)) <= code_count else m.group(0), body)
     body = _STAGE_DIRECTION_RX.sub(" ", body)
     # Before the heading strip, so ``#f`` is never mistaken for a heading.
     body = _SCHEME_LITERAL_RX.sub(lambda m: _SCHEME_LITERALS[m.group(0)], body)
@@ -280,7 +295,9 @@ def sanitize_for_narration(text: str) -> str:
 
     # Remaining stray diagram glyphs inside otherwise-normal sentences.
     body = body.translate({ord(ch): " " for ch in _AA_CHARS})
-    body = _MD_INLINE_RX.sub("", body)
+    body = _MD_PAIRED_RX.sub(r"\2", body)
+    body = _MD_CODE_RX.sub("", body)
+    body = _ASCII_RANGE_RX.sub("から", body)
     return re.sub(r"\s+", " ", body).strip()
 
 
@@ -706,6 +723,13 @@ async def split_segment(
             last_error = exc
             issues.append(f"attempt {attempt}: JSONスキーマ不一致 ({exc.__class__.__name__})")
             continue
+        except ProviderError as exc:
+            # Rate limits and connection failures are retried and then fall
+            # back like any other failed attempt. ExternalOutcomeUnknown is not
+            # a ProviderError, so a possibly billed call still stops the job.
+            last_error = exc
+            issues.append(f"attempt {attempt}: プロバイダーエラー ({exc.__class__.__name__})")
+            continue
 
         # Realign against the masked text the model actually saw, then put
         # the real code back.
@@ -727,7 +751,7 @@ async def split_segment(
                 # dropped from tts_text rather than restored. Empty narration
                 # is left empty here — the spoken cue is added after merging,
                 # otherwise it lands mid-sentence inside a merged block.
-                tts_text=sanitize_for_narration(b.tts_text),
+                tts_text=sanitize_for_narration(b.tts_text, code_count=len(code_blocks)),
             )
             for b in blocks
         ]
@@ -749,7 +773,7 @@ async def split_segment(
         SplitBlock(
             index=b.index,
             source_text=unmask_code_blocks(b.source_text, code_blocks),
-            tts_text=sanitize_for_narration(b.tts_text),
+            tts_text=sanitize_for_narration(b.tts_text, code_count=len(code_blocks)),
         )
         for b in _deterministic_split(masked_script, settings)
     ]
@@ -880,7 +904,13 @@ async def split_script(
                 segment, provider, settings, code_blocks=code_blocks
             )
 
-    results = await asyncio.gather(*(run(seg) for seg in segments))
+    # Let every segment finish so no sibling call is left in flight when the
+    # job ends; cancelling them would journal those calls as unknown.
+    outcomes = await asyncio.gather(*(run(seg) for seg in segments), return_exceptions=True)
+    failures = [o for o in outcomes if isinstance(o, BaseException)]
+    if failures:
+        raise next((f for f in failures if isinstance(f, ExternalOutcomeUnknown)), failures[0])
+    results = [o for o in outcomes if isinstance(o, SplitResult)]
 
     blocks: list[SplitBlock] = []
     issues: list[str] = []

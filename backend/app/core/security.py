@@ -213,3 +213,51 @@ class SecretStore:
 
 # Shared process-local singleton used by project routes and provider factories.
 secret_store = SecretStore()
+
+
+# ---------------------------------------------------------------------------
+# Browser-facing request guards for the unauthenticated local API.
+# ---------------------------------------------------------------------------
+
+def host_name(host_header: str | None) -> str:
+    """Return the lower-cased host of a Host header, without port or brackets."""
+    value = (host_header or "").strip().lower()
+    if value.startswith("["):
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def host_allowed(host_header: str | None, allowed_hosts: list[str]) -> bool:
+    """Reject Host names a DNS-rebinding page would send (``evil.example``).
+
+    The API has no authentication, so a page whose domain re-resolves to
+    127.0.0.1 could otherwise drive it with the user's browser.
+    """
+    name = host_name(host_header)
+    return bool(name) and name in {host_name(item) for item in allowed_hosts}
+
+
+def cross_site_request(origin: str | None, fetch_site: str | None, cors_origins: list[str]) -> bool:
+    """Return whether a browser marked the request as coming from another site.
+
+    Requests without either header (curl, scripts, tests) are not browser
+    cross-site requests and are allowed.
+    """
+    if (fetch_site or "").lower() == "cross-site":
+        return True
+    return origin is not None and origin.rstrip("/") not in {o.rstrip("/") for o in cors_origins}
+
+
+def plain_http_url(url: str) -> bool:
+    """Accept only ``http(s)://host[:port][/path]`` without credentials, query or fragment."""
+    from urllib.parse import urlsplit
+
+    if "?" in url or "#" in url:
+        return False
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - raises ValueError for an invalid port
+    except ValueError:
+        return False
+    return (parts.scheme in {"http", "https"} and bool(parts.hostname)
+            and parts.username is None and parts.password is None)

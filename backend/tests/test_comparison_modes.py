@@ -20,9 +20,10 @@ from evaluation.comparison_fixture import TrialDatabase, observe
 from evaluation.comparison_runner import run_trial
 from evaluation.contracts import Case
 from evaluation.corpus import load_cases
+from tests.private_inputs import private_corpus
 from tests.test_semantic_interpretation import CATALOG, REFS, QUESTION, Replies, setup as setup
 
-CASES = {c.case_id: c for c in load_cases(Path(__file__).parents[2] / "evaluation/d24/development.jsonl")}
+CASES = {c.case_id: c for c in load_cases(private_corpus("evaluation/d24/development.jsonl", module=True))}
 SET64 = {"kind": "operation", "operation_id": "project.subtitle-font-size.set", "operation_version": 1,
          "arguments": {"value": 64}}
 START = {"kind": "operation", "operation_id": "project.generation.start", "operation_version": 1,

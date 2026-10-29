@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
 import httpx
-from sqlalchemy import ColumnElement, and_, select
+from sqlalchemy import ColumnElement, and_, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
@@ -31,7 +31,15 @@ class ExternalOutcomeUnknown(RuntimeError):
 
 
 _job_id: ContextVar[int | None] = ContextVar("external_call_job_id", default=None)
-_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[int, str], asyncio.Lock]] = WeakKeyDictionary()
+# Per-loop (job, fingerprint) locks with a user count, dropped once unused.
+_locks: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[int, str], tuple[asyncio.Lock, int]]
+] = WeakKeyDictionary()
+# Failures raised before any request byte left the process. They prove the
+# provider never saw the call, so it is recorded as failed and may be re-sent.
+_NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+                    httpx.UnsupportedProtocol, httpx.InvalidURL)
+_NOT_SENT_PREFIX = "not_sent:"
 _UNKNOWN_MESSAGE = "外部処理の結果が未確定です。重複実行を避けるため自動再送を停止しました。"
 
 
@@ -59,6 +67,16 @@ def has_unresolved_calls(db: Session, job_id: int) -> bool:
         ExternalCall.job_id == job_id,
         unresolved_remote_side_effect_predicate(),
     ).limit(1)) is not None
+
+
+def clear_call_bodies(db: Session, job_id: int) -> None:
+    """Drop cached reply bodies of a finished job; caller owns commit.
+
+    Bodies only serve resuming the same job, and a retry is always a new job.
+    Rows stay, because status and attempts are still needed for reconciliation.
+    """
+    db.execute(update(ExternalCall).where(ExternalCall.job_id == job_id).values(
+        response_body=None, response_content_type=None))
 
 
 def mark_interrupted_calls(db: Session) -> int:
@@ -120,9 +138,12 @@ def _claim(job_id: int, fingerprint: str, provider: str, url: str,
                 call.status = "unknown"
                 call.error_code = "cached_response_missing"
                 missing_cache = True
-            elif call.remote_side_effect:
+            elif call.remote_side_effect and not (
+                call.status == "failed" and (call.error_code or "").startswith(_NOT_SENT_PREFIX)
+            ):
                 # Even malformed/missing cached metadata cannot authorize another
-                # remote execution. An unproven old failure is not a safe retry.
+                # remote execution. An unproven old failure is not a safe retry;
+                # only a failure proven to have happened before sending is.
                 raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE)
             else:
                 call.status = "in_flight"
@@ -178,7 +199,8 @@ async def journaled_post(
 
     Authentication headers are neither fingerprinted nor persisted. Without a job
     context, existing standalone provider behavior is preserved. Transport errors,
-    HTTP 408, and server errors may occur after paid execution and remain unknown.
+    HTTP 408, and server errors may occur after paid execution and remain unknown,
+    except connection failures raised before anything was sent, which are failed.
     A known 4xx rejection is cached as failed and cannot be retried by same-job POST.
     """
     job_id = _job_id.get()
@@ -186,30 +208,52 @@ async def journaled_post(
         return await client.post(url, json=json, params=params, headers=headers)
     fingerprint = _identity(provider, url, json, params)
     loop_locks = _locks.setdefault(asyncio.get_running_loop(), {})
-    lock = loop_locks.setdefault((job_id, fingerprint), asyncio.Lock())
-    async with lock:
-        call_id, cached = _claim(job_id, fingerprint, provider, url, remote_side_effect)
-        if cached is not None:
-            return cached
+    key = (job_id, fingerprint)
+    lock, users = loop_locks.get(key, (asyncio.Lock(), 0))
+    loop_locks[key] = (lock, users + 1)
+    try:
+        async with lock:
+            return await _journaled_post_locked(
+                client, url, job_id=job_id, fingerprint=fingerprint, provider=provider,
+                remote_side_effect=remote_side_effect, json=json, params=params, headers=headers)
+    finally:
+        lock, users = loop_locks[key]
+        if users <= 1:
+            del loop_locks[key]
+        else:
+            loop_locks[key] = (lock, users - 1)
+
+
+async def _journaled_post_locked(
+    client: httpx.AsyncClient, url: str, *, job_id: int, fingerprint: str, provider: str,
+    remote_side_effect: bool, json: Any, params: Mapping[str, Any] | None,
+    headers: Mapping[str, str] | None,
+) -> httpx.Response:
+    call_id, cached = _claim(job_id, fingerprint, provider, url, remote_side_effect)
+    if cached is not None:
+        return cached
+    try:
+        response = await client.post(url, json=json, params=params, headers=headers)
+    except BaseException as exc:
+        not_sent = isinstance(exc, _NOT_SENT_ERRORS)
+        error_code = f"{_NOT_SENT_PREFIX}{type(exc).__name__}" if not_sent else type(exc).__name__
         try:
-            response = await client.post(url, json=json, params=params, headers=headers)
-        except BaseException as exc:
-            try:
-                _finish(call_id, "unknown" if remote_side_effect else "failed", error_code=type(exc).__name__)
-            except Exception:
-                if remote_side_effect:
-                    raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE) from exc
-                raise
+            _finish(call_id, "unknown" if remote_side_effect and not not_sent else "failed",
+                    error_code=error_code)
+        except Exception:
             if remote_side_effect:
                 raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE) from exc
             raise
-        if remote_side_effect and (response.status_code == 408 or response.status_code >= 500):
-            _finish(call_id, "unknown", error_code=f"http_{response.status_code}")
-            raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE)
-        try:
-            _finish(call_id, "failed" if response.status_code >= 400 else "succeeded", response=response)
-        except Exception as exc:
-            if remote_side_effect:
-                raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE) from exc
-            raise
-        return response
+        if remote_side_effect and not not_sent:
+            raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE) from exc
+        raise
+    if remote_side_effect and (response.status_code == 408 or response.status_code >= 500):
+        _finish(call_id, "unknown", error_code=f"http_{response.status_code}")
+        raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE)
+    try:
+        _finish(call_id, "failed" if response.status_code >= 400 else "succeeded", response=response)
+    except Exception as exc:
+        if remote_side_effect:
+            raise ExternalOutcomeUnknown(_UNKNOWN_MESSAGE) from exc
+        raise
+    return response

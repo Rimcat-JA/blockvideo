@@ -199,27 +199,81 @@ async def test_voicevox_adapter_can_retry_known_local_server_failure(temp_storag
 
 
 @pytest.mark.asyncio
-async def test_nonlocal_voicevox_timeout_is_conservatively_unknown(temp_storage) -> None:
+async def test_nonlocal_voicevox_failure_stays_retryable(temp_storage) -> None:
+    # Docker's host gateway and LAN engines are still the user's own free engine.
     calls = 0
 
     def send(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        raise httpx.ReadTimeout("synthetic remote voice timeout", request=request)
+        if calls == 1:
+            raise httpx.ReadTimeout("synthetic remote voice timeout", request=request)
+        return httpx.Response(200, content=b"RIFF-synthetic")
 
-    voice = VoicevoxClient("https://synthetic.invalid/voice")
+    voice = VoicevoxClient("http://host.docker.internal:50021")
     await voice._client.aclose()
     voice._client = httpx.AsyncClient(transport=httpx.MockTransport(send))
     try:
         with job_call_context(115):
-            for _ in range(2):
-                with pytest.raises(ExternalOutcomeUnknown):
-                    await voice.synthesis({"synthetic": 1}, 1)
+            with pytest.raises(ProviderError):
+                await voice.synthesis({"synthetic": 1}, 1)
+            assert await voice.synthesis({"synthetic": 1}, 1) == b"RIFF-synthetic"
     finally:
         await voice.aclose()
-    assert calls == 1
+    assert calls == 2
     with get_session_factory()() as db:
-        assert has_unresolved_calls(db, 115)
+        assert not has_unresolved_calls(db, 115)
+        assert db.scalar(select(ExternalCall)).remote_side_effect is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol])
+async def test_remote_failure_before_sending_is_failed_and_retryable(temp_storage, error) -> None:
+    calls = 0
+
+    def send(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error("synthetic endpoint down", request=request)
+        return httpx.Response(200, json={"answer": "sent"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(send)) as client:
+        with job_call_context(116):
+            with pytest.raises(error):
+                await journaled_post(client, URL, provider="chat", json=PAYLOAD)
+            with get_session_factory()() as db:
+                call = db.scalar(select(ExternalCall))
+                assert call.status == "failed"
+                assert call.error_code == f"not_sent:{error.__name__}"
+                assert not has_unresolved_calls(db, 116)
+            response = await journaled_post(client, URL, provider="chat", json=PAYLOAD)
+    assert response.json() == {"answer": "sent"}
+    assert calls == 2
+    with get_session_factory()() as db:
+        call = db.scalar(select(ExternalCall))
+        assert (call.status, call.attempts) == ("succeeded", 2)
+
+
+@pytest.mark.asyncio
+async def test_journal_locks_are_dropped_after_use(temp_storage) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(200, text="ok"))) as client:
+        with job_call_context(117):
+            await asyncio.gather(*(journaled_post(client, URL, provider="chat", json=PAYLOAD)
+                                   for _ in range(3)))
+    assert external_calls._locks.get(asyncio.get_running_loop(), {}) == {}
+
+
+def test_clear_call_bodies_keeps_rows_and_status(temp_storage) -> None:
+    with get_session_factory()() as db, atomic_write(db):
+        db.add(ExternalCall(job_id=118, fingerprint="f", provider="chat", endpoint=URL,
+                            remote_side_effect=True, status="succeeded", response_status=200,
+                            response_body=b"cached", response_content_type="text/plain"))
+    with get_session_factory()() as db, atomic_write(db):
+        external_calls.clear_call_bodies(db, 118)
+    with get_session_factory()() as db:
+        call = db.scalar(select(ExternalCall))
+        assert (call.status, call.response_status, call.response_body) == ("succeeded", 200, None)
 
 
 @pytest.mark.asyncio
@@ -367,3 +421,26 @@ def test_voicevox_speaker_zero_is_preserved_instead_of_global_fallback(temp_stor
         db.commit()
         settings = build_voicevox_settings(project, Settings(voicevox_speaker_id=3))
         assert settings.speaker_id == 0
+
+
+@pytest.mark.asyncio
+async def test_planner_retry_sends_a_distinct_request_inside_a_job(temp_storage) -> None:
+    replies = iter([{"choices": [{"message": {"content": "not json"}}]},
+                    {"choices": [{"message": {"content": "{\"nodes\": []}"}}]}])
+    bodies: list[bytes] = []
+
+    def send(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        return httpx.Response(200, json=next(replies))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(send))
+    provider = OpenAICompatibleProvider("synthetic-secret", "https://synthetic.invalid", "test", client=client)
+    try:
+        with job_call_context(119):
+            data = await visual_planner._design_diagram(
+                provider, kind="pointer_diagram", schema={}, block_index=0,
+                tts_text="synthetic", source_text="synthetic", heading="test")
+    finally:
+        await provider.aclose()
+    assert data == {"nodes": []}
+    assert len(bodies) == 2 and bodies[0] != bodies[1]

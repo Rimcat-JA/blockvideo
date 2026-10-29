@@ -157,7 +157,9 @@ def main() -> int:
     print(f"  -> job_id={job.get('id')} stage={job.get('current_stage')}")
 
     print("[demo] polling project status...")
-    final = _wait_for_status(project_id, target={"completed", "failed"}, timeout=TIMEOUT_SEC)
+    # Every terminal status ends the wait; only "completed" is a successful demo.
+    final = _wait_for_status(project_id, target={"completed", "failed", "cancelled", "unknown"},
+                             timeout=TIMEOUT_SEC)
 
     print("[demo] listing blocks:")
     status_code, blocks = _request("GET", f"/api/projects/{project_id}/blocks")
@@ -176,6 +178,9 @@ def main() -> int:
     if out_sub:
         print(f"  ass    -> {out_sub}")
     print(f"  download endpoint -> {API_BASE}/api/projects/{project_id}/download")
+    if final.get("status") != "completed" or not out_video:
+        print(f"[demo] project ended as {final.get('status')}: {final.get('error_message')}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -63,6 +63,9 @@ class _LanguageRoute(APIRoute):
                 if _contains_invalid_text(payload):
                     raise HTTPException(status_code=422, detail=_INVALID_REQUEST_DETAIL)
                 return await handler(request)
+            except RecursionError:
+                # Absurdly nested JSON exhausts the parser or the text checks.
+                raise HTTPException(status_code=422, detail=_INVALID_REQUEST_DETAIL) from None
             except RequestValidationError:
                 raise HTTPException(status_code=422, detail=_INVALID_REQUEST_DETAIL) from None
 

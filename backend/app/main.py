@@ -15,7 +15,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -29,6 +29,7 @@ from app.api.routes_operations import router as operations_router
 from app.api.routes_projects import router as projects_router
 from app.api.routes_startup import router as startup_router
 from app.core.config import get_settings
+from app.core.security import cross_site_request, host_allowed
 from app.core.logging import configure_logging, log
 from app.core.access_logging import protect_access_logs
 from app.core.startup_status import (
@@ -165,6 +166,22 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         # Do not include docs URLs in production-style defaults; keep them for MVP.
     )
+
+    @app.middleware("http")
+    async def _local_browser_guard(request: Request, call_next):
+        """Refuse DNS-rebinding hosts and cross-site browser requests."""
+        if not host_allowed(request.headers.get("host"), settings.allowed_hosts):
+            return JSONResponse(status_code=400, content={"detail": {
+                "reason_code": "host_not_allowed",
+                "message": "許可されていないホスト名です。ALLOWED_HOSTS を確認してください。"}})
+        if request.url.path.startswith("/api") and cross_site_request(
+            request.headers.get("origin"), request.headers.get("sec-fetch-site"), settings.cors_origins
+        ):
+            return JSONResponse(status_code=403, content={"detail": {
+                "reason_code": "cross_site_request",
+                "message": "他のサイトからの操作は受け付けていません。"}})
+        return await call_next(request)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

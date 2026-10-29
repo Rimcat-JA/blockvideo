@@ -22,6 +22,7 @@ from evaluation.corpus import load_cases
 from evaluation.unlabeled_contracts import MAX_REVISION, UnlabeledTrialCase, canonical_case_sha256
 from evaluation.scripts import evaluation_trial_host as trial_host
 from evaluation.scripts.evaluation_trial_host import run_trial_host
+from tests.private_inputs import private_corpus
 from tests.d37_pinned_support import PINNED_D35, build_verified_index, source_hashes, verified_archive
 
 
@@ -1959,7 +1960,7 @@ def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> Non
 
 
 def test_d24_d029_shaped_switch_replays_original_target_end_to_end(tmp_path: Path) -> None:
-    cases = load_cases(Path(__file__).parents[2] / "evaluation/d24/development.jsonl")
+    cases = load_cases(private_corpus("evaluation/d24/development.jsonl"))
     source = next(case for case in cases if case.case_id == "D24-D029")
     case = source.model_copy(
         update={"case_id": "D24-H029", "group_id": "D24-HG03", "split": "held_out"}

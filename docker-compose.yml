@@ -23,6 +23,8 @@ services:
       API_PORT: "8000"
       VOICEVOX_URL: ${VOICEVOX_URL:-http://host.docker.internal:50021}
       CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173"]'
+      # The frontend container's dev proxy reaches the API as "backend".
+      ALLOWED_HOSTS: '["localhost","127.0.0.1","::1","backend"]'
     ports:
       # The API has no authentication: publish it on the loopback interface only.
       - "127.0.0.1:8000:8000"

@@ -1,5 +1,5 @@
 /** Route-level quick workflow: paste a script, queue it, and watch progress. */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Layout } from '@/components/Layout';
 import { ProgressBar } from '@/components/ProgressBar';
@@ -9,7 +9,7 @@ import type { QuickCreateInput } from '@/lib/types';
 
 /** Fields the server fills from VOICEVOX_* / NARRATION_* when the request omits them. */
 const SERVER_DEFAULTED = ['voicevox_speaker_id', 'voicevox_speed_scale', 'narration_sentence_pause_seconds'] as const;
-import { useLiveProject, useQuickCreate } from '@/api/hooks';
+import { useLiveProject, useProjectDefaults, useQuickCreate } from '@/api/hooks';
 import { qualitySettingsSchema } from '@/lib/validation';
 
 const STAGE_LABELS: Record<string, string> = {
@@ -30,7 +30,24 @@ const STAGE_LABELS: Record<string, string> = {
  */
 export function QuickGeneratePage() {
   const [script, setScript] = useState('');
-  const [pacing, setPacing] = useState<Pacing>(DEFAULT_PACING);
+  // Only what the user changed; everything else shows the server's defaults.
+  const [changes, setChanges] = useState<Partial<Pacing>>({});
+  const serverDefaults = useProjectDefaults().data;
+  const defaults = useMemo<Pacing>(() => (serverDefaults ? {
+    ...DEFAULT_PACING,
+    voicevox_speaker_id: serverDefaults.voicevox_speaker_id,
+    voicevox_speed_scale: serverDefaults.voicevox_speed_scale,
+    narration_sentence_pause_seconds: serverDefaults.narration_sentence_pause_seconds,
+  } : DEFAULT_PACING), [serverDefaults]);
+  const pacing: Pacing = { ...defaults, ...changes };
+  const setPacing = (next: Pacing) => {
+    if (next === defaults) {
+      setChanges({});
+      return;
+    }
+    const changed = (Object.keys(next) as Array<keyof Pacing>).filter((key) => next[key] !== pacing[key]);
+    setChanges((previous) => ({ ...previous, ...Object.fromEntries(changed.map((key) => [key, next[key]])) }));
+  };
   const [projectId, setProjectId] = useState<number | null>(null);
   const quick = useQuickCreate();
   const { data: project } = useLiveProject(projectId);
@@ -41,10 +58,11 @@ export function QuickGeneratePage() {
 
   const start = () => {
     if (!script.trim() || !qualityValid) return;
-    // Untouched speaker/speed/pause defer to the server's .env defaults.
+    // Untouched speaker/speed/pause defer to the server's .env defaults; a
+    // value the user picked is sent even when it equals a built-in default.
     const body: QuickCreateInput = { source_script: script, ...pacing };
     for (const field of SERVER_DEFAULTED) {
-      if (pacing[field] === DEFAULT_PACING[field]) delete body[field];
+      if (!(field in changes)) delete body[field];
     }
     quick.mutate(
       body,
@@ -82,7 +100,7 @@ export function QuickGeneratePage() {
             onChange={(e) => setScript(e.target.value)}
             disabled={quick.isPending}
           />
-          <PacingSettings value={pacing} onChange={setPacing} disabled={quick.isPending} />
+          <PacingSettings value={pacing} onChange={setPacing} defaults={defaults} disabled={quick.isPending} />
           <div className="flex items-center gap-4">
             <button
               className="btn-primary px-6 py-3 text-base disabled:cursor-not-allowed disabled:opacity-50"

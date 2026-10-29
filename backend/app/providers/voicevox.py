@@ -12,9 +12,7 @@ Imports:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from ipaddress import ip_address
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -98,11 +96,11 @@ class VoicevoxClient:
 
         """
         self.base_url = base_url.rstrip("/")
-        host = urlsplit(base_url).hostname or ""
-        try:
-            self._local_computation = ip_address(host).is_loopback
-        except ValueError:
-            self._local_computation = host.lower() == "localhost"
+        # VOICEVOX is a free, deterministic engine the user runs themselves, on
+        # this machine, in Docker's host gateway or on the LAN. Replaying a
+        # request has no billed or external effect, so calls are always journaled
+        # as local computation and stay retryable whatever the host is.
+        self._local_computation = True
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def aclose(self) -> None:

@@ -17,7 +17,9 @@ from app.retrieval.reader import load_index
 from app.retrieval.serialization import RetrievalError, decode, read_bytes
 from app.retrieval.sources import DEFAULT_CATALOG, DEFAULT_SCOPE, load_sources
 
-DEFAULT_PROFILE = Path(__file__).resolve().parents[1] / "app/retrieval/nomic-profile.json"
+# Same default as the server (LANGUAGE_RETRIEVAL_PROFILE); an index built with
+# another profile is rejected at load time as embedding_profile_mismatch.
+DEFAULT_PROFILE = Path(__file__).resolve().parents[1] / "app/retrieval/e5-profile.json"
 
 
 def weights_digest(path: Path) -> str:

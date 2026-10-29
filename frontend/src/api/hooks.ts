@@ -143,6 +143,16 @@ export function useRegenerateBlockAudio(projectId: number) {
   });
 }
 
+export function useProjectDefaults() {
+  /** Fetch the server's VOICEVOX/pause defaults once; forms fall back to constants. */
+  return useQuery({
+    queryKey: ['project-defaults'],
+    queryFn: () => api.projectDefaults(),
+    staleTime: Infinity,
+    retry: 0,
+  });
+}
+
 export function useSpeakers(url?: string) {
   /** Fetch speaker choices for the VOICEVOX settings controls. */
   return useQuery({

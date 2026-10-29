@@ -58,8 +58,26 @@ def test_horizontal_rule_is_removed() -> None:
 
 def test_code_placeholder_tokens_are_removed() -> None:
     for token in ("〔コード1〕", "コード12", "〔 コード 3 〕"):
-        out = sanitize_for_narration(f"ここで{token}を見てください。")
+        out = sanitize_for_narration(f"ここで{token}を見てください。", code_count=12)
         assert "コード" not in out.replace("ここで", "").replace("を見てください。", "")
+
+
+def test_prose_mentioning_codes_is_kept() -> None:
+    for text in ("ステータスコード404を返します。", "文字コード8ビットです。", "エラーコード 404 です。"):
+        assert sanitize_for_narration(text, code_count=1) == text
+    assert sanitize_for_narration("このコード1行で終わります。") == "このコード1行で終わります。"
+    # A bare number beyond the issued placeholders is prose, not a token.
+    assert sanitize_for_narration("ここでコード12を見ます。", code_count=2) == "ここでコード12を見ます。"
+    assert sanitize_for_narration("ここでコード1を見ます。") == "ここでコード1を見ます。"
+
+
+def test_operators_and_ranges_are_kept() -> None:
+    assert sanitize_for_narration("x >= 10 のとき") == "x >= 10 のとき"
+    assert sanitize_for_narration("n > 0 なら") == "n > 0 なら"
+    assert sanitize_for_narration("2 * 3 は 6") == "2 * 3 は 6"
+    assert sanitize_for_narration("3~5分かかります。") == "3から5分かかります。"
+    assert sanitize_for_narration("これは**重要**で_強調_です。") == "これは重要で強調です。"
+    assert sanitize_for_narration("前の文。 > 引用です。") == "前の文。 引用です。"
 
 
 def test_whitespace_is_collapsed() -> None:

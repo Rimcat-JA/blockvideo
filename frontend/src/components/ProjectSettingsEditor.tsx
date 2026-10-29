@@ -44,7 +44,9 @@ export function ProjectSettingsEditor({ project, disabled, onSave }: {
       <h2 className="text-base font-semibold text-slate-800">現在の設定（版 {project.revision}）</h2>
       <p className="mt-1 text-sm text-slate-500">保存すると設定の履歴が残ります。動画へ反映するには、保存後に生成を開始してください。</p>
       {changed.length > 0 && <p className="mt-2 text-sm text-amber-700" role="status">未保存の変更があります。生成に使うには、先に「設定を保存」を押してください。</p>}
-      <form className="mt-4" onSubmit={(event) => {
+      {/* The zod schema checks ranges; browser step checks would block saving
+          values stored through other paths (e.g. intonation 1.25). */}
+      <form className="mt-4" noValidate onSubmit={(event) => {
         event.preventDefault();
         if (disabled || incomplete || !validation.success || !changed.length) return;
         onSave(Object.fromEntries(changed));
