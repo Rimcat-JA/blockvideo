@@ -560,6 +560,33 @@ def render_verbatim_slide(
     _compose(content, width, height, title, caption).save(output_path)
 
 
+# Below the 12px floor the layer is drawn larger and scaled down; past this
+# factor the glyphs are illegible anyway, and the full-size RGBA layer of one
+# long data line in a long listing ran to gigabytes.
+_GRID_MAX_SHRINK = 3
+
+
+def _clip_grid(lines: list[str], columns: int, *, max_columns: int,
+               max_rows: int) -> tuple[list[str], int]:
+    """Cut a grid that cannot be legible at any size down to what can be."""
+    max_columns, max_rows = max(2, max_columns), max(2, max_rows)
+    if len(lines) > max_rows:
+        lines = [*lines[:max_rows - 1], "⋮"]
+    if columns > max_columns:
+        clipped = []
+        for line in lines:
+            used, kept = 0, []
+            for ch in line:
+                used += _cells(ch)
+                if used > max_columns - 1:
+                    kept.append("…")
+                    break
+                kept.append(ch)
+            clipped.append("".join(kept))
+        lines = clipped
+    return lines, max(sum(_cells(ch) for ch in line) for line in lines) or 1
+
+
 def render_grid_content(lines: list[str], max_width: int, max_height: int, *,
                         focus_text: str | None = None, foreground=INK,
                         highlight=ACCENT_SOFT, focus_source: str | None = None) -> Image.Image:
@@ -588,6 +615,9 @@ def render_grid_content(lines: list[str], max_width: int, max_height: int, *,
         mono = _load(_GRID_MONO, 12)
         cell_w = mono.getlength("0") or 7
         pitch = sum(mono.getmetrics())
+        lines, columns = _clip_grid(lines, columns,
+                                    max_columns=int(max_width * _GRID_MAX_SHRINK / cell_w),
+                                    max_rows=int(max_height * _GRID_MAX_SHRINK / pitch))
 
     # Sized so one full-width glyph spans exactly two cells, keeping Japanese
     # labels on the same grid as the box-drawing around them.

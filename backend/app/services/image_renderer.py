@@ -14,6 +14,7 @@ Imports:
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -364,7 +365,7 @@ def render_diagram(
         ``RenderResult`` for either the Mermaid or fallback PNG.
 
     Side Effects:
-        May create a temporary PNG, invoke ``mmdc``/``npx``, log a warning on
+        May create a temporary PNG, invoke ``mmdc``, log a warning on
         failure, and write the final PNG.
 
     """
@@ -375,7 +376,11 @@ def render_diagram(
         # mmdc sizes the canvas to the graph, so -w/-H only cap it. Render
         # oversized, then compose onto the real frame: that keeps the result
         # crisp instead of blur-upscaling a 613x181 PNG to fill 1920x880.
-        tmp_png = Path(tempfile.mkstemp(suffix=".png")[1])
+        # Close mkstemp's descriptor: on Windows an open handle makes the
+        # unlink in ``finally`` fail, leaking the handle and the PNG.
+        descriptor, tmp_name = tempfile.mkstemp(suffix=".png")
+        os.close(descriptor)
+        tmp_png = Path(tmp_name)
         try:
             render_mermaid_to_png_sync(
                 source,

@@ -8,7 +8,7 @@ When ``mmdc`` is unavailable or rendering fails, callers should fall back to
 the built-in PIL diagram renderer in :mod:`app.services.image_renderer`.
 
 Imports:
-    ``shutil`` checks ``mmdc``/``npx`` availability.
+    ``shutil`` checks ``mmdc`` availability.
     ``tempfile`` stores source outside shell arguments during rendering.
     Dataclasses/paths describe the result and destination.
     Configuration/logging modules resolve executables and record safe progress.
@@ -151,12 +151,10 @@ def render_mermaid_to_png_sync(
 
     exe = resolve_mmdc()
     if exe == "mmdc" and shutil.which("mmdc") is None:
-        npx = shutil.which("npx")
-        if npx is None:
-            raise RuntimeError("mmdc も npx も見つかりません")
-        base_argv: list[str] = [npx, "--yes", "mmdc"]
-    else:
-        base_argv = [exe]
+        # No `npx --yes mmdc` fallback: that resolves the unrelated npm
+        # package literally named "mmdc" and runs it unpinned, unprompted.
+        raise RuntimeError("mmdc が見つかりません")
+    base_argv = [exe]
 
     settings = get_settings()
     puppeteer_config = settings.mermaid_puppeteer_config

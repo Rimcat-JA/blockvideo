@@ -21,6 +21,7 @@ from app.models.project import Project
 from app.models.job import GenerationJob
 from app.models.block import BlockStatus
 from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse
+from app.services.stage_schemas import VisualPlan
 from app.services.job_views import build_recovery_contexts, job_summary
 from app.services.transactions import begin_write
 from app.workers.job_runner import (
@@ -35,6 +36,12 @@ router = APIRouter(prefix="/blocks")
 
 # Plan fields the renderers read as text; another type would crash them.
 _PLAN_TEXT_FIELDS = ("heading", "visual_summary", "code", "verbatim", "language", "formula", "diagram")
+# Hand edits get the same caps as a generated plan; an unbounded code or
+# verbatim listing made the slide renderer allocate gigabytes.
+_PLAN_TEXT_LIMITS = {
+    field: next(m.max_length for m in VisualPlan.model_fields[field].metadata if hasattr(m, "max_length"))
+    for field in _PLAN_TEXT_FIELDS
+}
 
 
 @router.get("/{block_id}", response_model=BlockSummary)
@@ -103,6 +110,9 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
         for field in _PLAN_TEXT_FIELDS:
             if plan.get(field) is not None and not isinstance(plan[field], str):
                 raise HTTPException(status_code=422, detail=f"visual_plan.{field} must be a string or null")
+            if plan.get(field) is not None and len(plan[field]) > _PLAN_TEXT_LIMITS[field]:
+                raise HTTPException(status_code=422,
+                                    detail=f"visual_plan.{field} must be at most {_PLAN_TEXT_LIMITS[field]} characters")
         try:
             # NaN/Infinity would be stored, then fail every later generation.
             json.dumps(plan, allow_nan=False)
