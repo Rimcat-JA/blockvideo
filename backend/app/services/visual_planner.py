@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from dataclasses import replace
 
 from pydantic import ValidationError
 
@@ -167,6 +168,24 @@ ENV_DIAGRAM_SCHEMA = {
     "additionalProperties": False,
 }
 
+
+
+_RETRY_CORRECTION = (
+    "前回の出力は JSON として解析できないか、指定のスキーマに合いませんでした。"
+    "スキーマに従った JSON オブジェクトのみを出力してください。"
+)
+
+
+def _attempt_request(request: LLMRequest, attempt: int) -> LLMRequest:
+    """Return the request for one attempt; a retry adds a correction.
+
+    Inside a job, an identical request replays the journaled first reply, so a
+    retry has to differ from the first attempt to reach the model again.
+    """
+    if attempt == 1:
+        return request
+    return replace(request, messages=[*request.messages,
+                                      LLMMessage(role="user", content=_RETRY_CORRECTION)])
 
 async def generate_global_style(
     provider: LLMProvider, *, project_title: str
@@ -687,7 +706,7 @@ async def _design_diagram(
     )
     for attempt in (1, 2):
         try:
-            data = await provider.chat_json(request)
+            data = await provider.chat_json(_attempt_request(request, attempt))
         except ExternalOutcomeUnknown:
             raise
         except Exception as exc:  # noqa: BLE001 - downgraded by the caller's guard
@@ -784,7 +803,7 @@ async def generate_visual_plan(
     last_exc: Exception | None = None
     for attempt in (1, 2):
         try:
-            data = await provider.chat_json(request)
+            data = await provider.chat_json(_attempt_request(request, attempt))
             payload = VisualPlanPayload.model_validate(_normalize_plan_payload(data))
             break
         except (ValidationError, json.JSONDecodeError, TypeError) as exc:

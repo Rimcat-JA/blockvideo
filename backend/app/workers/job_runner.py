@@ -25,7 +25,12 @@ from app.db import get_session_factory
 from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project, ProjectStatus
 from app.services.pipeline import run_generation_job
-from app.services.external_calls import ExternalOutcomeUnknown, has_unresolved_calls, job_call_context
+from app.services.external_calls import (
+    ExternalOutcomeUnknown,
+    clear_call_bodies,
+    has_unresolved_calls,
+    job_call_context,
+)
 from app.services.generation_snapshots import GenerationCancelled
 from app.services.job_control import cancel_job
 
@@ -144,6 +149,8 @@ class JobRegistry:
                     job = db.get(GenerationJob, job_id)
                     if job is None or job.status == JobStatus.completed:
                         # Publication has already committed success; a later cancel loses.
+                        if job is not None:
+                            clear_call_bodies(db, job_id)
                         return
                     if has_unresolved_calls(db, job_id):
                         outcome = JobStatus.unknown
@@ -153,6 +160,9 @@ class JobRegistry:
                     job.status = outcome
                     job.finished_at = datetime.now(timezone.utc)
                     job.error_message = message
+                    if outcome != JobStatus.unknown:
+                        # Cached replies only serve resuming this job; retries are new jobs.
+                        clear_call_bodies(db, job_id)
                     if outcome == JobStatus.completed:
                         job.progress = 1.0
                     project = db.get(Project, job.project_id)
