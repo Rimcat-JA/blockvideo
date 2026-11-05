@@ -178,15 +178,15 @@ class HairSettings:
 @dataclass
 class ContourSettings:
     enabled: bool = flag(True, "シェーディング・ハイライトを使う")
-    shading_color: str = color("#9A7563", "シェーディングの色")
-    shading: float = num(0.15, 0.0, 1.0, "シェーディングの濃さ", help="影を入れて小顔・立体的に見せます")
+    shading_color: str = color("#A0745F", "シェーディングの色")
+    shading: float = num(0.4, 0.0, 1.0, "シェーディングの濃さ", help="影を入れて小顔・立体的に見せます")
     jawline: float = num(0.6, 0.0, 1.0, "フェイスライン", help="あごから耳にかけての影（シェーディング全体の中での割合）")
     cheek_hollow: float = num(0.5, 0.0, 1.0, "頬骨の下", help="頬骨の下のくぼみの影")
-    nose_shadow: float = num(0.4, 0.0, 1.0, "ノーズシャドウ", help="鼻筋の両側の影")
-    forehead: float = num(0.3, 0.0, 1.0, "おでこの生え際", help="生え際の影でおでこを小さく見せます")
+    nose_shadow: float = num(0.5, 0.0, 1.0, "ノーズシャドウ", help="鼻の付け根から鼻筋の両側に入れる影")
+    forehead: float = num(0.5, 0.0, 1.0, "おでこの生え際", help="生え際（前髪の際）に沿った影でおでこを小さく見せます。髪・肌の検出が動いているときだけ効きます")
     highlight_color: str = color("#FFF4EA", "ハイライトの色")
-    highlight: float = num(0.15, 0.0, 1.0, "ハイライトの強さ", help="光を入れて立体感とツヤを出します")
-    nose_bridge: float = num(0.6, 0.0, 1.0, "鼻筋", help="鼻筋のハイライト（ハイライト全体の中での割合）")
+    highlight: float = num(0.4, 0.0, 1.0, "ハイライトの強さ", help="光を入れて立体感とツヤを出します。白飛びしないよう、もともと明るい肌では控えめにかかります")
+    nose_bridge: float = num(0.6, 0.0, 1.0, "鼻筋", help="鼻筋と、眉間からおでこへのハイライト（ハイライト全体の中での割合）")
     cheekbone: float = num(0.6, 0.0, 1.0, "頬骨の上")
     chin: float = num(0.4, 0.0, 1.0, "あご先")
     cupids_bow: float = num(0.3, 0.0, 1.0, "唇の山", help="上唇の山の上の小さなハイライト")
@@ -196,9 +196,9 @@ class ContourSettings:
 @dataclass
 class TearbagSettings:
     enabled: bool = flag(True, "涙袋を使う")
-    strength: float = num(0.2, 0.0, 1.0, "ぷっくり感", help="下まつげのすぐ下に光を入れて、ふくらみを作ります")
+    strength: float = num(0.4, 0.0, 1.0, "ぷっくり感", help="下まつげのすぐ下を肌色のまま明るくして、ふくらみを作ります")
     width: float = num(0.5, 0.0, 1.0, "幅", help="目頭から目尻のどこまで入れるか")
-    shadow: float = num(0.3, 0.0, 1.0, "下の影", help="ふくらみの下の細い影（ぷっくり感の中での割合）")
+    shadow: float = num(0.4, 0.0, 1.0, "下の影", help="ふくらみの下のやわらかい影（ぷっくり感の中での割合）")
     softness: float = num(0.6, 0.0, 1.0, "ぼかし")
 
 
@@ -214,26 +214,26 @@ class TeethSettings:
 @dataclass
 class ReshapeSettings:
     enabled: bool = flag(True, "顔の形の補正を使う")
-    face_slim: float = num(0.0, -1.0, 1.0, "小顔（輪郭）", help="プラスで輪郭をすっきり、マイナスでふっくら")
-    jaw: float = num(0.0, -1.0, 1.0, "エラ", help="プラスでエラを目立たなくします")
+    face_slim: float = num(0.0, -1.0, 1.0, "小顔（輪郭）", help="プラスで頬からあごの輪郭をすっきり、マイナスでふっくら。こめかみから上は動きません")
+    jaw: float = num(0.0, -1.0, 1.0, "エラをすっきり", help="プラスでエラを目立たなくします。マイナスで張りを出します")
     chin_length: float = num(0.0, -1.0, 1.0, "あごの長さ", help="プラスで長く、マイナスで短く")
     eye_size: float = num(0.0, -1.0, 1.0, "目の大きさ", help="プラスで大きく")
-    nose_width: float = num(0.0, -1.0, 1.0, "小鼻の幅", help="プラスで小鼻を細く")
-    nose_length: float = num(0.0, -1.0, 1.0, "鼻の長さ", help="プラスで短く")
-    mouth_width: float = num(0.0, -1.0, 1.0, "口の大きさ", help="プラスで小さく")
-    mouth_corner: float = num(0.0, 0.0, 1.0, "口角アップ")
-    lip_fullness: float = num(0.0, -1.0, 1.0, "唇のふっくら感", help="プラスでふっくら")
+    nose_width: float = num(0.0, -1.0, 1.0, "小鼻を細く", help="プラスで細く、マイナスで広く")
+    nose_length: float = num(0.0, -1.0, 1.0, "鼻を短く", help="プラスで短く、マイナスで長く")
+    mouth_width: float = num(0.0, -1.0, 1.0, "口を小さく", help="プラスで小さく、マイナスで大きく。動くのは唇と口角だけで、歯の形は変わりません")
+    mouth_corner: float = num(0.0, 0.0, 1.0, "口角アップ", help="口角を少し上げます。歯の形は変わりません")
+    lip_fullness: float = num(0.0, -1.0, 1.0, "唇のふっくら感", help="プラスでふっくら、マイナスで薄く。歯に接する側の唇の線は動きません")
     brow_lift: float = num(0.0, -1.0, 1.0, "眉の位置", help="プラスで上げる")
-    protect_background: float = num(0.8, 0.0, 1.0, "背景のゆがみ防止", help="上げると顔の外（背景）が曲がりにくくなります")
+    protect_background: float = num(0.8, 0.0, 1.0, "背景のゆがみ防止", help="上げると顔の外（背景）が曲がりにくくなります。「背景を撮影」をしておくと、顔を細くしたぶんの背景もきれいに埋まります")
 
 
 @dataclass
 class HairShapeSettings:
     enabled: bool = flag(True, "髪型の補正を使う")
-    flyaway: float = num(0.3, 0.0, 1.0, "アホ毛消し", help="髪の輪郭から飛び出した細い毛を消します。「背景を撮影」をしておくときれいに消えます")
-    volume_top: float = num(0.0, -1.0, 1.0, "トップのボリューム", help="プラスでふんわり、マイナスでぺたんと")
-    width_sides: float = num(0.0, -1.0, 1.0, "横の広がり", help="マイナスで広がりを抑えます")
-    use_background_plate: bool = flag(True, "撮影した背景を使う", help="「背景を撮影」で撮った背景で、消した髪の部分を埋めます")
+    flyaway: float = num(0.3, 0.0, 1.0, "アホ毛消し", help="髪の輪郭から飛び出した細い毛を消します。「背景を撮影」をしておくと、どんな背景でもきれいに消えます。撮影なしでは無地の壁の前の細い毛が中心で、本棚など模様のある背景では効果が自動で弱まります")
+    volume_top: float = num(0.0, -1.0, 1.0, "トップのボリューム", help="プラスでふんわり、マイナスでぺたんと。マイナスは「背景を撮影」をしていないと、ごくわずかしか効きません")
+    width_sides: float = num(0.0, -1.0, 1.0, "横の広がり", help="プラスで広げ、マイナスで広がりを抑えます。マイナスは「背景を撮影」をしていないと、ごくわずかしか効きません。撮影なしでは、本棚など模様のある背景は髪の近くで少し一緒に動きます")
+    use_background_plate: bool = flag(True, "撮影した背景を使う", help="「背景を撮影」で撮った背景で、消した髪の部分を埋めます。カメラを少しでも動かしたり、部屋の物の配置や明るさが変わったりすると、自動で撮影なしの方法に切り替わります（撮り直すと戻ります）")
 
 
 # Order here is the order of tabs in the GUI.
@@ -327,7 +327,7 @@ class MakeupSettings:
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "MakeupSettings":
-        return cls.from_json(Path(path).read_text(encoding="utf-8"))
+        return cls.from_json(Path(path).read_text(encoding="utf-8-sig"))  # Windows Notepad may save with a BOM
 
 
 def _coerce(value: Any, f) -> Any:

@@ -10,6 +10,11 @@ about 100 ms in a small CI container), so ``Segmenter``
   masks, which are at most one model run old,
 * smooths the class probabilities over time (EMA) at model resolution and
   upsamples them to the full frame once per run.
+
+Everything of a run but its start (downscaling, model, smoothing, upsampling)
+happens on that thread: about 2 ms of a frame's budget that the camera loop does
+not spend. The thread holds on to the frame until then, so callers must not write
+into a frame they passed in.
 """
 
 from __future__ import annotations
@@ -80,10 +85,17 @@ class MediaPipeSegmenter:
 
 @dataclass(frozen=True)
 class _Job:
-    rgb: np.ndarray
+    frame_bgr: np.ndarray
     ts_ms: int
     generation: int
-    frame_shape: tuple[int, int]
+    ema: np.ndarray | None  # probabilities before this run
+
+
+@dataclass(frozen=True)
+class _Run:
+    job: _Job
+    ema: np.ndarray
+    masks: SegMasks
 
 
 def model_input(frame_bgr: np.ndarray, long_side: int) -> np.ndarray:
@@ -130,7 +142,7 @@ class Segmenter:
         self._interval = 1
         self.set_interval(interval)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="segmenter") if background else None
-        self._pending: tuple[_Job, Future[np.ndarray]] | None = None
+        self._pending: Future[_Run] | None = None
         self._generation = 0
         self._last_ts = -1
         self._last_update_ms: int | None = None
@@ -153,7 +165,7 @@ class Segmenter:
 
         On frames without a finished run this returns the previous masks
         (the very same arrays). Exceptions from a background run are raised
-        here, once.
+        here, once. ``frame_bgr`` must not be written to afterwards.
         """
         height, width = frame_bgr.shape[:2]
         if self._frame_shape != (height, width) or self._was_idle(int(ts_ms)):
@@ -163,12 +175,11 @@ class Segmenter:
         self._collect()
         if self._pending is None and self._is_due(frame_index):
             self._last_run_index = frame_index
-            rgb = model_input(frame_bgr, self._input_long_side)
-            job = _Job(rgb, self._next_timestamp(ts_ms), self._generation, (height, width))
+            job = _Job(frame_bgr, self._next_timestamp(ts_ms), self._generation, self._ema)
             if self._executor is None:
-                self._integrate(job, self._infer(job))
+                self._adopt(self._run(job))
             else:
-                self._pending = (job, self._executor.submit(self._infer, job))
+                self._pending = self._executor.submit(self._run, job)
         return self._masks
 
     def reset(self) -> None:
@@ -202,24 +213,22 @@ class Segmenter:
         self._last_ts = max(int(ts_ms), self._last_ts + 1)
         return self._last_ts
 
-    def _infer(self, job: _Job) -> np.ndarray:
-        """Model run -> (3, h, w) probabilities in SegMasks field order."""
-        masks = self._model.segment(job.rgb, job.ts_ms)
-        return np.stack([masks[HAIR], masks[FACE_SKIN], masks[BODY_SKIN]]).astype(np.float32, copy=False)
+    def _run(self, job: _Job) -> _Run:
+        """One model run and everything that follows from it. Touches no state of ``self``
+        that changes: this runs on the worker thread, while ``reset`` may be called."""
+        rgb = model_input(job.frame_bgr, self._input_long_side)
+        masks = self._model.segment(rgb, job.ts_ms)
+        probabilities = np.stack([masks[HAIR], masks[FACE_SKIN], masks[BODY_SKIN]]).astype(np.float32, copy=False)
+        ema = probabilities if job.ema is None else job.ema + self._ema_alpha * (probabilities - job.ema)
+        height, width = job.frame_bgr.shape[:2]
+        return _Run(job, ema, SegMasks(*(_full_frame_mask(p, width, height) for p in ema)))
 
     def _collect(self) -> None:
-        if self._pending is None or not self._pending[1].done():
+        if self._pending is None or not self._pending.done():
             return
-        job, future = self._pending
-        self._pending = None
-        self._integrate(job, future.result())
+        future, self._pending = self._pending, None
+        self._adopt(future.result())
 
-    def _integrate(self, job: _Job, probabilities: np.ndarray) -> None:
-        if job.generation != self._generation:
-            return
-        if self._ema is None:
-            self._ema = probabilities
-        else:
-            self._ema = self._ema + self._ema_alpha * (probabilities - self._ema)
-        height, width = job.frame_shape
-        self._masks = SegMasks(*(_full_frame_mask(p, width, height) for p in self._ema))
+    def _adopt(self, run: _Run) -> None:
+        if run.job.generation == self._generation:
+            self._ema, self._masks = run.ema, run.masks

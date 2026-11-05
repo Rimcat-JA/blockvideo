@@ -1,6 +1,6 @@
 # 開発の引き継ぎメモ（クラウド → ローカル）
 
-2026-11-05 時点。クラウドの Claude Code セッションで進めてきた開発を、ユーザーのローカル PC
+2026-11-05 時点（第2弾以降の状態は 2026-11-06 に更新）。クラウドの Claude Code セッションで進めてきた開発を、ユーザーのローカル PC
 （Windows、GPU は AMD RX 9070 XT）で続けるためのメモです。**ローカルの Claude は最初にこのメモを全部読んでください。**
 
 ---
@@ -41,8 +41,8 @@ Web カメラ映像にリアルタイムでメイク・補正をかけ、OBS の
 
 | ブランチ（Rimcat-JA/blockvideo） | 中身 |
 |---|---|
-| `claude/clever-mendel-cdh090` | **PR [Rimcat-JA/blockvideo#5](https://github.com/Rimcat-JA/blockvideo/pull/5)**。第1弾は完成・テスト 547 件成功。第2弾の**設定項目だけ**追加済み（エフェクト未登録なのでアプリの動作には影響なし） |
-| `claude/wip-phase2` | 上記＋**作業途中のファイル**（下の表）。テストが一部失敗する。**続きはここから** |
+| `claude/clever-mendel-cdh090` | **PR [Rimcat-JA/blockvideo#5](https://github.com/Rimcat-JA/blockvideo/pull/5)**。第1弾、第2弾、案A、録画ツール |
+| `claude/wip-phase2` | 作業に使ったブランチ。上記にマージ済み |
 
 ### 第1弾（完成・PR 済み）
 
@@ -53,20 +53,26 @@ Web カメラ映像にリアルタイムでメイク・補正をかけ、OBS の
 （GUI／`--headless`／`--image IN --out OUT --compare`／`--list-cameras`／`--download-models`）、
 起動スクリプト（`start_windows.bat` など）、日本語 README、ドキュメント
 （`docs/3d-model-commission-spec.md`、`docs/capture-guide.md`）。
-**実機（Web カメラ・OBS・Windows/macOS）では一度も動かしていない。**
 
-### 第2弾（途中で停止）
+### 第2弾と案A（完成）
 
-| 項目 | 状態 | 次にやること |
-|---|---|---|
-| 設定項目（config.py: contour / tearbag / teeth / reshape / hairshape）、`FrameContext.background` | ✅ PR 済み | — |
-| 歯 `effects/teeth.py` + `tests/test_effect_teeth.py` | 🟡 WIP ブランチ。テスト 26 件中 **2 件失敗**（`test_changes_stay_in_the_mouth_opening`, `test_close_up_faces_are_processed_at_reduced_resolution`） | 失敗を直す、CREMA-D の笑顔の動画で見た目と時間的な安定性を確認 |
-| 立体感・涙袋 `effects/contour.py`（ContourEffect / TearbagEffect） | 🟡 WIP ブランチ。**テストなし**。config の contour の初期値を 0.15 → 0.35 に上げた途中の状態 | テストを書く、初期値の自然さを見直す（濃い肌でも灰色に浮かないか） |
-| 顔の形 `effects/reshape.py` | ❌ 未着手 | 契約は `docs/dev/contract-phase2.md` の Special contracts |
-| 髪型① `effects/hairshape.py` + `background.py`（背景を撮影） | ❌ 未着手 | 同上。pipeline / runner / gui への最小限の追加も |
-| 統合（エフェクト登録、プリセット調整＋`strong.json`、プリセットの日本語表示名、13 タブの画面整理、高速化、README 更新） | ❌ 未着手 | `docs/dev/workflow-phase2.js` の Integrate の指示 |
-| 動画での品質確認（`--video` CLI、女性 11 人の動画、お辞儀、数値評価）と修正 | ❌ 未着手 | 同 Video QA / Fix |
-| 案A `makeup_cam/analyze.py` | ❌ 未着手（ファイルなし） | `docs/dev/workflow-plan-a.js` の指示（往復テストで精度を確認） |
+| 項目 | 状態 |
+|---|---|
+| 歯、立体感・涙袋、顔の形、髪型①（`effects/teeth.py`、`contour.py`、`reshape.py`、`hairshape.py`、`background.py`） | ✅ 登録済み |
+| 統合（登録、プリセット調整＋`strong.json`、日本語の表示名、左の一覧の設定画面、高速化、README） | ✅ |
+| 動画での品質確認（`--video`、女性 11 人 × 4 本、お辞儀、数値評価）と修正 | ✅ 最後の残りは下の「残っている問題」 |
+| 案A（`analyze.py`、`--from-photo`、「写真から作る」）、録画ツール（`makeup_cam.record`） | ✅ 実物のメイク写真・実カメラでは未確認 |
+
+テストは全部で 1806 件成功。
+
+### 残っている問題（2026-11-06 時点）
+
+- 濃い肌で polished の上下の唇の色が分かれ、大きく開けた口に赤い輪が見えることがある（軽減のみ）。
+- 下の歯の根元にごく弱いピンクが残るフレームがある。
+- `strong` は重い入力で 30 fps に届かない。OBS Virtual Camera を 1280×720 で読んだ実測（異なるフレームの数、480×360 の動画入力）は natural 27.7、polished 26.7、strong 24.0 fps。
+- 直線のある部屋で背景を撮影していないと、小顔の補正はほぼ効かない（線の曲がりを避けるために弱める仕様）。
+- シェーディング、チーク、アイシャドウ、涙袋の色の微調整は、本人の肌で確認してから決める。
+- 未確認：実物の Web カメラ、Zoom / Teams / Meet、人の手での GUI 操作、実物のお辞儀と手振り、実物のメイク写真。
 
 各エージェントへの詳しい技術的な指示（手法・注意点）は `docs/dev/workflow-phase2.js` と
 `docs/dev/workflow-plan-a.js` のプロンプトにそのまま残してある。設計の約束ごとは
@@ -92,15 +98,11 @@ python scripts/fetch_test_media.py
 - ワークフロー（複数エージェント）を使う場合、ローカルでは CPU 数に応じて同時実行数が増える
   （`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` で上書き可）。
 
-## 5. 最初にやると良いこと（おすすめの順番）
+## 5. 次にやること
 
-1. **実機で動かす**：`start_windows.bat` で起動し、ユーザーの Web カメラ・OBS Virtual Camera・Zoom で確認。
-   ここで見つかる問題（カメラ名・解像度・FPS・DirectShow/MSMF・OBS の仮想カメラ・高 DPI の画面など）を最優先で直す。
-   注意：Windows ではカメラ名が取れず「カメラ N」になるため、入力に OBS Virtual Camera を選ぶと映像がループする
-   （カメラ名の取得手段を追加したい）。
-2. 第2弾の残り（歯の失敗テスト → 立体感のテスト → 顔の形 → 髪型① → 統合 → 動画での品質確認 → 修正）。
-3. 案A（写真からプリセット）。完成後、CLI（`--from-photo` など）と GUI の「写真から作る」ボタンを追加。
-4. 録画ツール（台本を画面に出す。`docs/capture-guide.md` §5.2）→ 案B。
+1. **実機で動かす**：`start_windows.bat` で起動し、実物の Web カメラと Zoom で確認する。OBS Virtual Camera への出力は動画ファイルの入力で確認済み。
+2. 本人のメイク写真で案A を試す（`docs/capture-guide.md`）。
+3. 案B（学習モデルによる仕上げ）。
 
 ## 6. 既知の問題・メモ（第1弾のレポートより）
 
@@ -120,3 +122,21 @@ python scripts/fetch_test_media.py
 ユーザー本人の顔の写真・動画・3D モデルは、悪用されるとディープフェイクを作れてしまう。
 リポジトリ（公開）には絶対に入れず、暗号化したドライブに保存する（`docs/capture-guide.md` §7）。
 vast.ai などで学習する場合は Secure Cloud を使い、終わったらすぐ削除する。
+
+## 8. 顔追跡とフェードの仕組み（統合後の修正で追加）
+
+- **ランドマークの遅れ**: `tracking.FaceMotion` が前のフレームとの間の顔の動きを画像から測り（目尻や鼻などの疎なオプティカルフロー、シフト・回転・拡大だけ）、One Euro フィルタの状態をその分だけ動かしてから新しい値を入れます。モデル自身の遅れは `_MODEL_LAG_FRAMES` で補います。動きを測れないときは、フィルタだけの動作に戻ります。
+- **顔を見失ったとき**: `FaceTracker.coast()` が同じ動きで最後のランドマークを運びます。パイプラインはフェードの間それを使います。動きが分からず顔が速く動いていたら、その場でメイクを切ります（壁に残さないため）。見失った後は `STEADY_FRAMES` 回続けて見つかるまでフェードを上げません。
+- **プリセットの切り替え**: `glide_to_settings`（`SETTINGS_GLIDE_FRAMES` フレームで補間）。スライダーは今までどおり `set_settings`（すぐ反映）。補間の途中に来た変更は、どちらの呼び出しでも、今の絵のところから新しく補間します。
+- **numpy のスレッド**: `makeup_cam/__init__.py` が `OPENBLAS_NUM_THREADS=1` を入れます。numpy より先に `makeup_cam` を import する必要があります（`python -m makeup_cam` ならそうなります）。
+- **速く動く顔と髪のマスク**: 顔が 1 フレームに 0.03 × 顔スケールより速く動く間（と、その後 10 フレーム）は、`segmentation_interval` によらず毎フレームマスクを作ります。1 フレーム古いマスクだと、hair が壁に色を置くためです。
+
+## 9. 唇（統合後の修正で追加）
+
+- **歯の判定**（`lips._teeth_guard`）: 比べる相手は、上下それぞれの唇の外側の部分です（歯が入らない場所）。下の歯は小さくて暗く、Web カメラでは色がにじむので、明るさの差と赤みの差はどちらも低めの値にしてあります。赤みの差がとても大きければ、明るさが同じでも歯とみなします。
+- **唇の明るさ**（`_apply_lightness`）: 上下の唇を別々に口紅の明るさへ寄せます。全体で 1 つの量にすると、上唇が暗い顔で上下が別の色に分かれるためです。
+- **大きく開けた口**: 細く伸びた部分（`_thin_guard`）と暗い部分（`_shade_guard`）は色を減らし、赤い輪に見えないようにします。
+
+## 10. 背景撮影がないときの顔の補正（統合後の修正で追加）
+
+顔を細くすると、撮影した背景がないときは、あごの横の背景を引き伸ばすしかありません。`reshape._busy_room_share` があごの横（目の高さから顎まで）の背景の輪郭の量を測り、直線があるときだけ `face_slim` と `jaw` を弱めます（`_BUSY_ROOM_FLOOR`、下げるのに約 1.5 秒、戻すのに約 5 秒）。平らな壁では値が 0.005 以下、直線のある部屋では 0.025〜0.05 でした。他のスライダーには影響しません。

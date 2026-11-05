@@ -1,14 +1,16 @@
 """PySide6 settings window with a live preview.
 
 Layout: a top bar (camera, resolution, virtual camera, makeup off, compare),
-the preview on the left, presets plus one tab per settings section on the
-right (generated from ``config.section_fields()`` metadata), and a status bar.
+the preview on the left, and on the right the presets, the background capture
+and one page per settings section (generated from ``config.section_fields()``
+metadata) behind a grouped list. A status bar runs along the bottom.
 
 Threading: the camera runner calls ``on_frame`` / ``on_status`` on its worker
 thread. Those callbacks only hand the newest value to a ``LatestValueRelay``,
 which wakes the GUI thread through a queued Qt signal; values that arrive
 while the GUI is busy replace older ones, so stale frames are dropped. Widgets
-are only touched on the GUI thread.
+are only touched on the GUI thread. Background captures and photo analyses
+answer the same way; both take seconds, and the GUI thread never waits for them.
 
 ``MainWindow`` gets its runner from an injected factory and its camera list
 from an injected callable, so it can be tested offscreen with fakes; only
@@ -25,7 +27,7 @@ import re
 import signal
 import sys
 import threading
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
@@ -37,6 +39,8 @@ from PySide6.QtCore import (
     QByteArray,
     QEvent,
     QEventLoop,
+    QLibraryInfo,
+    QLocale,
     QObject,
     QRect,
     QRegularExpression,
@@ -44,6 +48,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QTranslator,
     Signal,
 )
 from PySide6.QtGui import (
@@ -54,21 +59,27 @@ from PySide6.QtGui import (
     QKeyEvent,
     QPainter,
     QPaintEvent,
+    QPalette,
     QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -78,7 +89,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
-    QTabWidget,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -100,6 +111,8 @@ from .presets import (
 )
 
 if TYPE_CHECKING:
+    from .analyze import AnalysisResult
+    from .background import PlateResult
     from .camera import CameraInfo
     from .pipeline import ProcessResult
     from .runner import RunnerStatus
@@ -113,6 +126,21 @@ AUTOSAVE_DELAY_MS = 1000
 RUNNER_STOP_DEADLINE_S = 2.0
 # How often Python gets the chance to run a Ctrl+C handler while Qt waits for events.
 SIGNAL_POLL_MS = 200
+# How long a window that was closed during a photo analysis waits for it: native code must not outlive Python.
+PHOTO_STOP_DEADLINE_S = 15.0
+CONSOLE_GONE_WAIT_S = 1.0  # less when the console window was closed: Windows gives the process about 5 s
+PLATE_MESSAGE_MS = 10000
+
+# The settings list. A section missing here still gets a page, under SECTION_OTHER_GROUP.
+SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("全体", ("general",)),
+    ("肌・立体感", ("skin", "contour", "blush")),
+    ("目元", ("eyeshadow", "tearbag", "eyeliner", "brows")),
+    ("口元", ("lips", "teeth")),
+    ("顔の形", ("reshape",)),
+    ("髪", ("hair", "hairshape")),
+)
+SECTION_OTHER_GROUP = "その他"
 
 FACE_HINT = "顔が見つかりません\nカメラの正面に顔が映るようにしてください"
 VIRTUAL_CAMERA_HELP = (
@@ -121,15 +149,53 @@ VIRTUAL_CAMERA_HELP = (
     "このウィンドウを閉じると仮想カメラも止まります。"
 )
 
+BACKGROUND_CAPTURE_HELP = (
+    "面接の前に撮影してください。撮影中の映像は相手にもそのまま映ります。\n"
+    "押すと数秒後に、誰も映っていない部屋を撮影します（カメラの前から離れてください）。"
+    "アホ毛消しと髪型・顔の形の補正で、背景をきれいに残すために使います。\n"
+    "カメラの角度を変えたら撮り直してください。"
+)
+BACKGROUND_CLEAR_HELP = "撮影した背景を、すべての解像度の分まとめて削除します"
+# What a saved background plate is called, see background.py.
+_PLATE_FILES = "background_*x*.png"
+
+PHOTO_TITLE = "写真から作る"
+PHOTO_HELP = (
+    "いつものメイクの写真から、同じ見た目になるプリセットを作ります。\n"
+    "解析中は映像がカクついたり一瞬止まったりするので、面接中は実行しないでください。写真はどこにも保存しません。"
+)
+PHOTO_BARE_ADVICE = (
+    "すっぴんの写真も、ぜひ入れてください。メイクの写真 1 枚だけでは、アイシャドウをほとんど測れず、"
+    "チーク・アイライナー・シェーディング・涙袋も測れないか、ごく一部しか測れません。"
+    "すっぴんの写真は、メイクの写真と同じ場所・同じ照明で撮ってください。"
+)
+PHOTO_TIPS = "きれいに測るコツ：前髪を上げて眉を見せる／メガネを外す／2 枚で構図と服もそろえる／正面を向いて無表情で撮る"
+PHOTO_NO_BARE_QUESTION = f"すっぴんの写真なしで作りますか？\n\n{PHOTO_BARE_ADVICE}"
+PHOTO_NOT_MEASURED = "測れなかった"
+PHOTO_NOTHING_MEASURED_TITLE = "写真から測れませんでした"
+PHOTO_NOTHING_MEASURED = (
+    "どの項目も測れなかったので、プリセットは保存していません。次のことを確かめて、撮り直してください。\n"
+    "・カラーの写真で、顔が白飛びしていないこと\n"
+    "・白黒やネガ、強い色のフィルタをかけていないこと\n"
+    "・前髪を上げて、メガネを外し、顔が手などで隠れていないこと"
+)
+_PHOTO_FILTER = "画像ファイル (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff);;すべてのファイル (*)"
+
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 _ERROR_COLOR = "#D32F2F"
 _OK_COLOR = "#2E7D32"
 _MODIFIED_COLOR = "#E65100"
+_CAMERA_NOT_FOUND = "カメラが見つかりませんでした。接続を確認して ↻ を押してください"
+# Camera menu items hold the device index as their data, and the device's real name under this role, if any.
+_DEVICE_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
 
 FrameCallback = Callable[["ProcessResult"], None]
 StatusCallback = Callable[["RunnerStatus"], None]
-# Called with the camera indices this app has open (listed without re-probing).
-CameraLister = Callable[[Collection[int]], "list[CameraInfo]"]
+# Called with what this app has open, as device names or else indices (listed without re-probing).
+CameraLister = Callable[[Collection[int] | Collection[str]], "list[CameraInfo]"]
+
+
+_SHAPE_HINT_MS = 10000
 
 
 class Runner(Protocol):
@@ -138,12 +204,21 @@ class Runner(Protocol):
     def start(self) -> None: ...
     def stop(self, timeout: float = 2.0) -> None: ...
     def set_settings(self, settings: MakeupSettings) -> None: ...
+    def glide_to_settings(self, settings: MakeupSettings) -> None: ...
     def set_bypass(self, bypass: bool) -> None: ...
-    def set_camera(self, index: int, width: int | None = None, height: int | None = None) -> None: ...
+    def set_camera(
+        self, index: int, width: int | None = None, height: int | None = None, name: str | None = None
+    ) -> None: ...
     def set_virtual_camera(self, enabled: bool) -> None: ...
+    @property
+    def has_background(self) -> bool: ...
+    def capture_background(self, on_done: Callable[[PlateResult], None]) -> None: ...
+    def clear_background(self) -> PlateResult: ...
 
 
 RunnerFactory = Callable[[FrameCallback, StatusCallback], Runner]
+# Called on a worker thread with the makeup photo, the bare photo and the preset to start from.
+PhotoAnalyzer = Callable[[Path, "Path | None", "MakeupSettings | None"], "AnalysisResult"]
 
 
 # --------------------------------------------------------------------------
@@ -197,6 +272,21 @@ def format_field_value(meta: dict[str, Any], value: Any) -> str:
     return str(value)
 
 
+def _placeholder_camera_name(index: int) -> str:
+    from .camera import default_camera_name
+
+    return default_camera_name(index)
+
+
+def _selected_row(entries: list[tuple[int, str, int, int]], index: int, name: str | None) -> int | None:
+    """The menu row of the selected camera: its name decides, because plugging in a camera renumbers the others."""
+    if name is None:
+        return next((row for row, entry in enumerate(entries) if entry[0] == index), None)
+    same_name = [row for row, entry in enumerate(entries) if entry[1] == name]
+    # Two identical cameras have the same name; only there does the index still say which one.
+    return next((row for row in same_name if entries[row][0] == index), same_name[0] if same_name else None)
+
+
 def stop_runner(runner: Runner, deadline_s: float = RUNNER_STOP_DEADLINE_S) -> bool:
     """Stop ``runner`` without blocking the caller for more than ``deadline_s``.
 
@@ -213,6 +303,35 @@ def stop_runner(runner: Runner, deadline_s: float = RUNNER_STOP_DEADLINE_S) -> b
     stopper.start()
     stopper.join(deadline_s)
     return not stopper.is_alive()
+
+
+def grouped_sections(sections: Iterable[str]) -> list[tuple[str, list[str]]]:
+    """``SECTION_GROUPS`` limited to ``sections``, plus a last group for any section not listed there."""
+    rest = list(sections)
+    groups: list[tuple[str, list[str]]] = []
+    for title, members in SECTION_GROUPS:
+        present = [section for section in members if section in rest]
+        if present:
+            groups.append((title, present))
+            rest = [section for section in rest if section not in present]
+    if rest:
+        groups.append((SECTION_OTHER_GROUP, rest))
+    return groups
+
+
+def preset_label(info: PresetInfo) -> str:
+    """What the preset menu shows: the display name; a built-in preset without one is still marked as such."""
+    if info.builtin and info.display_name == info.name:
+        return f"{info.name}（標準）"
+    return info.display_name
+
+
+def _plates_on_disk() -> bool:
+    """Whether a background plate of any resolution is stored: there is a picture of the room to delete."""
+    try:
+        return any(config.user_data_dir().glob(_PLATE_FILES))
+    except OSError:
+        return False
 
 
 class LatestValueRelay(QObject):
@@ -306,7 +425,7 @@ class _NumberEditor(FieldEditor):
         self._spin.setSingleStep(self._step)
         self._spin.setKeyboardTracking(False)
         self._spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._spin.setFixedWidth(76)
+        self._spin.setFixedWidth(max(76, self._spin.sizeHint().width()))  # the Windows 11 style needs more
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._slider, 1)
@@ -621,7 +740,8 @@ class PreviewWidget(QWidget):
         self._hint = ""
         self._badge = ""
         self._notice = "カメラを起動しています…"
-        self.setMinimumSize(480, 270)
+        self._banner = ""
+        self.setMinimumSize(300, 169)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
@@ -641,14 +761,19 @@ class PreviewWidget(QWidget):
     def notice(self) -> str:
         return self._notice
 
+    @property
+    def banner(self) -> str:
+        return self._banner
+
     def set_image(self, image: QImage) -> None:
         self._image = image
         self.update()
 
-    def set_overlays(self, *, hint: str = "", badge: str = "", notice: str = "") -> None:
-        """``hint``: bottom banner, ``badge``: top-left tag, ``notice``: centered message over a dimmed frame."""
-        if (hint, badge, notice) != (self._hint, self._badge, self._notice):
-            self._hint, self._badge, self._notice = hint, badge, notice
+    def set_overlays(self, *, hint: str = "", badge: str = "", notice: str = "", banner: str = "") -> None:
+        """``hint``: bottom banner, ``badge``: top-left tag, ``notice``: centered message over a dimmed frame,
+        ``banner``: large centered message over the undimmed frame, readable from a few steps away."""
+        if (hint, badge, notice, banner) != (self._hint, self._badge, self._notice, self._banner):
+            self._hint, self._badge, self._notice, self._banner = hint, badge, notice, banner
             self.update()
 
     def sizeHint(self) -> QSize:
@@ -665,6 +790,8 @@ class PreviewWidget(QWidget):
         if self._notice:
             painter.fillRect(frame_rect, QColor(0, 0, 0, 160 if self._image is not None else 0))
             self._draw_text(painter, frame_rect.adjusted(24, 24, -24, -24), self._notice, Qt.AlignmentFlag.AlignCenter)
+        elif self._banner:
+            self._draw_banner(painter, frame_rect, self._banner, scale=1.6, centered=True)
         elif self._hint:
             self._draw_banner(painter, frame_rect, self._hint)
         if self._badge:
@@ -676,14 +803,17 @@ class PreviewWidget(QWidget):
         painter.setFont(self._overlay_font(1.15))
         painter.drawText(rect, int(align | Qt.TextFlag.TextWordWrap), text)
 
-    def _draw_banner(self, painter: QPainter, frame_rect: QRect, text: str) -> None:
-        painter.setFont(self._overlay_font(1.0))
+    def _draw_banner(
+        self, painter: QPainter, frame_rect: QRect, text: str, *, scale: float = 1.0, centered: bool = False
+    ) -> None:
+        painter.setFont(self._overlay_font(scale))
         metrics = painter.fontMetrics()
         flags = int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap)
         text_rect = metrics.boundingRect(QRect(0, 0, frame_rect.width() - 64, 1000), flags, text)
         box = QRect(0, 0, text_rect.width() + 32, text_rect.height() + 16)
         box.moveCenter(frame_rect.center())
-        box.moveBottom(frame_rect.bottom() - 16)
+        if not centered:
+            box.moveBottom(frame_rect.bottom() - 16)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(0, 0, 0, 170))
         painter.drawRoundedRect(box, 8, 8)
@@ -712,6 +842,180 @@ class PreviewWidget(QWidget):
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class PhotoRequest:
+    """What the user chose in the 「写真から作る」 dialog."""
+
+    makeup: Path
+    bare: Path | None
+    name: str
+
+
+@dataclass(frozen=True)
+class PhotoReport:
+    """What a photo analysis found, ready to show.
+
+    ``rows``: one per measured section, (label, confidence or "not measured", measured).
+    """
+
+    title: str
+    summary: str
+    rows: tuple[tuple[str, str, bool], ...]
+    notes: tuple[str, ...]
+
+
+def photo_measured_nothing(result: AnalysisResult) -> bool:
+    """True when every measured section has confidence 0: a preset would only copy its base."""
+    from .analyze import MEASURED_SECTIONS
+
+    return all(result.confidence.get(section, 0.0) <= 0.0 for section in MEASURED_SECTIONS)
+
+
+def photo_report(result: AnalysisResult, preset: str | None, base: str, used_bare: bool) -> PhotoReport:
+    """The report on ``result``; ``preset`` is the name it was saved under, None if it was not saved."""
+    from .analyze import MEASURED_SECTIONS
+
+    if preset is None:
+        return PhotoReport(PHOTO_NOTHING_MEASURED_TITLE, PHOTO_NOTHING_MEASURED, (), tuple(result.notes))
+    rows = []
+    for section in MEASURED_SECTIONS:
+        confidence = result.confidence.get(section, 0.0)
+        label = SECTION_LABELS.get(section, section)
+        if confidence > 0.0:
+            rows.append((label, f"{confidence:.2f}", True))
+        else:
+            rows.append((label, f"{PHOTO_NOT_MEASURED}（{base} の値のまま）", False))
+    summary = f"プリセット『{preset}』を保存しました。スライダーで好きなように調整できます。"
+    if not used_bare:
+        summary += f"\n\n{PHOTO_BARE_ADVICE}"
+    return PhotoReport("写真から作りました", summary, tuple(rows), tuple(result.notes))
+
+
+class PhotoPresetDialog(QDialog):
+    """Asks for the photos and the preset name; 「作る」 stays disabled until both are there."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(PHOTO_TITLE)
+        self.makeup_edit = QLineEdit()
+        self.bare_edit = QLineEdit()
+        self.name_edit = QLineEdit()
+        self.makeup_edit.setPlaceholderText("必須")
+        self.bare_edit.setPlaceholderText("なくても作れますが、入れることを強くおすすめします")
+        self.name_edit.setPlaceholderText("例：いつものメイク")
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        for row, (label, edit, hint) in enumerate(
+            (
+                ("メイクの写真", self.makeup_edit, "いつものメイクをした顔の写真"),
+                ("すっぴんの写真", self.bare_edit, "同じ場所・同じ照明で撮ったすっぴんの写真"),
+            )
+        ):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(edit, row, 1)
+            button = QPushButton("選ぶ…")
+            button.setToolTip(hint)
+            button.clicked.connect(partial(self._choose_photo, edit, label))
+            grid.addWidget(button, row, 2)
+        grid.addWidget(QLabel("プリセット名"), 2, 0)
+        grid.addWidget(self.name_edit, 2, 1, 1, 2)
+        tips = QLabel(PHOTO_TIPS)
+        tips.setWordWrap(True)
+        self.buttons = QDialogButtonBox()
+        self.buttons.addButton("キャンセル", QDialogButtonBox.ButtonRole.RejectRole)
+        self.create_button = self.buttons.addButton("作る", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(PHOTO_HELP))
+        layout.addLayout(grid)
+        layout.addWidget(_help_label(PHOTO_BARE_ADVICE))
+        layout.addWidget(tips)
+        layout.addWidget(self.buttons)
+        for edit in (self.makeup_edit, self.name_edit):
+            edit.textChanged.connect(self._update_create_button)
+        self._update_create_button()
+        self.setMinimumWidth(min(520, _available_width(self)))
+
+    def request(self) -> PhotoRequest:
+        bare = _pasted_path(self.bare_edit.text())
+        return PhotoRequest(Path(_pasted_path(self.makeup_edit.text())), Path(bare) if bare else None, self.name_edit.text())
+
+    def _update_create_button(self) -> None:
+        self.create_button.setEnabled(bool(self.makeup_edit.text().strip() and self.name_edit.text().strip()))
+
+    def _choose_photo(self, edit: QLineEdit, title: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, title, edit.text(), _PHOTO_FILTER)
+        if path:
+            edit.setText(path)
+
+
+def _uses_face_shape(settings: MakeupSettings) -> bool:
+    """True if the preset narrows the face or moves its features: the room next to it then bends."""
+    shape = settings.reshape
+    return shape.enabled and any(
+        isinstance(value, float) and value != 0.0
+        for name, value in vars(shape).items()
+        if name != "protect_background"
+    )
+
+
+def _pasted_path(text: str) -> str:
+    """A path as typed or pasted: Explorer's "Copy as path" adds double quotes."""
+    return text.strip().strip('"').strip()
+
+
+class PhotoReportDialog(QDialog):
+    """Shows a ``PhotoReport``; a long list of notes scrolls."""
+
+    def __init__(self, report: PhotoReport, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(report.title)
+        self.body = QLabel(_photo_report_html(report))
+        self.body.setTextFormat(Qt.TextFormat.RichText)
+        self.body.setWordWrap(True)
+        self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.body.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self.body)
+        buttons = QDialogButtonBox()
+        buttons.addButton("閉じる", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.accepted.connect(self.accept)
+        layout = QVBoxLayout(self)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(buttons)
+        width = min(560, _available_width(self))
+        height = self.body.heightForWidth(width - 40) + 90
+        self.resize(width, min(height, 620, _available_height(self)))
+
+
+def _photo_report_html(report: PhotoReport) -> str:
+    parts = [f"<p>{html.escape(line)}</p>" for line in report.summary.split("\n") if line]
+    if report.rows:
+        parts.append("<p><b>項目ごとの信頼度</b>（1 に近いほど確か）</p><table cellspacing='0' cellpadding='3'>")
+        for label, value, measured in report.rows:
+            shown = html.escape(value) if measured else f"<b style='color:{_ERROR_COLOR}'>{html.escape(value)}</b>"
+            parts.append(f"<tr><td>{html.escape(label)}</td><td>{shown}</td></tr>")
+        parts.append("</table>")
+    if report.notes:
+        items = "".join(f"<li>{html.escape(note)}</li>" for note in report.notes)
+        parts.append(f"<p><b>メモ</b></p><ul>{items}</ul>")
+    return "".join(parts)
+
+
+def _available_width(widget: QWidget) -> int:
+    screen = widget.screen()
+    return screen.availableGeometry().width() if screen is not None else 10000
+
+
+def _available_height(widget: QWidget) -> int:
+    screen = widget.screen()
+    return screen.availableGeometry().height() if screen is not None else 10000
+
+
 class Dialogs:
     """Modal questions the window asks; tests substitute a scripted fake."""
 
@@ -730,6 +1034,13 @@ class Dialogs:
     def show_error(self, title: str, text: str) -> None:
         QMessageBox.warning(self.parent, title, text)
 
+    def ask_photos(self) -> PhotoRequest | None:
+        dialog = PhotoPresetDialog(self.parent)
+        return dialog.request() if dialog.exec() == QDialog.DialogCode.Accepted else None
+
+    def show_photo_report(self, report: PhotoReport) -> None:
+        PhotoReportDialog(report, self.parent).exec()
+
 
 class GuiState:
     """Choices remembered between runs (camera, resolution, preset, window layout).
@@ -745,6 +1056,10 @@ class GuiState:
 
     def camera_index(self) -> int | None:
         return _as_int(self._store.value("camera/index"))
+
+    def camera_name(self) -> str | None:
+        value = self._store.value("camera/name")
+        return value if isinstance(value, str) and value else None
 
     def resolution(self) -> tuple[int, int] | None:
         width, height = _as_int(self._store.value("camera/width")), _as_int(self._store.value("camera/height"))
@@ -763,15 +1078,19 @@ class GuiState:
     def save(
         self,
         *,
-        camera_index: int,
+        camera_index: int | None,
         resolution: tuple[int, int],
         preset: str | None,
         geometry: QByteArray,
         splitter: QByteArray,
+        camera_name: str | None = None,
     ) -> None:
-        self._store.setValue("camera/index", camera_index)
-        self._store.setValue("camera/width", resolution[0])
-        self._store.setValue("camera/height", resolution[1])
+        """Remember the choices; ``camera_index=None`` keeps the remembered camera and resolution."""
+        if camera_index is not None:
+            self._store.setValue("camera/index", camera_index)
+            self._store.setValue("camera/name", camera_name or "")
+            self._store.setValue("camera/width", resolution[0])
+            self._store.setValue("camera/height", resolution[1])
         self._store.setValue("presets/current", preset or "")
         self._store.setValue("window/geometry", geometry)
         self._store.setValue("window/splitter", splitter)
@@ -800,6 +1119,10 @@ class GuiOptions:
     virtual_camera: bool = True
     # A preset named on the command line; it replaces the restored last session.
     preset: str | None = None
+    # The device name behind ``camera_index``, when known at start-up.
+    camera_name: str | None = None
+    # A video file played in place of the webcam (testing without a camera).
+    camera_file: Path | None = None
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -809,23 +1132,32 @@ class GuiOptions:
 def options_from_args(args: argparse.Namespace | None, state: GuiState) -> GuiOptions:
     """Merge command-line arguments (when given) with the remembered state.
 
-    Reads the optional attributes ``camera``, ``width``, ``height``, ``fps``,
-    ``no_vcam`` and ``preset``; a missing or None attribute means "not given".
+    Reads the optional attributes ``camera``, ``camera_file``, ``width``,
+    ``height``, ``fps``, ``no_vcam`` and ``preset``; a missing or None attribute
+    means "not given". The remembered camera is looked up by name, because its
+    index may have changed since the last run.
     """
+    from .camera import resolve_camera
 
     def arg(name: str) -> Any:
         return getattr(args, name, None)
 
-    camera = arg("camera")
+    camera, camera_file = arg("camera"), arg("camera_file")
     width, height = arg("width"), arg("height")
     resolution = (width, height) if width and height else state.resolution() or RESOLUTIONS[0]
+    if camera is not None or camera_file is not None:
+        camera_index, camera_name = camera or 0, None
+    else:
+        camera_index, camera_name = resolve_camera(state.camera_index(), state.camera_name())
     return GuiOptions(
-        camera_index=camera if camera is not None else state.camera_index() or 0,
+        camera_index=camera_index,
         width=resolution[0],
         height=resolution[1],
         fps=arg("fps") or 30,
         virtual_camera=not arg("no_vcam"),
         preset=arg("preset"),
+        camera_name=camera_name,
+        camera_file=Path(camera_file) if camera_file is not None else None,
     )
 
 
@@ -847,6 +1179,7 @@ class MainWindow(QMainWindow):
         options: GuiOptions | None = None,
         dialogs: Dialogs | None = None,
         state: GuiState | None = None,
+        photo_analyzer: PhotoAnalyzer | None = None,
     ) -> None:
         super().__init__()
         self._options = options or GuiOptions()
@@ -854,10 +1187,21 @@ class MainWindow(QMainWindow):
         self._dialogs = dialogs or Dialogs(self)
         self._state = state or GuiState()
         self._camera_lister = camera_lister
+        self._photo_analyzer = photo_analyzer or _analyze_photos
+        self._photo_thread: threading.Thread | None = None
+        self._photo_request: PhotoRequest | None = None
+        self._photo_base = ""
+        self._plate_busy = False
+        self._plate_message = ""
+        self._plates_saved = _plates_on_disk()
         self._presets: dict[str, PresetInfo] = {}
         self._preset_name: str | None = None
         self._preset_baseline: dict[str, Any] | None = None
-        self._camera_choice = (self._options.camera_index, *self._options.resolution)
+        # Names of the real cameras as of the latest probe; None until something is known.
+        self._camera_names: dict[int, str] | None = (
+            {self._options.camera_index: self._options.camera_name} if self._options.camera_name else None
+        )
+        self._camera_found = True  # whether the latest probe found any device it can vouch for
         self._last_result: ProcessResult | None = None
         self._last_status: RunnerStatus | None = None
         self._comparing = False
@@ -870,17 +1214,27 @@ class MainWindow(QMainWindow):
         self._frame_relay = LatestValueRelay(self)
         self._status_relay = LatestValueRelay(self)
         self._cameras_relay = LatestValueRelay(self)
+        self._plate_relay = LatestValueRelay(self)
+        self._photo_relay = LatestValueRelay(self)
+        self._plate_relay.ready.connect(self._on_plate_done)
+        self._photo_relay.ready.connect(self._on_photo_done)
         self._frame_relay.ready.connect(self._on_frame_ready)
         self._status_relay.ready.connect(self._on_status_ready)
         self._cameras_relay.ready.connect(self._on_cameras_ready)
         self._push_timer = _single_shot_timer(self, SETTINGS_PUSH_INTERVAL_MS, self._push_settings)
         self._autosave_timer = _single_shot_timer(self, AUTOSAVE_DELAY_MS, self._persist_session)
+        self._plate_message_timer = _single_shot_timer(self, PLATE_MESSAGE_MS, self._clear_plate_message)
         self._runner = runner_factory(self._frame_relay.post, self._status_relay.post)
 
         self._build_ui()
+        for button in self.findChildren(QAbstractButton):
+            # Reached with Tab, not by clicking: Space goes on meaning "compare" after a click.
+            button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._camera_choice = self._camera_key()
         self._select_preset(preset_name)
         self._refresh_preset_combo()
         self._show_settings()
+        self._update_background_controls()
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -901,6 +1255,17 @@ class MainWindow(QMainWindow):
     def section_page(self, section: str) -> SectionPage:
         return self._pages[section]
 
+    def current_section(self) -> str:
+        page = self._stack.currentWidget()
+        return page.section if isinstance(page, SectionPage) else ""
+
+    def show_section(self, section: str) -> None:
+        """Select ``section`` in the settings list, which brings up its page."""
+        for row in range(self._nav.count()):
+            if self._nav.item(row).data(Qt.ItemDataRole.UserRole) == section:
+                self._nav.setCurrentRow(row)
+                return
+
     def is_modified(self) -> bool:
         """Whether the settings differ from the selected preset."""
         return self._preset_baseline is not None and self._settings.to_dict() != self._preset_baseline
@@ -917,8 +1282,9 @@ class MainWindow(QMainWindow):
         self._probing = True
         self._rescan_button.setEnabled(False)
         self._camera_combo.setToolTip("カメラを検索しています…")
-        in_use = (self._current_camera_index(),)
-        threading.Thread(target=self._probe_worker, args=(in_use,), name="camera-probe", daemon=True).start()
+        threading.Thread(
+            target=self._probe_worker, args=(self._cameras_in_use(),), name="camera-probe", daemon=True
+        ).start()
 
     def restore_layout(self) -> None:
         """Restore the window geometry and splitter position saved by the last run."""
@@ -938,6 +1304,7 @@ class MainWindow(QMainWindow):
         self._shut_down = True
         self._push_timer.stop()
         self._autosave_timer.stop()
+        self._plate_message_timer.stop()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
@@ -946,6 +1313,14 @@ class MainWindow(QMainWindow):
         if not self._runner_stopped:
             logger.warning("camera runner did not stop within %.1f s", RUNNER_STOP_DEADLINE_S)
         return self._runner_stopped
+
+    def wait_for_photo_analysis(self, deadline_s: float = PHOTO_STOP_DEADLINE_S) -> bool:
+        """Wait (window closed, process about to end) for an analysis under way; True when none is left."""
+        thread = self._photo_thread
+        if thread is None:
+            return True
+        thread.join(deadline_s)
+        return not thread.is_alive()
 
     # ---- Qt event handlers -------------------------------------------------
 
@@ -960,10 +1335,19 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        """Space anywhere in this window (except text fields) = hold to compare."""
+        """Space anywhere in this window = hold to compare, except on what Space operates (text
+        fields, and buttons and lists reached with Tab). Enter presses a button reached with Tab."""
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and self._is_compare_key(watched, event):
             if not event.isAutoRepeat():
                 self._set_comparing(event.type() == QEvent.Type.KeyPress)
+            return True
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and isinstance(watched, QAbstractButton)
+            and watched.window() is self
+        ):
+            watched.animateClick()
             return True
         return super().eventFilter(watched, event)
 
@@ -972,15 +1356,14 @@ class MainWindow(QMainWindow):
             event.key() == Qt.Key.Key_Space
             and isinstance(watched, QWidget)
             and watched.window() is self
-            and not isinstance(watched, (QLineEdit, QAbstractSpinBox))
+            and not isinstance(watched, (QLineEdit, QAbstractSpinBox, QAbstractButton, QComboBox))
         )
 
     # ---- UI construction -------------------------------------------------
 
     def _build_ui(self) -> None:
         self.setWindowTitle(APP_TITLE)
-        self.setMinimumSize(980, 600)
-        self.resize(1360, 800)
+        self.setMinimumSize(800, 440)
         self._preview = PreviewWidget()
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
@@ -988,7 +1371,7 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self._build_settings_panel())
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 0)
-        self._splitter.setSizes([820, 540])
+        self._splitter.setSizes([780, 580])
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 0)
@@ -997,6 +1380,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._splitter, 1)
         self.setCentralWidget(central)
         self._build_status_bar()
+        self._fit_to_screen(1360, 800)
+
+    def _fit_to_screen(self, width: int, height: int) -> None:
+        """The wanted size, but never more than the screen has (high DPI scaling makes screens small)."""
+        screen = self.screen()
+        if screen is None:
+            self.resize(width, height)
+            return
+        available = screen.availableGeometry()
+        self.resize(min(width, available.width()), min(height, available.height()))
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -1005,14 +1398,18 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         self._camera_combo = QComboBox()
-        self._camera_combo.setMinimumWidth(220)
-        self._camera_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._set_camera_items([], self._options.camera_index)
+        self._camera_combo.setMinimumContentsLength(14)
+        self._camera_combo.setMaximumWidth(360)
+        self._camera_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._camera_combo.activated.connect(self._on_camera_chosen)
         self._rescan_button = QToolButton()
         self._rescan_button.setText("↻")
         self._rescan_button.setToolTip("カメラを再検索")
         self._rescan_button.clicked.connect(self.probe_cameras)
+        if self._options.camera_file is not None:
+            self._show_camera_file(self._options.camera_file)
+        else:
+            self._set_camera_items([], self._options.camera_index, self._options.camera_name)
 
         self._resolutions = list(RESOLUTIONS)
         if self._options.resolution not in self._resolutions:
@@ -1021,6 +1418,9 @@ class MainWindow(QMainWindow):
         for width, height in self._resolutions:
             self._resolution_combo.addItem(f"{width}×{height}")
         self._resolution_combo.setCurrentIndex(self._resolutions.index(self._options.resolution))
+        self._resolution_combo.setToolTip(
+            "カメラから取り込む解像度です。動作が重いときは下げてください。相手に送る映像の形（16:9）は変わりません"
+        )
         self._resolution_combo.activated.connect(self._on_camera_chosen)
         self._wheel_guard.guard(self._camera_combo)
         self._wheel_guard.guard(self._resolution_combo)
@@ -1043,7 +1443,7 @@ class MainWindow(QMainWindow):
         self._compare_button.released.connect(partial(self._set_comparing, False))
 
         layout.addWidget(QLabel("カメラ"))
-        layout.addWidget(self._camera_combo)
+        layout.addWidget(self._camera_combo, 1)  # long device names show in full when there is room
         layout.addWidget(self._rescan_button)
         layout.addSpacing(12)
         layout.addWidget(QLabel("解像度"))
@@ -1057,7 +1457,7 @@ class MainWindow(QMainWindow):
 
     def _build_settings_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(460)
+        panel.setMinimumWidth(470)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -1080,29 +1480,91 @@ class MainWindow(QMainWindow):
         self._save_as_button = QPushButton("名前を付けて保存…")
         self._delete_button = QPushButton("削除")
         self._defaults_button = QPushButton("初期値に戻す")
+        self._photo_button = QPushButton(f"{PHOTO_TITLE}…")
+        self._photo_button.setToolTip(PHOTO_HELP)
+        self._photo_button.clicked.connect(self._on_from_photo)
         self._save_button.clicked.connect(self._on_save_preset)
         self._save_as_button.clicked.connect(self._on_save_preset_as)
         self._delete_button.clicked.connect(self._on_delete_preset)
         self._defaults_button.clicked.connect(self._on_reset_to_defaults)
         button_row = QHBoxLayout()
-        for button in (self._save_button, self._save_as_button, self._delete_button):
+        for button in (self._save_button, self._save_as_button, self._delete_button, self._photo_button):
             button_row.addWidget(button)
         button_row.addStretch(1)
         button_row.addWidget(self._defaults_button)
 
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
-        for section, section_cls in SECTIONS.items():
-            intro = VIRTUAL_CAMERA_HELP if section == "general" else ""
-            page = SectionPage(section, section_cls, self._wheel_guard, intro)
-            page.value_edited.connect(self._on_value_edited)
-            self._pages[section] = page
-            self._tabs.addTab(page, SECTION_LABELS.get(section, section))
-
         layout.addLayout(preset_row)
         layout.addLayout(button_row)
-        layout.addWidget(self._tabs, 1)
+        layout.addLayout(self._build_background_row())
+        layout.addLayout(self._build_sections(), 1)
         return panel
+
+    def _build_background_row(self) -> QHBoxLayout:
+        self._plate_state = QLabel()
+        self._capture_button = QPushButton("背景を撮影")
+        self._capture_button.setToolTip(BACKGROUND_CAPTURE_HELP)
+        self._capture_button.clicked.connect(self._on_capture_background)
+        self._clear_plate_button = QPushButton("背景を削除")
+        self._clear_plate_button.setToolTip(BACKGROUND_CLEAR_HELP)
+        self._clear_plate_button.clicked.connect(self._on_clear_background)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("背景"))
+        row.addWidget(self._plate_state)
+        row.addStretch(1)
+        row.addWidget(self._capture_button)
+        row.addWidget(self._clear_plate_button)
+        return row
+
+    def _build_sections(self) -> QHBoxLayout:
+        """The grouped list on the left and the page of the selected section on the right."""
+        self._nav = QListWidget()
+        self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._stack = QStackedWidget()
+        for title, sections in grouped_sections(SECTIONS):
+            single = len(sections) == 1
+            if not single:
+                header = QListWidgetItem(title)
+                header.setFlags(Qt.ItemFlag.NoItemFlags)  # not selectable; the arrow keys skip it
+                font = QFont(self._nav.font())
+                font.setBold(True)
+                header.setFont(font)
+                color = self._nav.palette().color(QPalette.ColorRole.Text)
+                color.setAlphaF(0.65)  # a disabled item would be too faint for a heading
+                header.setForeground(color)
+                self._nav.addItem(header)
+            for section in sections:
+                self._add_section_page(section, indent="" if single else "　")
+        self._nav.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        # Row sizes of our own: the Windows 11 style would make the 16 rows taller than many windows.
+        metrics = self._nav.fontMetrics()
+        items = [self._nav.item(row) for row in range(self._nav.count())]
+        widest = max(metrics.horizontalAdvance(item.text()) for item in items) + metrics.height() * 2
+        for item in items:
+            item.setSizeHint(QSize(widest, metrics.height() + 10))
+        self._nav.setFixedWidth(widest + 2 * self._nav.frameWidth() + self._nav.verticalScrollBar().sizeHint().width())
+        self._nav.currentRowChanged.connect(self._on_section_chosen)
+        self.show_section(next(iter(SECTIONS)))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self._nav)
+        row.addWidget(self._stack, 1)
+        return row
+
+    def _add_section_page(self, section: str, indent: str) -> None:
+        intro = VIRTUAL_CAMERA_HELP if section == "general" else ""
+        page = SectionPage(section, SECTIONS[section], self._wheel_guard, intro)
+        page.value_edited.connect(self._on_value_edited)
+        self._pages[section] = page
+        self._stack.addWidget(page)
+        item = QListWidgetItem(indent + SECTION_LABELS.get(section, section))
+        item.setData(Qt.ItemDataRole.UserRole, section)
+        self._nav.addItem(item)
+
+    def _on_section_chosen(self, row: int) -> None:
+        item = self._nav.item(row)
+        section = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if section in self._pages:
+            self._stack.setCurrentWidget(self._pages[section])
 
     def _build_status_bar(self) -> None:
         status = self.statusBar()
@@ -1150,7 +1612,7 @@ class MainWindow(QMainWindow):
         self._settings = settings.copy()
         self._show_settings()
         self._push_timer.stop()
-        self._push_settings()
+        self._runner.glide_to_settings(self._settings.copy())
         self._autosave_timer.start()
         self._update_preset_controls()
 
@@ -1160,13 +1622,35 @@ class MainWindow(QMainWindow):
 
     def _persist_session(self) -> None:
         save_last_session(self._settings)
+        camera_index, camera_name = self._camera_to_remember()
         self._state.save(
-            camera_index=self._current_camera_index(),
+            camera_index=camera_index,
+            camera_name=camera_name,
             resolution=self._current_resolution(),
             preset=self._preset_name,
             geometry=self.saveGeometry(),
             splitter=self._splitter.saveState(),
         )
+
+    def _camera_to_remember(self) -> tuple[int | None, str | None]:
+        """What the next run should start with; an index of None keeps what is stored.
+
+        A test video, or a selection known not to be a real camera (a virtual
+        camera at the default index, an unplugged device), replaces nothing. Nor
+        does a bare number replace a stored name, which says more.
+        """
+        if self._options.camera_file is not None:
+            return None, None
+        index, name = self._current_camera_index(), self._current_camera_name()
+        if self._camera_names is not None and not self._is_listed(index, name):
+            return None, None
+        if name is None and self._state.camera_name():
+            return None, None
+        return index, name
+
+    def _is_listed(self, index: int, name: str | None) -> bool:
+        names = self._camera_names or {}
+        return name in names.values() if name else index in names
 
     # ---- presets ---------------------------------------------------------
 
@@ -1188,8 +1672,7 @@ class MainWindow(QMainWindow):
         with signals_blocked(self._preset_combo):
             self._preset_combo.clear()
             for info in self._presets.values():
-                label = f"{info.name}（標準）" if info.builtin else info.name
-                self._preset_combo.addItem(label, info.name)
+                self._preset_combo.addItem(preset_label(info), info.name)
             self._preset_combo.setCurrentIndex(self._preset_combo.findData(self._preset_name))
         self._update_preset_controls()
 
@@ -1205,13 +1688,18 @@ class MainWindow(QMainWindow):
         )
         self._modified_label.setVisible(self.is_modified())
 
+    def _preset_title(self, name: str) -> str:
+        """How the user knows this preset (built-in file names are not what she sees)."""
+        info = self._presets.get(name)
+        return info.display_name if info is not None else name
+
     def _on_preset_chosen(self, index: int) -> None:
         name = self._preset_combo.itemData(index)
         if name == self._preset_name and not self.is_modified():
             return
         if self._has_unsaved_changes() and not self._dialogs.confirm(
             "プリセットの読み込み",
-            f"保存していない変更があります。変更を破棄してプリセット『{name}』を読み込みますか？",
+            f"保存していない変更があります。変更を破棄してプリセット『{self._preset_title(name)}』を読み込みますか？",
         ):
             self._refresh_preset_combo()
             return
@@ -1232,7 +1720,10 @@ class MainWindow(QMainWindow):
         self._preset_baseline = settings.to_dict()
         self._refresh_preset_combo()
         self._apply_settings(settings)
-        self.statusBar().showMessage(f"プリセット『{name}』を読み込みました", 4000)
+        message = f"プリセット『{self._preset_title(name)}』を読み込みました"
+        if _uses_face_shape(settings) and not self._runner.has_background:
+            message += "。顔の形の補正は、「背景を撮影」をしておくと顔のまわりの背景がゆがみません"
+        self.statusBar().showMessage(message, _SHAPE_HINT_MS if "背景を撮影" in message else 4000)
         return True
 
     def _on_save_preset(self) -> None:
@@ -1295,29 +1786,195 @@ class MainWindow(QMainWindow):
         self._apply_settings(MakeupSettings())
         self.statusBar().showMessage("すべての設定を初期値に戻しました", 4000)
 
+    # ---- 写真から作る ------------------------------------------------------
+
+    def _on_from_photo(self) -> None:
+        if self._photo_thread is not None:
+            return
+        request = self._dialogs.ask_photos()
+        if request is None:
+            return
+        if request.bare is None and not self._dialogs.confirm(PHOTO_TITLE, PHOTO_NO_BARE_QUESTION):
+            return
+        base, self._photo_base = self._photo_base_preset()
+        self._photo_request = request
+        self._photo_button.setEnabled(False)
+        self._photo_button.setText("解析中…")
+        self.statusBar().showMessage("写真を解析しています…（数秒かかります）")
+        self._photo_thread = threading.Thread(
+            target=self._photo_worker, args=(request, base), name="photo-analysis", daemon=True
+        )
+        self._photo_thread.start()
+
+    def _photo_base_preset(self) -> tuple[MakeupSettings | None, str]:
+        """What the sections the photos cannot measure start from: the selected preset, or else natural."""
+        if self._preset_name is not None:
+            try:
+                return load_preset(self._preset_name), self._preset_title(self._preset_name)
+            except PresetError:
+                logger.warning("preset %r is unreadable; starting the analysis from natural", self._preset_name)
+        return None, self._preset_title("natural")
+
+    def _photo_worker(self, request: PhotoRequest, base: MakeupSettings | None) -> None:
+        """On its own thread. The photos stay in memory here and are not kept or saved anywhere."""
+        try:
+            self._photo_relay.post(self._photo_analyzer(request.makeup, request.bare, base))
+        except Exception as exc:
+            self._photo_relay.post(_photo_failure_message(exc))
+
+    def _on_photo_done(self) -> None:
+        outcome = self._photo_relay.take()
+        request = self._photo_request
+        if outcome is None or request is None:
+            return
+        self._photo_thread, self._photo_request = None, None
+        self._photo_button.setEnabled(True)
+        self._photo_button.setText(f"{PHOTO_TITLE}…")
+        self.statusBar().clearMessage()
+        if self._shut_down:
+            return
+        if isinstance(outcome, str):
+            self._dialogs.show_error(PHOTO_TITLE, outcome)
+        elif photo_measured_nothing(outcome):
+            self._dialogs.show_photo_report(photo_report(outcome, None, self._photo_base, request.bare is not None))
+        else:
+            self._save_photo_preset(outcome, request)
+
+    def _save_photo_preset(self, result: AnalysisResult, request: PhotoRequest) -> None:
+        """Save under the requested name; a refused name costs another name, not another analysis."""
+        from .analyze import save_as_preset
+
+        name: str | None = request.name
+        while name is not None:
+            existing = find_preset(name) if self._is_valid_preset_name(name) else None
+            if existing is None or existing.builtin or self._dialogs.confirm("上書きの確認", _overwrite_question(existing)):
+                try:
+                    info = save_as_preset(result, name)
+                except PresetError as exc:
+                    self._dialogs.show_error(PHOTO_TITLE, str(exc))
+                else:
+                    self._use_photo_preset(info)
+                    self._dialogs.show_photo_report(
+                        photo_report(result, info.name, self._photo_base, request.bare is not None)
+                    )
+                    return
+            name = self._dialogs.ask_text(PHOTO_TITLE, "別のプリセット名：", name)
+        self.statusBar().showMessage("プリセットは保存しませんでした", 4000)
+
+    @staticmethod
+    def _is_valid_preset_name(name: str) -> bool:
+        try:
+            sanitize_preset_name(name)
+        except PresetError:
+            return False
+        return True
+
+    def _use_photo_preset(self, info: PresetInfo) -> None:
+        if self._has_unsaved_changes() and not self._dialogs.confirm(
+            PHOTO_TITLE,
+            f"プリセット『{info.name}』を保存しました。今の変更を破棄して、このプリセットに切り替えますか？",
+        ):
+            self._refresh_preset_combo()
+            return
+        self.apply_preset(info.name)
+
+    # ---- background capture ----------------------------------------------
+
+    def _on_capture_background(self) -> None:
+        if self._plate_busy:
+            return
+        self._plate_busy = True
+        self._clear_plate_message()
+        self._update_background_controls()
+        self._runner.capture_background(self._plate_relay.post)
+
+    def _on_plate_done(self) -> None:
+        result = self._plate_relay.take()
+        if result is None:
+            return
+        self._plate_busy = False
+        self._show_plate_result(result)
+
+    def _on_clear_background(self) -> None:
+        self._show_plate_result(self._runner.clear_background())
+
+    def _show_plate_result(self, result: PlateResult) -> None:
+        self._plate_message = result.message
+        self._plate_message_timer.start()
+        self.statusBar().showMessage(result.message, PLATE_MESSAGE_MS)
+        self._plates_saved = _plates_on_disk()
+        self._update_background_controls()
+        self._update_preview_overlays()
+
+    def _clear_plate_message(self) -> None:
+        self._plate_message = ""
+        self._update_preview_overlays()
+
+    def _update_background_controls(self) -> None:
+        in_use = self._runner.has_background
+        self._capture_button.setEnabled(not self._plate_busy)
+        self._capture_button.setText("撮影中…" if self._plate_busy else "背景を撮影")
+        self._clear_plate_button.setEnabled(in_use or self._plates_saved)
+        self._plate_state.setText("撮影中…" if self._plate_busy else "撮影済み" if in_use else "未撮影")
+
     # ---- camera / output controls ----------------------------------------
 
-    def _set_camera_items(self, cameras: list[CameraInfo], selected: int) -> None:
-        """Fill the camera combo; the selected index stays listed even if the probe missed it."""
+    def _set_camera_items(self, cameras: list[CameraInfo], selected: int, selected_name: str | None = None) -> None:
+        """Fill the camera combo; the selected camera stays listed even if the probe missed it."""
         entries = [(camera.index, camera.name, camera.width, camera.height) for camera in cameras]
-        if selected not in {entry[0] for entry in entries}:
-            entries.insert(0, (selected, f"カメラ {selected}", 0, 0))
+        row = _selected_row(entries, selected, selected_name)
+        if row is None:
+            row = 0
+            entries.insert(0, (selected, selected_name or _placeholder_camera_name(selected), 0, 0))
         with signals_blocked(self._camera_combo):
             self._camera_combo.clear()
             for index, name, width, height in entries:
                 self._camera_combo.addItem(name, index)
+                item = self._camera_combo.count() - 1
                 tooltip = f"デバイス番号 {index}" + (f"（{width}×{height}）" if width and height else "")
-                self._camera_combo.setItemData(self._camera_combo.count() - 1, tooltip, Qt.ItemDataRole.ToolTipRole)
-            self._camera_combo.setCurrentIndex(self._camera_combo.findData(selected))
+                self._camera_combo.setItemData(item, tooltip, Qt.ItemDataRole.ToolTipRole)
+                device_name = None if name == _placeholder_camera_name(index) else name
+                self._camera_combo.setItemData(item, device_name, _DEVICE_NAME_ROLE)
+            self._camera_combo.setCurrentIndex(row)
+
+    def _show_camera_file(self, path: Path) -> None:
+        """The one camera entry while a video file stands in for the webcam."""
+        self._camera_combo.addItem(f"動画ファイル: {path.name}", self._options.camera_index)
+        self._camera_combo.setToolTip(f"カメラの代わりに動画ファイルを再生しています（カメラなしでのテスト用）\n{path}")
+        self._rescan_button.setEnabled(False)
+        self._rescan_button.setToolTip("動画ファイルの再生中はカメラを検索しません")
 
     def _current_camera_index(self) -> int:
         index = self._camera_combo.currentData()
         return index if index is not None else self._options.camera_index
 
+    def _current_camera_name(self) -> str | None:
+        """The selected device's real name, if known."""
+        return self._camera_combo.currentData(_DEVICE_NAME_ROLE)
+
     def _current_resolution(self) -> tuple[int, int]:
         return self._resolutions[max(0, self._resolution_combo.currentIndex())]
 
-    def _probe_worker(self, in_use: Collection[int]) -> None:
+    def _camera_key(self) -> tuple[int | str, int, int]:
+        """What identifies the current choice of camera and size."""
+        return (self._current_camera_name() or self._current_camera_index(), *self._current_resolution())
+
+    def _camera_failing(self) -> bool:
+        return self._last_status is not None and bool(self._last_status.camera_error)
+
+    def _cameras_in_use(self) -> tuple[int, ...] | tuple[str, ...]:
+        """What the probe must leave alone; on DirectShow, opening and closing a live device stops it.
+
+        A device name finds the device wherever it is now. Without a name, or among
+        identical cameras, there is only the index, and not while the camera is
+        failing: nothing is open then, so the probe can find out what is really there.
+        """
+        name = self._current_camera_name()
+        if name is not None and list((self._camera_names or {}).values()).count(name) < 2:
+            return (name,)
+        return () if self._camera_failing() else (self._current_camera_index(),)
+
+    def _probe_worker(self, in_use: Collection[int] | Collection[str]) -> None:
         try:
             cameras = list(self._camera_lister(in_use)) if self._camera_lister else []
         except Exception:
@@ -1331,18 +1988,35 @@ class MainWindow(QMainWindow):
             return
         self._probing = False
         self._rescan_button.setEnabled(True)
-        self._camera_combo.setToolTip(
-            "" if cameras else "カメラが見つかりませんでした。接続を確認して ↻ を押してください"
+        self._camera_names = {camera.index: camera.name for camera in cameras}
+        # Listed without being probed and without a name: only the selection itself, which may not exist.
+        self._camera_found = any(
+            camera.width or camera.height or camera.name != _placeholder_camera_name(camera.index)
+            for camera in cameras
         )
-        self._set_camera_items(cameras, self._current_camera_index())
+        self._update_camera_hint()
+        index, name = self._current_camera_index(), self._current_camera_name()
+        # The selection failed and is not a real camera (e.g. a virtual one), and one has just appeared: use it.
+        if self._camera_failing() and cameras and not self._is_listed(index, name):
+            self._set_camera_items(cameras, cameras[0].index, cameras[0].name)
+            self._on_camera_chosen(self._camera_combo.currentIndex())
+        else:
+            self._set_camera_items(cameras, index, name)
+            self._camera_choice = self._camera_key()  # the same camera, possibly under a new number
+
+    def _update_camera_hint(self) -> None:
+        if self._probing or self._options.camera_file is not None:
+            return
+        working = self._last_status is not None and self._last_status.camera_ok
+        self._camera_combo.setToolTip(_CAMERA_NOT_FOUND if not self._camera_found and not working else "")
 
     def _on_camera_chosen(self, _index: int) -> None:
-        choice = (self._current_camera_index(), *self._current_resolution())
         # Re-choosing the working camera would only blank the call while it reconnects.
-        if choice == self._camera_choice and self._camera_ok():
+        if self._camera_key() == self._camera_choice and self._camera_ok():
             return
-        self._camera_choice = choice
-        self._runner.set_camera(*choice)
+        self._camera_choice = self._camera_key()
+        width, height = self._current_resolution()
+        self._runner.set_camera(self._current_camera_index(), width, height, name=self._current_camera_name())
         self._autosave_timer.start()
 
     def _on_virtual_camera_toggled(self, enabled: bool) -> None:
@@ -1386,8 +2060,10 @@ class MainWindow(QMainWindow):
         elif result is None or not self._camera_ok():
             notice = "カメラを起動しています…"
         face_missing = result is not None and not result.face_found
-        hint = FACE_HINT if face_missing and not badge else ""
-        self._preview.set_overlays(hint=hint, badge=badge, notice=notice)
+        # She is walking out of the picture on purpose: no "face not found" meanwhile.
+        banner = self._plate_message or (status.background_message if status is not None else None) or ""
+        hint = FACE_HINT if face_missing and not badge and not banner else ""
+        self._preview.set_overlays(hint=hint, badge=badge, notice=notice, banner=banner)
 
     def _on_status_ready(self) -> None:
         status = self._status_relay.take()
@@ -1400,8 +2076,10 @@ class MainWindow(QMainWindow):
         self._face_status.setText(f"顔検出 <b style='color:{face_color}'>{face_text}</b>")
         _show_problem(self._camera_status, "カメラ", "未接続", status.camera_error)
         _show_problem(self._processing_status, "メイク処理", "エラー", status.processing_error)
+        self._update_camera_hint()
         self._update_virtual_camera_status()
         self._update_preview_overlays()
+        self._update_background_controls()
 
     def _update_virtual_camera_status(self) -> None:
         status = self._last_status
@@ -1424,6 +2102,25 @@ class MainWindow(QMainWindow):
         status = self._last_status
         if status is not None and status.virtual_camera_error:
             self._dialogs.show_error("仮想カメラを使用できません", status.virtual_camera_error)
+
+
+def _analyze_photos(makeup_path: Path, bare_path: Path | None, base: MakeupSettings | None) -> AnalysisResult:
+    from .analyze import analyze_makeup, read_photo
+
+    makeup = read_photo(makeup_path)
+    bare = read_photo(bare_path) if bare_path is not None else None
+    return analyze_makeup(makeup, bare, base=base)
+
+
+def _photo_failure_message(exc: Exception) -> str:
+    """The Japanese message of an expected failure (no face, unreadable photo, no model); else a general one."""
+    from .analyze import AnalysisError
+    from .models import ModelDownloadError
+
+    if isinstance(exc, (AnalysisError, ModelDownloadError)):
+        return str(exc)
+    logger.error("photo analysis failed", exc_info=exc)
+    return f"写真を解析できませんでした（詳細はログを確認してください）。\n{type(exc).__name__}"
 
 
 def _show_problem(label: QLabel, subject: str, state: str, detail: str | None) -> None:
@@ -1458,15 +2155,16 @@ def _single_shot_timer(parent: QObject, interval_ms: int, slot: Callable[[], Non
 def run_gui(args: argparse.Namespace | None = None) -> int:
     """Run the settings window until it is closed; returns the process exit code.
 
-    ``args`` may carry ``camera``, ``width``, ``height``, ``fps``, ``no_vcam``
-    and ``preset`` (see ``options_from_args``).
+    ``args`` may carry ``camera``, ``camera_file``, ``width``, ``height``,
+    ``fps``, ``no_vcam`` and ``preset`` (see ``options_from_args``).
     """
-    from .camera import list_cameras
+    from .camera import CameraSource, list_cameras, video_file_camera_factory, virtual_camera_size
     from .pipeline import MakeupPipeline
-    from .runner import CameraRunner
+    from .runner import CameraRunner, ConsoleCloseWatch
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("ai-makeup-cam")
+    _use_japanese_qt_strings(app)
     state = GuiState()
     options = options_from_args(args, state)
     error = prepare_models()
@@ -1480,56 +2178,89 @@ def run_gui(args: argparse.Namespace | None = None) -> int:
         logger.exception("could not start the makeup pipeline")
         QMessageBox.critical(None, APP_TITLE, f"顔認識の準備に失敗しました。\n{exc}")
         return 1
+    camera_file = options.camera_file
 
     def make_runner(on_frame: FrameCallback, on_status: StatusCallback) -> Runner:
         return CameraRunner(
             pipeline,
             camera_index=options.camera_index,
+            camera_name=options.camera_name,
             width=options.width,
             height=options.height,
             fps=options.fps,
             virtual_camera=options.virtual_camera,
+            output_size=virtual_camera_size(options.width, options.height),
             on_frame=on_frame,
             on_status=on_status,
+            camera_factory=video_file_camera_factory(camera_file) if camera_file is not None else CameraSource,
         )
 
     window: MainWindow | None = None
+    console = ConsoleCloseWatch()
     try:
         window = MainWindow(
             make_runner,
             settings=settings,
             preset_name=preset_name or state.preset(),
-            camera_lister=lambda in_use: list_cameras(in_use=in_use),
+            camera_lister=None if camera_file is not None else lambda in_use: list_cameras(in_use=in_use),
             options=options,
             state=state,
         )
         window.restore_layout()
         window.show()
         window.start()
-        with closed_by_ctrl_c(window):
+        with closed_by_ctrl_c(window, console.closing):
             return app.exec()
     finally:
         # A runner that did not stop may still be inside the pipeline; leave it to process exit.
         if window is None or window.shutdown():
             pipeline.close()
+        if window is not None:
+            window.wait_for_photo_analysis(CONSOLE_GONE_WAIT_S if console.closing.is_set() else PHOTO_STOP_DEADLINE_S)
+            # Now, while QApplication exists: a widget destroyed after it ends the process in an access violation.
+            window.deleteLater()
+            QApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+        console.finish()
 
 
 @contextmanager
-def closed_by_ctrl_c(window: QWidget) -> Iterator[None]:
-    """Close ``window`` on Ctrl+C in the terminal, exactly like closing it by hand.
+def closed_by_ctrl_c(window: QWidget, console_closing: threading.Event | None = None) -> Iterator[None]:
+    """Close the windows on Ctrl+C, or when the terminal goes away, exactly like closing them by hand.
 
     Python runs signal handlers only between bytecodes, which never happens
     while Qt's event loop sleeps, so a cheap repeating timer wakes it up.
+    All of them: a modal dialog left open would keep the application running.
     """
-    previous = signal.signal(signal.SIGINT, lambda _signum, _frame: window.close())
+
+    def close_everything(_signum: int, _frame: object) -> None:
+        QApplication.closeAllWindows()
+
+    def poll() -> None:
+        if console_closing is not None and console_closing.is_set():
+            QApplication.closeAllWindows()
+
+    previous = {
+        number: signal.signal(number, close_everything)
+        for number in (getattr(signal, name, None) for name in ("SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"))
+        if number is not None
+    }
     timer = QTimer(window)
-    timer.timeout.connect(lambda: None)
+    timer.timeout.connect(poll)
     timer.start(SIGNAL_POLL_MS)
     try:
         yield
     finally:
         timer.stop()
-        signal.signal(signal.SIGINT, previous)
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def _use_japanese_qt_strings(app: QApplication) -> None:
+    """Qt's own buttons (Yes, Cancel, the color dialog) in Japanese, when its translation is installed."""
+    translator = QTranslator(app)
+    folder = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    if translator.load(QLocale(QLocale.Language.Japanese), "qtbase", "_", folder):
+        app.installTranslator(translator)
 
 
 def prepare_models() -> str | None:

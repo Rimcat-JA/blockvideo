@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "display_name": "就活ナチュラル（標準）",
   "general": {
     "intensity": 1.0,
     "mirror_preview": true,
@@ -17,18 +18,18 @@
     "under_eye": 0.3,
     "tone_color": "#F1D3C0",
     "tone_strength": 0.12,
-    "brightness": 0.03
+    "brightness": 0.02
   },
   "contour": {
     "enabled": true,
-    "shading_color": "#9A7563",
-    "shading": 0.15,
+    "shading_color": "#A0745F",
+    "shading": 0.3,
     "jawline": 0.6,
     "cheek_hollow": 0.5,
     "nose_shadow": 0.4,
-    "forehead": 0.3,
+    "forehead": 0.4,
     "highlight_color": "#FFF4EA",
-    "highlight": 0.15,
+    "highlight": 0.25,
     "nose_bridge": 0.6,
     "cheekbone": 0.6,
     "chin": 0.4,
@@ -64,7 +65,7 @@
   },
   "tearbag": {
     "enabled": true,
-    "strength": 0.2,
+    "strength": 0.3,
     "width": 0.5,
     "shadow": 0.3,
     "softness": 0.6

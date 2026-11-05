@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import pytest
 
+from makeup_cam import segmentation as segmentation_module
 from makeup_cam.models import MODEL_SPECS, SELFIE_MULTICLASS
 from makeup_cam.segmentation import BODY_SKIN, FACE_SKIN, HAIR, SegMasks, Segmenter
 
@@ -230,3 +231,92 @@ def test_real_model_finds_hair_and_face_skin(models_dir: Path) -> None:
     assert masks.hair[30:50, 200:240].mean() > 0.5  # top of the head
     assert masks.face_skin[120:140, 205:245].mean() > 0.5  # cheeks / nose
     assert masks.hair[400:, :].mean() < 0.1  # suit and helmet are not hair
+
+
+# ---------------------------------------------------------------------------
+# The whole run happens on the worker thread
+# ---------------------------------------------------------------------------
+
+
+def test_downscaling_and_upsampling_happen_off_the_camera_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads: dict[str, str] = {}
+    real_input, real_mask = segmentation_module.model_input, segmentation_module._full_frame_mask
+
+    def spy_input(*args: object) -> np.ndarray:
+        threads["input"] = threading.current_thread().name
+        return real_input(*args)
+
+    def spy_mask(*args: object) -> np.ndarray:
+        threads["mask"] = threading.current_thread().name
+        return real_mask(*args)
+
+    monkeypatch.setattr(segmentation_module, "model_input", spy_input)
+    monkeypatch.setattr(segmentation_module, "_full_frame_mask", spy_mask)
+    segmenter = make_segmenter(FakeSegModel(), background=True)
+    wait_for_masks(segmenter, 0)
+    segmenter.close()
+    assert threads["input"].startswith("segmenter") and threads["mask"].startswith("segmenter")
+
+
+def test_background_and_inline_runs_give_the_same_masks() -> None:
+    levels = [1.0, 0.4, 0.7, 0.2]
+    frame = np.random.default_rng(3).integers(0, 255, (72, 128, 3), np.uint8)
+
+    inline = make_segmenter(FakeSegModel(lambda call: levels[call]), background=False)
+    expected = [inline.update(frame, 33 * i, i) for i in range(4)]
+    inline.close()
+
+    worker = make_segmenter(FakeSegModel(lambda call: levels[call]), background=True)
+    seen: list[SegMasks] = []
+    index = 0
+    deadline = time.monotonic() + 5.0
+    while len(seen) < 4:
+        masks = worker.update(frame, 33 * index, index)
+        index += 1
+        if masks.hair is not None and (not seen or masks.hair is not seen[-1].hair):
+            seen.append(masks)
+        assert time.monotonic() < deadline
+        time.sleep(0.002)
+    worker.close()
+    for one, other in zip(expected, seen, strict=True):
+        np.testing.assert_array_equal(one.hair, other.hair)
+        np.testing.assert_array_equal(one.face_skin, other.face_skin)
+        np.testing.assert_array_equal(one.body_skin, other.body_skin)
+
+
+def test_a_reset_during_a_run_leaves_no_smoothing_behind() -> None:
+    model = FakeSegModel(lambda call: 1.0 if call == 0 else 0.5)
+    segmenter = make_segmenter(model, background=True)
+    wait_for_masks(segmenter, 0)
+    model.gate.clear()
+    segmenter.update(FRAME, 1000, 1000)  # waits at the gate on the worker
+    assert segmenter._pending is not None
+    segmenter.reset()
+    model.gate.set()
+    while not segmenter._pending.done():
+        time.sleep(0.002)
+    assert segmenter.update(FRAME, 1033, 1002).hair is None  # adopts nothing: that run is void
+    masks = wait_for_masks(segmenter, 1003)
+    assert hair_value(masks) == pytest.approx(0.5 * HAIR / 10.0, abs=1e-5)  # not blended with the old 1.0
+    segmenter.close()
+
+
+def test_the_frame_size_may_change_while_a_run_is_going() -> None:
+    model = FakeSegModel()
+    segmenter = make_segmenter(model, background=True)
+    wait_for_masks(segmenter, 0)
+    model.gate.clear()
+    small = np.zeros((90, 160, 3), np.uint8)
+    segmenter.update(FRAME, 1000, 1000)
+    masks = segmenter.update(small, 1033, 1001)
+    assert masks.hair is None
+    model.gate.set()
+    deadline = time.monotonic() + 5.0
+    index = 1002
+    while masks.hair is None:
+        masks = segmenter.update(small, 33 * index, index)
+        index += 1
+        assert time.monotonic() < deadline
+        time.sleep(0.002)
+    assert masks.hair.shape == small.shape[:2]
+    segmenter.close()
