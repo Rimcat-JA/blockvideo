@@ -94,7 +94,7 @@ class SkinSettings:
     enabled: bool = flag(True, "肌補正を使う")
     smoothing: float = num(0.45, 0.0, 1.0, "なめらかさ", help="肌のキメ・凹凸をなめらかにします")
     texture: float = num(0.35, 0.0, 1.0, "質感を残す", help="上げると毛穴などの細かい質感を残し、塗りすぎ感を防ぎます")
-    blemish: float = num(0.3, 0.0, 1.0, "シミ・ニキビ跡カバー", help="小さな色ムラを周りの肌になじませます")
+    blemish: float = num(0.5, 0.0, 1.0, "シミ・ニキビ跡カバー", help="小さな色ムラを周りの肌になじませます")
     redness: float = num(0.2, 0.0, 1.0, "赤み補正", help="頬や小鼻の赤みを抑えます")
     under_eye: float = num(0.3, 0.0, 1.0, "クマ補正（コンシーラー）", help="目の下の暗さを明るくします")
     tone_color: str = color("#F1D3C0", "ファンデの色")
@@ -137,7 +137,7 @@ class BlushSettings:
 class EyeshadowSettings:
     enabled: bool = flag(True, "アイシャドウを使う")
     color: str = color("#A0705E", "アイシャドウの色")
-    opacity: float = num(0.28, 0.0, 1.0, "濃さ")
+    opacity: float = num(0.5, 0.0, 1.0, "濃さ")
     height: float = num(0.5, 0.0, 1.0, "塗る高さ", help="まぶたのどこまで塗るか（上げると眉側まで広がります）")
     softness: float = num(0.6, 0.0, 1.0, "ぼかし")
     shimmer: float = num(0.0, 0.0, 1.0, "ラメ・ツヤ感")
