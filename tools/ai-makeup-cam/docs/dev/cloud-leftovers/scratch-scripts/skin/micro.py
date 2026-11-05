@@ -1,0 +1,23 @@
+import time, numpy as np, cv2
+def t(label, fn, n=300):
+    fn(); s = time.perf_counter()
+    for _ in range(n): fn()
+    print(f"{label}: {(time.perf_counter()-s)/n*1000:.4f} ms")
+for shape in ((366, 309, 3), (136, 116, 3)):
+    a = np.random.rand(*shape).astype(np.float32); b = np.random.rand(*shape).astype(np.float32); o = np.empty_like(a)
+    print(shape)
+    t(" np mul alloc", lambda: a * b)
+    t(" np mul out", lambda: np.multiply(a, b, out=o))
+    t(" cv mul dst", lambda: cv2.multiply(a, b, dst=o))
+    t(" np add out", lambda: np.add(a, b, out=o))
+    t(" cv add dst", lambda: cv2.add(a, b, dst=o))
+    t(" np clip out", lambda: np.clip(a, 0, 1, out=o))
+    t(" cv min/max", lambda: cv2.min(cv2.max(a, 0.0, dst=o), 1.0, dst=o))
+    small = np.random.rand(shape[0] // 3, shape[1] // 3, 3).astype(np.float32)
+    t(" resize up", lambda: cv2.resize(small, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR))
+    t(" gray", lambda: cv2.cvtColor(a, cv2.COLOR_BGR2GRAY))
+    g = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+    t(" gauss 1ch s2.6", lambda: cv2.GaussianBlur(g, (0, 0), 2.6))
+    t(" np 1ch mul", lambda: g * g)
+    t(" broadcast add", lambda: np.add(a, g[..., None], out=o))
+    t(" cv merge+add", lambda: cv2.add(a, cv2.merge([g, g, g]), dst=o))

@@ -1,0 +1,29 @@
+{
+  "natural": {
+    "skin": {"smoothing": 0.4, "texture": 0.4},
+    "eyeliner": {"wing": 0.1}
+  },
+  "bare": {
+    "skin": {"smoothing": 0.35, "texture": 0.45, "blemish": 0.5, "redness": 0.3, "under_eye": 0.4, "tone_strength": 0.06, "brightness": 0.02},
+    "lips": {"color": "#B9706C", "opacity": 0.15, "finish": "satin", "gloss": 0.2},
+    "blush": {"enabled": false},
+    "eyeshadow": {"enabled": false},
+    "eyeliner": {"enabled": false},
+    "brows": {"opacity": 0.15},
+    "hair": {"gloss": 0.25, "smoothness": 0.35}
+  },
+  "polished": {
+    "skin": {"smoothing": 0.5, "texture": 0.3, "blemish": 0.6, "redness": 0.3, "under_eye": 0.45, "tone_strength": 0.18, "brightness": 0.04},
+    "lips": {"color": "#B04A5A", "opacity": 0.7, "gloss": 0.4},
+    "blush": {"opacity": 0.38},
+    "eyeshadow": {"color": "#946150", "opacity": 0.85, "height": 0.7, "shimmer": 0.15},
+    "eyeliner": {"opacity": 0.8, "thickness": 0.5, "wing": 0.3, "lower": 0.2},
+    "brows": {"opacity": 0.5, "thickness": 0.1},
+    "hair": {"gloss": 0.45, "smoothness": 0.45}
+  },
+  "off": {
+    "skin": {"enabled": false}, "lips": {"enabled": false}, "blush": {"enabled": false},
+    "eyeshadow": {"enabled": false}, "eyeliner": {"enabled": false}, "brows": {"enabled": false},
+    "hair": {"enabled": false}
+  }
+}
