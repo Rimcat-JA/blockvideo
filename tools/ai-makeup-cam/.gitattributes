@@ -1,0 +1,5 @@
+# The repository default is LF; Windows batch files need CRLF (labels and goto break with LF).
+*.bat text eol=crlf
+*.sh text eol=lf
+*.command text eol=lf
+*.npy binary
