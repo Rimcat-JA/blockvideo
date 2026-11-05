@@ -1,0 +1,9 @@
+[project]
+name = "ai-makeup-cam"
+version = "0.1.0"
+description = "Real-time AI makeup virtual camera for online interviews"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
