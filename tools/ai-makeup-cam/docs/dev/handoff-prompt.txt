@@ -1,0 +1,16 @@
+AI メイクカメラ（Rimcat-JA/blockvideo の tools/ai-makeup-cam/）の開発を、クラウドのセッションから引き継いでください。
+
+1. まず次を実行して、作業途中のブランチに切り替えてください（作業ツリーがきれいなことを確認してから）。
+   git fetch origin
+   git checkout claude/wip-phase2
+2. tools/ai-makeup-cam/docs/dev/HANDOFF.md を最初から最後まで読んでください。目的・決定事項・現在の状態・残りのタスク・開発環境の作り方・注意点がすべて書いてあります。技術的な詳細は、同じフォルダの contract-phase1.md / contract-phase2.md と、workflow-phase2.js / workflow-plan-a.js のプロンプトにあります。
+3. HANDOFF.md の「4. ローカルの開発環境」の手順で .venv を作り、テスト素材を取ってきて、テストを実行し、今の状態（第1弾は全部成功、WIP の歯のテストが 2 件失敗）を確認してください。
+4. 最初の作業は「実機で動かす」です。start_windows.bat でアプリを起動し、私の Web カメラ・OBS Virtual Camera・Zoom で動作を一緒に確認してください。問題があれば直してください。
+5. そのあと HANDOFF.md の「5. 最初にやると良いこと」の順番で、第2弾の残り → 案A → 録画ツール → 案B と進めてください。大きな作業は、必要に応じて複数エージェントのワークフローを使ってかまいません。
+
+ルール：
+- 応答は日本語で、ステップごとに分かりやすく説明してください。相談しながら進めたいので、判断が必要なところは選択肢を示して確認してください。
+- 私の代名詞は she / her / 彼女 のみです。
+- テスト素材は女性の素材を使ってください。
+- push と PR は Rimcat-JA/blockvideo に行ってください。WIP の作業が完成してテストが全部通ったら claude/clever-mendel-cdh090 にマージして push し、PR #5（https://github.com/Rimcat-JA/blockvideo/pull/5）の本文のチェックリストを更新してください。
+- 私の顔の写真・動画やテスト素材は、絶対にリポジトリに入れないでください。
