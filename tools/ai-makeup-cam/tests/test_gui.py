@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import argparse
+import signal
 import threading
 import time
 from collections.abc import Callable, Collection, Iterator
@@ -18,7 +19,7 @@ import pytest
 from PySide6.QtCore import QByteArray, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 from makeup_cam import config, gui
 from makeup_cam.config import SECTION_LABELS, SECTIONS, MakeupSettings
@@ -33,7 +34,6 @@ from makeup_cam.gui import (
     IntEditor,
     MainWindow,
     bgr_to_qimage,
-    initial_settings,
     options_from_args,
 )
 from makeup_cam.presets import find_preset, load_last_session, load_preset, save_preset
@@ -645,22 +645,6 @@ def test_remembered_state_roundtrip(make_window: Callable[..., Harness]) -> None
     assert state.geometry() is not None
 
 
-def test_initial_settings_fallback_order(isolated_dirs: Path) -> None:
-    assert initial_settings() == (MakeupSettings(), None)
-
-    natural = MakeupSettings()
-    natural.lips.opacity = 0.11
-    (isolated_dirs / f"{gui.DEFAULT_PRESET_NAME}.json").write_text(natural.to_json(), encoding="utf-8")
-    assert initial_settings() == (natural, gui.DEFAULT_PRESET_NAME)
-
-    session = MakeupSettings()
-    session.lips.opacity = 0.22
-    gui.save_last_session(session)
-    assert initial_settings() == (session, None)
-    assert initial_settings("natural") == (natural, "natural")
-    assert initial_settings("missing") == (session, None)
-
-
 def test_options_merge_command_line_and_remembered_state(qapp: QApplication) -> None:
     state = GuiState()
     state.save(camera_index=2, resolution=(960, 540), preset=None, geometry=QByteArray(), splitter=QByteArray())
@@ -695,3 +679,14 @@ def test_prepare_models_reports_download_errors(
         (tmp_path / spec.filename).write_bytes(b"model")
     assert gui.prepare_models() is None
     assert calls == ["download", "ok"]  # present files: no download attempt
+
+
+def test_ctrl_c_in_the_terminal_closes_the_window(qapp: QApplication) -> None:
+    window = QMainWindow()
+    window.show()
+    previous = signal.getsignal(signal.SIGINT)
+    with gui.closed_by_ctrl_c(window):
+        signal.raise_signal(signal.SIGINT)
+        qapp.processEvents()
+        assert not window.isVisible()
+    assert signal.getsignal(signal.SIGINT) is previous

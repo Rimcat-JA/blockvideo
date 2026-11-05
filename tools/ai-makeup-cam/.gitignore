@@ -1,0 +1,7 @@
+# Also covered by the parent repository; kept so the folder works on its own.
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

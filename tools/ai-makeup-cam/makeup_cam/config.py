@@ -167,7 +167,7 @@ class BrowSettings:
 class HairSettings:
     enabled: bool = flag(True, "髪の補正を使う")
     gloss: float = num(0.3, 0.0, 1.0, "ツヤ出し", help="髪のハイライトを強めて天使の輪のようなツヤを出します")
-    smoothness: float = num(0.3, 0.0, 1.0, "まとまり感", help="アホ毛やパサつきのザラザラ感をなめらかにします")
+    smoothness: float = num(0.3, 0.0, 1.0, "まとまり感", help="毛流れに沿ってパサつき・ザラつきを整えます（外にはねたアホ毛は消えません）")
     color: str = color("#3B2A22", "髪色")
     color_strength: float = num(0.0, 0.0, 1.0, "髪色の強さ", help="0で地毛のまま。上げると指定した髪色に近づきます")
     brightness: float = num(0.0, -0.5, 0.5, "髪の明るさ")

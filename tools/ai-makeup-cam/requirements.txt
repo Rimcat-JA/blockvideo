@@ -1,8 +1,8 @@
 # Python 3.10 - 3.12 recommended (MediaPipe wheels).
 mediapipe>=0.10.14
-# Headless build on purpose: the GUI is PySide6, and the regular opencv-python
-# wheel bundles its own Qt, which conflicts with PySide6.
-opencv-python-headless>=4.8
+# The OpenCV build MediaPipe itself depends on. A second OpenCV package (e.g.
+# opencv-python-headless) would install into the same cv2 folder and conflict.
+opencv-contrib-python>=4.8
 numpy>=1.24
 PySide6>=6.5
 pyvirtualcam>=0.11

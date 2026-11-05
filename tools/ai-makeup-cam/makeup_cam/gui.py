@@ -22,6 +22,7 @@ import html
 import logging
 import math
 import re
+import signal
 import sys
 import threading
 from collections.abc import Callable, Collection, Iterator
@@ -90,8 +91,8 @@ from .presets import (
     PresetInfo,
     delete_preset,
     find_preset,
+    initial_settings,
     list_presets,
-    load_last_session,
     load_preset,
     sanitize_preset_name,
     save_last_session,
@@ -106,11 +107,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 APP_TITLE = "AI メイクカメラ"
-DEFAULT_PRESET_NAME = "natural"
 RESOLUTIONS: tuple[tuple[int, int], ...] = ((1280, 720), (960, 540), (640, 480))
 SETTINGS_PUSH_INTERVAL_MS = 30
 AUTOSAVE_DELAY_MS = 1000
 RUNNER_STOP_DEADLINE_S = 2.0
+# How often Python gets the chance to run a Ctrl+C handler while Qt waits for events.
+SIGNAL_POLL_MS = 200
 
 FACE_HINT = "顔が見つかりません\nカメラの正面に顔が映るようにしてください"
 VIRTUAL_CAMERA_HELP = (
@@ -827,28 +829,6 @@ def options_from_args(args: argparse.Namespace | None, state: GuiState) -> GuiOp
     )
 
 
-def initial_settings(requested_preset: str | None = None) -> tuple[MakeupSettings, str | None]:
-    """Settings to start with, and the preset they were loaded from (if any).
-
-    Order: a requested preset, then the last session, then the built-in
-    ``DEFAULT_PRESET_NAME`` preset, then plain defaults.
-    """
-    if requested_preset:
-        try:
-            return load_preset(requested_preset), requested_preset
-        except PresetError:
-            logger.warning("requested preset %r is not usable; restoring the last session", requested_preset)
-    session = load_last_session()
-    if session is not None:
-        return session, None
-    if find_preset(DEFAULT_PRESET_NAME) is not None:
-        try:
-            return load_preset(DEFAULT_PRESET_NAME), DEFAULT_PRESET_NAME
-        except PresetError:
-            logger.warning("built-in preset %r is not usable; using defaults", DEFAULT_PRESET_NAME)
-    return MakeupSettings(), None
-
-
 # --------------------------------------------------------------------------
 # Main window
 # --------------------------------------------------------------------------
@@ -1526,11 +1506,30 @@ def run_gui(args: argparse.Namespace | None = None) -> int:
         window.restore_layout()
         window.show()
         window.start()
-        return app.exec()
+        with closed_by_ctrl_c(window):
+            return app.exec()
     finally:
         # A runner that did not stop may still be inside the pipeline; leave it to process exit.
         if window is None or window.shutdown():
             pipeline.close()
+
+
+@contextmanager
+def closed_by_ctrl_c(window: QWidget) -> Iterator[None]:
+    """Close ``window`` on Ctrl+C in the terminal, exactly like closing it by hand.
+
+    Python runs signal handlers only between bytecodes, which never happens
+    while Qt's event loop sleeps, so a cheap repeating timer wakes it up.
+    """
+    previous = signal.signal(signal.SIGINT, lambda _signum, _frame: window.close())
+    timer = QTimer(window)
+    timer.timeout.connect(lambda: None)
+    timer.start(SIGNAL_POLL_MS)
+    try:
+        yield
+    finally:
+        timer.stop()
+        signal.signal(signal.SIGINT, previous)
 
 
 def prepare_models() -> str | None:

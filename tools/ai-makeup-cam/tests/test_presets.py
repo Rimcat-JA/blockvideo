@@ -10,9 +10,11 @@ import pytest
 from makeup_cam import config, presets
 from makeup_cam.config import MakeupSettings
 from makeup_cam.presets import (
+    DEFAULT_PRESET_NAME,
     PresetError,
     delete_preset,
     find_preset,
+    initial_settings,
     last_session_path,
     list_presets,
     load_last_session,
@@ -219,3 +221,21 @@ def test_failing_preset_save_raises_preset_error(tmp_path: Path, monkeypatch: py
     monkeypatch.setenv("AI_MAKEUP_CAM_HOME", str(blocker))
     with pytest.raises(PresetError, match="保存できませんでした"):
         save_preset("mine", MakeupSettings())
+
+
+# ---- startup settings ------------------------------------------------------
+
+
+def test_initial_settings_fallback_order(dirs: tuple[Path, Path]) -> None:
+    builtin, _user = dirs
+    assert initial_settings() == (MakeupSettings(), None)
+
+    natural = _with_lip_opacity(0.11)
+    _write(builtin / f"{DEFAULT_PRESET_NAME}.json", natural)
+    assert initial_settings() == (natural, DEFAULT_PRESET_NAME)
+
+    session = _with_lip_opacity(0.22)
+    save_last_session(session)
+    assert initial_settings() == (session, None)
+    assert initial_settings(DEFAULT_PRESET_NAME) == (natural, DEFAULT_PRESET_NAME)
+    assert initial_settings("missing") == (session, None)

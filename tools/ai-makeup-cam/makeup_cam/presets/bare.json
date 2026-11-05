@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "general": {
+    "intensity": 1.0,
+    "mirror_preview": true,
+    "mirror_output": false,
+    "landmark_smoothing": 0.5,
+    "segmentation_interval": 2,
+    "show_landmarks": false
+  },
+  "skin": {
+    "enabled": true,
+    "smoothing": 0.35,
+    "texture": 0.45,
+    "blemish": 0.5,
+    "redness": 0.3,
+    "under_eye": 0.4,
+    "tone_color": "#F1D3C0",
+    "tone_strength": 0.06,
+    "brightness": 0.02
+  },
+  "lips": {
+    "enabled": true,
+    "color": "#B9706C",
+    "opacity": 0.15,
+    "finish": "satin",
+    "gloss": 0.2,
+    "feather": 0.4,
+    "outline": 0.0
+  },
+  "blush": {
+    "enabled": false,
+    "color": "#E8878C",
+    "opacity": 0.22,
+    "shape": "oval",
+    "size": 1.0,
+    "offset_x": 0.0,
+    "offset_y": 0.0,
+    "softness": 0.7
+  },
+  "eyeshadow": {
+    "enabled": false,
+    "color": "#A0705E",
+    "opacity": 0.5,
+    "height": 0.5,
+    "softness": 0.6,
+    "shimmer": 0.0
+  },
+  "eyeliner": {
+    "enabled": false,
+    "color": "#2E211C",
+    "opacity": 0.55,
+    "thickness": 0.3,
+    "wing": 0.15,
+    "lower": 0.0,
+    "softness": 0.4
+  },
+  "brows": {
+    "enabled": true,
+    "color": "#5C4334",
+    "opacity": 0.15,
+    "thickness": 0.0,
+    "softness": 0.5
+  },
+  "hair": {
+    "enabled": true,
+    "gloss": 0.25,
+    "smoothness": 0.35,
+    "color": "#3B2A22",
+    "color_strength": 0.0,
+    "brightness": 0.0,
+    "contrast": 0.0,
+    "edge_softness": 0.5
+  }
+}

@@ -1,4 +1,4 @@
-"""Named makeup presets and the automatically saved last session.
+"""Named makeup presets, the automatically saved last session and the startup settings.
 
 A preset is a ``MakeupSettings`` JSON file whose file stem is its name.
 Built-in presets ship in ``BUILTIN_PRESETS_DIR`` and are read-only; user
@@ -28,6 +28,8 @@ from .config import MakeupSettings
 logger = logging.getLogger(__name__)
 
 PRESET_SUFFIX = ".json"
+# Built-in preset used when there is no saved session (就活ナチュラル).
+DEFAULT_PRESET_NAME = "natural"
 LAST_SESSION_FILENAME = "last_session.json"
 MAX_NAME_LENGTH = 64
 
@@ -148,6 +150,28 @@ def load_last_session() -> MakeupSettings | None:
     except (OSError, ValueError):
         logger.warning("ignoring unreadable last session file %s", path, exc_info=True)
         return None
+
+
+def initial_settings(requested_preset: str | None = None) -> tuple[MakeupSettings, str | None]:
+    """Settings to start with, and the preset they were loaded from (if any).
+
+    Order: a requested preset, then the last session, then the built-in
+    ``DEFAULT_PRESET_NAME`` preset, then plain defaults.
+    """
+    if requested_preset:
+        try:
+            return load_preset(requested_preset), requested_preset
+        except PresetError:
+            logger.warning("requested preset %r is not usable; restoring the last session", requested_preset)
+    session = load_last_session()
+    if session is not None:
+        return session, None
+    if find_preset(DEFAULT_PRESET_NAME) is not None:
+        try:
+            return load_preset(DEFAULT_PRESET_NAME), DEFAULT_PRESET_NAME
+        except PresetError:
+            logger.warning("built-in preset %r is not usable; using defaults", DEFAULT_PRESET_NAME)
+    return MakeupSettings(), None
 
 
 def _scan(directory: Path, *, builtin: bool) -> dict[str, PresetInfo]:
