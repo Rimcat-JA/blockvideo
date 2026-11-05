@@ -44,6 +44,10 @@ class FrameContext:
     hair_mask: np.ndarray | None = None
     face_skin_mask: np.ndarray | None = None
     body_skin_mask: np.ndarray | None = None
+    # Empty-room background plate (float32 BGR in [0, 1], same size as the
+    # frame) captured with the GUI's 「背景を撮影」 button. None when the user
+    # has not captured one or the camera/resolution changed since.
+    background: np.ndarray | None = None
     # Master intensity (GeneralSettings.intensity); effects multiply their
     # opacity/strength by this.
     intensity: float = 1.0

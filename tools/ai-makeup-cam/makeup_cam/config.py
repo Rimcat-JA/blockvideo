@@ -175,27 +175,98 @@ class HairSettings:
     edge_softness: float = num(0.5, 0.0, 1.0, "境目のなじませ", help="髪と背景・顔の境目のぼかし")
 
 
+@dataclass
+class ContourSettings:
+    enabled: bool = flag(True, "シェーディング・ハイライトを使う")
+    shading_color: str = color("#9A7563", "シェーディングの色")
+    shading: float = num(0.15, 0.0, 1.0, "シェーディングの濃さ", help="影を入れて小顔・立体的に見せます")
+    jawline: float = num(0.6, 0.0, 1.0, "フェイスライン", help="あごから耳にかけての影（シェーディング全体の中での割合）")
+    cheek_hollow: float = num(0.5, 0.0, 1.0, "頬骨の下", help="頬骨の下のくぼみの影")
+    nose_shadow: float = num(0.4, 0.0, 1.0, "ノーズシャドウ", help="鼻筋の両側の影")
+    forehead: float = num(0.3, 0.0, 1.0, "おでこの生え際", help="生え際の影でおでこを小さく見せます")
+    highlight_color: str = color("#FFF4EA", "ハイライトの色")
+    highlight: float = num(0.15, 0.0, 1.0, "ハイライトの強さ", help="光を入れて立体感とツヤを出します")
+    nose_bridge: float = num(0.6, 0.0, 1.0, "鼻筋", help="鼻筋のハイライト（ハイライト全体の中での割合）")
+    cheekbone: float = num(0.6, 0.0, 1.0, "頬骨の上")
+    chin: float = num(0.4, 0.0, 1.0, "あご先")
+    cupids_bow: float = num(0.3, 0.0, 1.0, "唇の山", help="上唇の山の上の小さなハイライト")
+    softness: float = num(0.7, 0.0, 1.0, "ぼかし")
+
+
+@dataclass
+class TearbagSettings:
+    enabled: bool = flag(True, "涙袋を使う")
+    strength: float = num(0.2, 0.0, 1.0, "ぷっくり感", help="下まつげのすぐ下に光を入れて、ふくらみを作ります")
+    width: float = num(0.5, 0.0, 1.0, "幅", help="目頭から目尻のどこまで入れるか")
+    shadow: float = num(0.3, 0.0, 1.0, "下の影", help="ふくらみの下の細い影（ぷっくり感の中での割合）")
+    softness: float = num(0.6, 0.0, 1.0, "ぼかし")
+
+
+@dataclass
+class TeethSettings:
+    enabled: bool = flag(True, "歯の補正を使う")
+    whitening: float = num(0.3, 0.0, 1.0, "白さ", help="歯を明るくします（真っ白にはならないよう上限があります）")
+    yellow_reduction: float = num(0.4, 0.0, 1.0, "黄ばみ補正", help="歯の黄色みを抑えます")
+    evenness: float = num(0.3, 0.0, 1.0, "色ムラ・影をなじませる", help="歯ごとの色の差や、すき間・重なりの暗い影を目立たなくします")
+    feather: float = num(0.5, 0.0, 1.0, "境目のぼかし", help="歯と唇・歯ぐきの境目のなじませ")
+
+
+@dataclass
+class ReshapeSettings:
+    enabled: bool = flag(True, "顔の形の補正を使う")
+    face_slim: float = num(0.0, -1.0, 1.0, "小顔（輪郭）", help="プラスで輪郭をすっきり、マイナスでふっくら")
+    jaw: float = num(0.0, -1.0, 1.0, "エラ", help="プラスでエラを目立たなくします")
+    chin_length: float = num(0.0, -1.0, 1.0, "あごの長さ", help="プラスで長く、マイナスで短く")
+    eye_size: float = num(0.0, -1.0, 1.0, "目の大きさ", help="プラスで大きく")
+    nose_width: float = num(0.0, -1.0, 1.0, "小鼻の幅", help="プラスで小鼻を細く")
+    nose_length: float = num(0.0, -1.0, 1.0, "鼻の長さ", help="プラスで短く")
+    mouth_width: float = num(0.0, -1.0, 1.0, "口の大きさ", help="プラスで小さく")
+    mouth_corner: float = num(0.0, 0.0, 1.0, "口角アップ")
+    lip_fullness: float = num(0.0, -1.0, 1.0, "唇のふっくら感", help="プラスでふっくら")
+    brow_lift: float = num(0.0, -1.0, 1.0, "眉の位置", help="プラスで上げる")
+    protect_background: float = num(0.8, 0.0, 1.0, "背景のゆがみ防止", help="上げると顔の外（背景）が曲がりにくくなります")
+
+
+@dataclass
+class HairShapeSettings:
+    enabled: bool = flag(True, "髪型の補正を使う")
+    flyaway: float = num(0.3, 0.0, 1.0, "アホ毛消し", help="髪の輪郭から飛び出した細い毛を消します。「背景を撮影」をしておくときれいに消えます")
+    volume_top: float = num(0.0, -1.0, 1.0, "トップのボリューム", help="プラスでふんわり、マイナスでぺたんと")
+    width_sides: float = num(0.0, -1.0, 1.0, "横の広がり", help="マイナスで広がりを抑えます")
+    use_background_plate: bool = flag(True, "撮影した背景を使う", help="「背景を撮影」で撮った背景で、消した髪の部分を埋めます")
+
+
 # Order here is the order of tabs in the GUI.
 SECTIONS: dict[str, type] = {
     "general": GeneralSettings,
     "skin": SkinSettings,
+    "contour": ContourSettings,
     "lips": LipSettings,
     "blush": BlushSettings,
     "eyeshadow": EyeshadowSettings,
+    "tearbag": TearbagSettings,
     "eyeliner": EyelinerSettings,
     "brows": BrowSettings,
+    "teeth": TeethSettings,
+    "reshape": ReshapeSettings,
     "hair": HairSettings,
+    "hairshape": HairShapeSettings,
 }
 
 SECTION_LABELS: dict[str, str] = {
     "general": "全体",
     "skin": "肌",
+    "contour": "立体感",
     "lips": "リップ",
     "blush": "チーク",
     "eyeshadow": "アイシャドウ",
+    "tearbag": "涙袋",
     "eyeliner": "アイライナー",
     "brows": "眉",
+    "teeth": "歯",
+    "reshape": "顔の形",
     "hair": "髪",
+    "hairshape": "髪型",
 }
 
 
@@ -203,12 +274,17 @@ SECTION_LABELS: dict[str, str] = {
 class MakeupSettings:
     general: GeneralSettings = field(default_factory=GeneralSettings)
     skin: SkinSettings = field(default_factory=SkinSettings)
+    contour: ContourSettings = field(default_factory=ContourSettings)
     lips: LipSettings = field(default_factory=LipSettings)
     blush: BlushSettings = field(default_factory=BlushSettings)
     eyeshadow: EyeshadowSettings = field(default_factory=EyeshadowSettings)
+    tearbag: TearbagSettings = field(default_factory=TearbagSettings)
     eyeliner: EyelinerSettings = field(default_factory=EyelinerSettings)
     brows: BrowSettings = field(default_factory=BrowSettings)
+    teeth: TeethSettings = field(default_factory=TeethSettings)
+    reshape: ReshapeSettings = field(default_factory=ReshapeSettings)
     hair: HairSettings = field(default_factory=HairSettings)
+    hairshape: HairShapeSettings = field(default_factory=HairShapeSettings)
 
     # ---- serialization ---------------------------------------------------
 

@@ -19,6 +19,22 @@
     "tone_strength": 0.12,
     "brightness": 0.03
   },
+  "contour": {
+    "enabled": true,
+    "shading_color": "#9A7563",
+    "shading": 0.15,
+    "jawline": 0.6,
+    "cheek_hollow": 0.5,
+    "nose_shadow": 0.4,
+    "forehead": 0.3,
+    "highlight_color": "#FFF4EA",
+    "highlight": 0.15,
+    "nose_bridge": 0.6,
+    "cheekbone": 0.6,
+    "chin": 0.4,
+    "cupids_bow": 0.3,
+    "softness": 0.7
+  },
   "lips": {
     "enabled": true,
     "color": "#C25B62",
@@ -46,6 +62,13 @@
     "softness": 0.6,
     "shimmer": 0.0
   },
+  "tearbag": {
+    "enabled": true,
+    "strength": 0.2,
+    "width": 0.5,
+    "shadow": 0.3,
+    "softness": 0.6
+  },
   "eyeliner": {
     "enabled": true,
     "color": "#2E211C",
@@ -62,6 +85,27 @@
     "thickness": 0.0,
     "softness": 0.5
   },
+  "teeth": {
+    "enabled": true,
+    "whitening": 0.3,
+    "yellow_reduction": 0.4,
+    "evenness": 0.3,
+    "feather": 0.5
+  },
+  "reshape": {
+    "enabled": true,
+    "face_slim": 0.0,
+    "jaw": 0.0,
+    "chin_length": 0.0,
+    "eye_size": 0.0,
+    "nose_width": 0.0,
+    "nose_length": 0.0,
+    "mouth_width": 0.0,
+    "mouth_corner": 0.0,
+    "lip_fullness": 0.0,
+    "brow_lift": 0.0,
+    "protect_background": 0.8
+  },
   "hair": {
     "enabled": true,
     "gloss": 0.3,
@@ -71,5 +115,12 @@
     "brightness": 0.0,
     "contrast": 0.0,
     "edge_softness": 0.5
+  },
+  "hairshape": {
+    "enabled": true,
+    "flyaway": 0.3,
+    "volume_top": 0.0,
+    "width_sides": 0.0,
+    "use_background_plate": true
   }
 }
