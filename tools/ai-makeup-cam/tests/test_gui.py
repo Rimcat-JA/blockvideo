@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,7 @@ from PySide6.QtGui import QColor, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow
 
-from makeup_cam import config, gui
+from makeup_cam import camera, config, gui
 from makeup_cam.config import SECTION_LABELS, SECTIONS, MakeupSettings
 from makeup_cam.gui import (
     APP_TITLE,
@@ -37,6 +38,7 @@ from makeup_cam.gui import (
     options_from_args,
 )
 from makeup_cam.presets import find_preset, load_last_session, load_preset, save_preset
+from makeup_cam.runner import CameraRunner
 
 # ---- fakes ------------------------------------------------------------------
 
@@ -86,6 +88,7 @@ class FakeRunner:
         self.pushed: list[MakeupSettings] = []
         self.bypass: list[bool] = []
         self.cameras: list[tuple[int, int | None, int | None]] = []
+        self.camera_names: list[str | None] = []
         self.virtual_camera: list[bool] = []
 
     def start(self) -> None:
@@ -101,8 +104,11 @@ class FakeRunner:
     def set_bypass(self, bypass: bool) -> None:
         self.bypass.append(bypass)
 
-    def set_camera(self, index: int, width: int | None = None, height: int | None = None) -> None:
+    def set_camera(
+        self, index: int, width: int | None = None, height: int | None = None, name: str | None = None
+    ) -> None:
         self.cameras.append((index, width, height))
+        self.camera_names.append(name)
 
     def set_virtual_camera(self, enabled: bool) -> None:
         self.virtual_camera.append(enabled)
@@ -151,6 +157,7 @@ def isolated_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     builtin.mkdir()
     monkeypatch.setattr(config, "BUILTIN_PRESETS_DIR", builtin)
     monkeypatch.setenv("AI_MAKEUP_CAM_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(camera, "_device_names", dict)  # the cameras of the PC running the tests
     return builtin
 
 
@@ -162,6 +169,7 @@ def make_window(qapp: QApplication) -> Iterator[Callable[..., Harness]]:
         settings: MakeupSettings | None = None,
         preset_name: str | None = None,
         camera_lister: Callable[[Collection[int]], list[FakeCamera]] | None = None,
+        options: GuiOptions | None = None,
     ) -> Harness:
         runners: list[FakeRunner] = []
 
@@ -175,7 +183,7 @@ def make_window(qapp: QApplication) -> Iterator[Callable[..., Harness]]:
             settings=settings or MakeupSettings(),
             preset_name=preset_name,
             camera_lister=camera_lister,
-            options=GuiOptions(),
+            options=options or GuiOptions(),
             dialogs=dialogs,
         )
         windows.append(window)
@@ -609,6 +617,525 @@ def test_selected_camera_stays_listed_when_the_probe_misses_it(make_window: Call
     harness.window.start()
     wait_until(lambda: harness.window._rescan_button.isEnabled())
     assert harness.window._camera_combo.itemData(0) == 0
+
+
+def test_rescan_moves_a_failing_virtual_camera_selection_to_a_real_camera(make_window: Callable[..., Harness]) -> None:
+    found: list[FakeCamera] = []
+    harness = make_window(camera_lister=lambda in_use: list(found))
+    window = harness.window
+    window.start()
+    wait_until(lambda: window._rescan_button.isEnabled())
+    harness.runner.on_status(FakeStatus(camera_ok=False, camera_error="「OBS Virtual Camera」は仮想カメラなので…"))
+    assert "仮想カメラ" in window.preview.notice
+    assert harness.runner.cameras == []  # nothing real to move to yet
+
+    found.append(FakeCamera(1, "HD Pro Webcam C920", 1280, 720))  # she plugged in the webcam and pressed the button
+    window._rescan_button.click()
+    wait_until(lambda: window._rescan_button.isEnabled())
+
+    assert window._camera_combo.currentData() == 1
+    assert window._camera_combo.currentText() == "HD Pro Webcam C920"
+    assert harness.runner.cameras == [(1, 1280, 720)]
+
+
+def test_a_camera_that_is_still_starting_is_not_replaced(make_window: Callable[..., Harness]) -> None:
+    harness = make_window(camera_lister=lambda in_use: [FakeCamera(1, "HD Pro Webcam C920", 1280, 720)])
+    harness.window.start()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+
+    assert harness.window._camera_combo.currentData() == 0
+    assert harness.runner.cameras == []
+
+
+def test_real_camera_name_is_remembered_with_its_index(make_window: Callable[..., Harness]) -> None:
+    harness = make_window(camera_lister=lambda in_use: [FakeCamera(0, "HD Pro Webcam C920", 1280, 720)])
+    harness.window.start()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+
+    harness.window.close()
+
+    state = GuiState()
+    assert (state.camera_index(), state.camera_name()) == (0, "HD Pro Webcam C920")
+
+
+def test_a_selection_known_not_to_be_a_real_camera_does_not_replace_the_remembered_one(
+    make_window: Callable[..., Harness], qapp: QApplication
+) -> None:
+    state = GuiState()
+    state.save(
+        camera_index=1,
+        camera_name="HD Pro Webcam C920",
+        resolution=(1280, 720),
+        preset=None,
+        geometry=QByteArray(),
+        splitter=QByteArray(),
+    )
+    # The webcam is unplugged today: index 0 is OBS (hidden), another camera was found at index 3.
+    harness = make_window(camera_lister=lambda in_use: [FakeCamera(3, "Other", 640, 480)])
+    harness.window.start()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+
+    harness.window.close()
+
+    state = GuiState()
+    assert (state.camera_index(), state.camera_name()) == (1, "HD Pro Webcam C920")
+
+
+def test_choosing_a_camera_tells_the_runner_its_name(make_window: Callable[..., Harness]) -> None:
+    cameras = [FakeCamera(0, "内蔵カメラ", 1280, 720), FakeCamera(2, "USB", 640, 480)]
+    harness = make_window(camera_lister=lambda in_use: list(cameras))
+    window, combo = harness.window, harness.window._camera_combo
+    window.start()
+    wait_until(lambda: combo.count() == 2)
+
+    combo.setCurrentIndex(1)
+    combo.activated.emit(1)
+
+    assert harness.runner.cameras == [(2, 1280, 720)]
+    assert harness.runner.camera_names == ["USB"]
+
+
+def test_a_placeholder_is_not_passed_on_as_a_device_name(make_window: Callable[..., Harness]) -> None:
+    cameras = [FakeCamera(0, "カメラ 0", 640, 480), FakeCamera(1, "カメラ 1", 640, 480)]
+    harness = make_window(camera_lister=lambda in_use: list(cameras))
+    window, combo = harness.window, harness.window._camera_combo
+    window.start()
+    wait_until(lambda: combo.count() == 2)
+
+    combo.setCurrentIndex(1)
+    combo.activated.emit(1)
+
+    assert harness.runner.cameras == [(1, 1280, 720)]
+    assert harness.runner.camera_names == [None]
+
+
+def test_the_probe_is_told_what_is_in_use_by_name_once_it_is_known(make_window: Callable[..., Harness]) -> None:
+    asked: list[list[object]] = []
+
+    def lister(in_use: Collection[object]) -> list[FakeCamera]:
+        asked.append(list(in_use))
+        return [FakeCamera(1, "USB Camera", 1280, 720)]
+
+    harness = make_window(camera_lister=lister, options=GuiOptions(camera_index=1))
+    window = harness.window
+    window.start()
+    wait_until(lambda: window._rescan_button.isEnabled())
+    assert asked == [[1]]  # no name yet: only the index to go on
+
+    window._rescan_button.click()
+    wait_until(lambda: window._rescan_button.isEnabled())
+    assert asked == [[1], ["USB Camera"]]
+
+
+def test_a_failing_camera_without_a_name_is_really_probed(make_window: Callable[..., Harness]) -> None:
+    asked: list[list[object]] = []
+
+    def lister(in_use: Collection[object]) -> list[FakeCamera]:
+        asked.append(list(in_use))
+        return []
+
+    harness = make_window(camera_lister=lister, options=GuiOptions(camera_index=1))
+    harness.runner.on_status(FakeStatus(camera_ok=False, camera_error="カメラ 1 を開けませんでした"))
+    harness.window.start()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+
+    assert asked == [[]]  # nothing is open, so there is nothing to protect from being probed
+
+
+def test_rescan_follows_the_selected_camera_to_its_new_number(make_window: Callable[..., Harness]) -> None:
+    found = [FakeCamera(0, "Built-in", 1280, 720), FakeCamera(1, "USB Camera", 1280, 720)]
+    harness = make_window(camera_lister=lambda in_use: list(found), options=GuiOptions(camera_index=1))
+    window, runner, combo = harness.window, harness.runner, harness.window._camera_combo
+    window.start()
+    wait_until(lambda: combo.count() == 2)
+    assert combo.currentText() == "USB Camera"
+
+    found[:] = [FakeCamera(0, "USB Camera", 0, 0), FakeCamera(1, "Other Camera", 640, 480)]  # Built-in went away
+    window._rescan_button.click()
+    wait_until(lambda: combo.itemText(1) == "Other Camera")
+
+    assert (combo.currentData(), combo.currentText()) == (0, "USB Camera")
+    assert combo.count() == 2  # no made-up entry for the old number
+    assert runner.cameras == []  # the same camera: no reconnect
+
+    combo.activated.emit(combo.currentIndex())
+    assert runner.cameras == []  # choosing it again is still no reason to reconnect
+
+    resolution = window._resolution_combo
+    resolution.setCurrentIndex(resolution.findText("640×480"))
+    resolution.activated.emit(resolution.currentIndex())
+    assert runner.cameras == [(0, 640, 480)]
+    assert runner.camera_names == ["USB Camera"]
+
+
+def test_a_live_camera_the_probe_missed_stays_selected_under_its_own_name(make_window: Callable[..., Harness]) -> None:
+    options = GuiOptions(camera_index=1, camera_name="USB Camera")
+    harness = make_window(camera_lister=lambda in_use: [FakeCamera(1, "Other Camera", 640, 480)], options=options)
+    window, combo = harness.window, harness.window._camera_combo
+    assert combo.currentText() == "USB Camera"  # known from the start
+    window.start()
+    wait_until(lambda: combo.count() == 2)
+
+    assert combo.currentText() == "USB Camera"  # not Other Camera, which has the same number now
+    assert harness.runner.cameras == []
+    window.close()
+
+    assert GuiState().camera_name() is None  # an unplugged device replaces nothing
+
+
+def test_a_failing_camera_that_is_gone_moves_to_a_real_one_on_rescan(make_window: Callable[..., Harness]) -> None:
+    found = [FakeCamera(1, "Other Camera", 640, 480)]
+    options = GuiOptions(camera_index=1, camera_name="USB Camera")
+    harness = make_window(camera_lister=lambda in_use: list(found), options=options)
+    harness.runner.on_status(FakeStatus(camera_ok=False, camera_error="「USB Camera」が見つかりません"))
+
+    harness.window._rescan_button.click()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+
+    assert harness.window._camera_combo.currentText() == "Other Camera"
+    assert harness.runner.cameras == [(1, 1280, 720)]
+    assert harness.runner.camera_names == ["Other Camera"]
+
+
+def test_two_identical_cameras_keep_their_order_on_rescan(make_window: Callable[..., Harness]) -> None:
+    cameras = [FakeCamera(0, "USB Camera", 640, 480), FakeCamera(1, "USB Camera", 640, 480)]
+    asked: list[list[object]] = []
+
+    def lister(in_use: Collection[object]) -> list[FakeCamera]:
+        asked.append(list(in_use))
+        return list(cameras)
+
+    harness = make_window(camera_lister=lister, options=GuiOptions(camera_index=1))
+    window, combo = harness.window, harness.window._camera_combo
+    window.start()
+    wait_until(lambda: combo.count() == 2)
+    assert combo.currentData() == 1
+
+    window._rescan_button.click()
+    wait_until(lambda: window._rescan_button.isEnabled())
+
+    assert combo.currentData() == 1
+    assert asked == [[1], [1]]  # the name cannot tell them apart: only the number says which one is live
+
+
+class NoDevice:
+    """cv2.VideoCapture with nothing there."""
+
+    def __init__(self, index: int, api: int) -> None:
+        pass
+
+    def isOpened(self) -> bool:
+        return False
+
+    def release(self) -> None:
+        pass
+
+
+def save_camera(index: int, name: str) -> None:
+    state = GuiState()
+    state.save(
+        camera_index=index,
+        camera_name=name,
+        resolution=(1280, 720),
+        preset=None,
+        geometry=QByteArray(),
+        splitter=QByteArray(),
+    )
+
+
+def test_the_saved_camera_name_survives_a_run_with_the_webcam_unplugged(
+    make_window: Callable[..., Harness], qapp: QApplication
+) -> None:
+    # No device at all is listed: the selected number is listed anyway in case it is the one in use.
+    save_camera(1, "HD Pro Webcam C920")
+    options = options_from_args(None, GuiState())
+    assert (options.camera_index, options.camera_name) == (1, None)
+    harness = make_window(
+        camera_lister=lambda in_use: camera.list_cameras(in_use=in_use, capture_factory=NoDevice), options=options
+    )
+    window = harness.window
+    window.start()
+    wait_until(lambda: window._rescan_button.isEnabled())
+
+    assert window._camera_combo.currentText() == "カメラ 1"
+    assert "見つかりませんでした" in window._camera_combo.toolTip()
+    window.close()
+
+    state = GuiState()
+    assert (state.camera_index(), state.camera_name()) == (1, "HD Pro Webcam C920")
+
+
+def test_a_bare_number_is_still_remembered_where_there_are_never_names(
+    make_window: Callable[..., Harness], qapp: QApplication
+) -> None:
+    cameras = [FakeCamera(1, "カメラ 1", 640, 480)]
+    harness = make_window(camera_lister=lambda in_use: list(cameras), options=GuiOptions(camera_index=1))
+    harness.window.start()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+    harness.window.close()
+
+    state = GuiState()
+    assert (state.camera_index(), state.camera_name()) == (1, None)
+
+
+def test_the_not_found_hint_goes_away_when_the_listed_camera_turns_out_to_work(
+    make_window: Callable[..., Harness],
+) -> None:
+    # Where there are no names, a camera in use is listed without being probed: it may or may not exist.
+    harness = make_window(camera_lister=lambda in_use: [FakeCamera(0, "カメラ 0", 0, 0)])
+    window, combo = harness.window, harness.window._camera_combo
+    window.start()
+    wait_until(lambda: window._rescan_button.isEnabled())
+    assert "見つかりませんでした" in combo.toolTip()
+
+    harness.runner.on_status(FakeStatus())
+
+    assert combo.toolTip() == ""
+
+
+def test_a_camera_that_was_probed_is_never_reported_as_not_found(make_window: Callable[..., Harness]) -> None:
+    harness = make_window(camera_lister=lambda in_use: [FakeCamera(0, "カメラ 0", 640, 480)])
+    harness.window.start()
+    wait_until(lambda: harness.window._rescan_button.isEnabled())
+    assert harness.window._camera_combo.toolTip() == ""
+
+
+def test_options_look_up_the_remembered_camera_by_name(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = GuiState()
+    state.save(
+        camera_index=1,
+        camera_name="HD Pro Webcam C920",
+        resolution=(1280, 720),
+        preset=None,
+        geometry=QByteArray(),
+        splitter=QByteArray(),
+    )
+    # Renumbered since the last run; index 1 is the virtual camera now.
+    monkeypatch.setattr(camera, "_device_names", lambda: {0: "HD Pro Webcam C920", 1: "OBS Virtual Camera"})
+
+    options = options_from_args(None, state)
+    assert (options.camera_index, options.camera_name) == (0, "HD Pro Webcam C920")
+
+    # --camera is taken literally (CameraSource refuses a virtual camera).
+    explicit = options_from_args(argparse.Namespace(camera=1), state)
+    assert (explicit.camera_index, explicit.camera_name) == (1, None)
+
+
+def test_remembered_virtual_camera_index_is_not_used(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = GuiState()
+    state.save(camera_index=0, resolution=(1280, 720), preset=None, geometry=QByteArray(), splitter=QByteArray())
+    monkeypatch.setattr(camera, "_device_names", lambda: {0: "OBS Virtual Camera", 1: "USB"})
+
+    assert options_from_args(None, state).camera_index == 1
+
+
+# ---- a renumbered camera, with the real runner and camera source -------------------------
+
+
+DEVICE_VALUES = {"Built-in": 50, "USB Camera": 100, "Other Camera": 150, "OBS Virtual Camera": 250}
+
+
+class DeviceWorld:
+    """Windows as the app sees it: every capture is bound to the device that held the index when it was opened."""
+
+    def __init__(self, names: dict[int, str]) -> None:
+        self.names = dict(names)
+        self.opens: list[tuple[str, str]] = []  # (device, name of the thread that opened it)
+        self.stopped: list[str] = []  # devices stopped by the release of another capture, as on DirectShow
+        self.sent_value: int | None = None
+        self.device = "Fake Virtual Camera"
+
+    def capture(self, index: int, api: int) -> DeviceCapture:
+        return DeviceCapture(self, self.names.get(index))
+
+    def send(self, frame: np.ndarray) -> None:
+        self.sent_value = int(frame[0, 0, 0])
+
+    def close(self) -> None:
+        pass
+
+    def by_probe(self) -> list[str]:
+        return [device for device, thread in self.opens if thread == "camera-probe"]
+
+    def by_runner(self) -> list[str]:
+        return [device for device, thread in self.opens if thread != "camera-probe"]
+
+
+class DeviceCapture:
+    def __init__(self, world: DeviceWorld, device: str | None) -> None:
+        self.world = world
+        self.device = device
+        if device is not None:
+            world.opens.append((device, threading.current_thread().name))
+
+    def isOpened(self) -> bool:
+        return self.device is not None
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        time.sleep(0.005)
+        return True, np.full((48, 64, 3), DEVICE_VALUES[str(self.device)], np.uint8)
+
+    def set(self, _prop: int, _value: float) -> bool:
+        return True
+
+    def get(self, _prop: int) -> float:
+        return 30.0
+
+    def release(self) -> None:
+        if threading.current_thread().name == "camera-probe":
+            self.world.stopped.append(str(self.device))
+
+
+class PassThroughPipeline:
+    bypass = False
+
+    def process(self, frame: np.ndarray, _timestamp_ms: int) -> FakeResult:
+        return FakeResult(output=frame, preview=frame, original_preview=frame)
+
+    def set_settings(self, _settings: MakeupSettings) -> None:
+        pass
+
+
+@pytest.fixture
+def real_window(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., tuple]]:
+    windows: list[MainWindow] = []
+
+    def make(names: dict[int, str], index: int, name: str) -> tuple[MainWindow, DeviceWorld]:
+        world = DeviceWorld(names)
+        monkeypatch.setattr(camera, "host_os", lambda: "windows")
+        monkeypatch.setattr(camera, "_device_names", lambda: dict(world.names))
+        monkeypatch.setattr(camera, "_msmf_device_names", dict)
+
+        def factory(on_frame: Callable, on_status: Callable) -> CameraRunner:
+            return CameraRunner(
+                PassThroughPipeline(),
+                camera_index=index,
+                camera_name=name,
+                camera_factory=partial(camera.CameraSource, capture_factory=world.capture, reopen_interval_s=0.05),
+                vcam_factory=lambda **_: world,
+                on_frame=on_frame,
+                on_status=on_status,
+                retry_interval_s=0.05,
+            )
+
+        window = MainWindow(
+            factory,
+            settings=MakeupSettings(),
+            camera_lister=lambda in_use: camera.list_cameras(in_use=in_use, capture_factory=world.capture),
+            options=GuiOptions(camera_index=index, camera_name=name),
+            dialogs=FakeDialogs(),
+        )
+        windows.append(window)
+        window.start()
+        wait_until(lambda: world.sent_value == DEVICE_VALUES[name] and window._rescan_button.isEnabled())
+        return window, world
+
+    yield make
+    for window in windows:
+        window.close()
+        window.deleteLater()
+    QApplication.processEvents()
+
+
+@pytest.mark.parametrize(
+    "takes_the_old_number",
+    ["OBS Virtual Camera", "Other Camera"],  # refused and blanked the call / silently the wrong camera
+)
+def test_a_new_resolution_keeps_the_camera_that_was_renumbered(real_window: Callable, takes_the_old_number: str) -> None:
+    window, world = real_window({0: "Built-in", 1: "USB Camera", 2: takes_the_old_number}, 1, "USB Camera")
+    world.names = {0: "USB Camera", 1: takes_the_old_number}  # the built-in camera went away
+
+    resolution = window._resolution_combo
+    resolution.setCurrentIndex(resolution.findText("640×480"))
+    resolution.activated.emit(resolution.currentIndex())
+
+    wait_until(lambda: len(world.by_runner()) == 2)
+    assert world.by_runner() == ["USB Camera", "USB Camera"]
+    wait_until(lambda: world.sent_value == DEVICE_VALUES["USB Camera"])
+    time.sleep(0.05)
+    assert world.sent_value == DEVICE_VALUES["USB Camera"]
+    assert window._last_status is None or window._last_status.camera_error is None
+    assert window._camera_combo.currentText() == "USB Camera"
+
+
+def test_a_rescan_never_opens_the_live_camera_under_its_new_number(real_window: Callable) -> None:
+    window, world = real_window({0: "Built-in", 1: "USB Camera", 2: "OBS Virtual Camera"}, 1, "USB Camera")
+    combo = window._camera_combo
+    world.names = {0: "USB Camera", 1: "OBS Virtual Camera"}
+    world.opens.clear()
+    world.stopped.clear()
+
+    window._rescan_button.click()
+    wait_until(lambda: window._rescan_button.isEnabled())
+
+    assert world.by_probe() == []
+    assert world.stopped == []  # on DirectShow this would have stopped the live capture
+    assert [(combo.itemData(row), combo.itemText(row)) for row in range(combo.count())] == [(0, "USB Camera")]
+    assert (combo.currentData(), combo.currentText()) == (0, "USB Camera")
+    assert world.by_runner() == []  # no reconnect
+    window.close()
+    state = GuiState()
+    assert (state.camera_index(), state.camera_name()) == (0, "USB Camera")
+
+
+# ---- a video file instead of a camera ---------------------------------------------------
+
+
+def test_video_file_is_the_one_camera_entry_and_survives_reselection(make_window: Callable[..., Harness]) -> None:
+    options = GuiOptions(camera_file=Path("素材") / "面接の練習.flv")
+    harness = make_window(options=options)
+    window, runner = harness.window, harness.runner
+    window.start()
+
+    combo = window._camera_combo
+    assert (combo.count(), combo.currentText()) == (1, "動画ファイル: 面接の練習.flv")
+    assert "テスト用" in combo.toolTip()
+    assert not window._rescan_button.isEnabled()
+    assert runner.started
+
+    combo.activated.emit(0)  # working: choosing it again changes nothing
+    assert runner.cameras == []
+
+    runner.on_status(FakeStatus(camera_ok=False, camera_error="動画ファイルを読み込めませんでした"))
+    combo.activated.emit(0)  # failing: choosing it again reconnects
+    assert runner.cameras == [(0, 1280, 720)]
+    assert (combo.count(), combo.currentText()) == (1, "動画ファイル: 面接の練習.flv")
+
+    runner.on_status(FakeStatus())
+    resolution = window._resolution_combo
+    resolution.setCurrentIndex(resolution.findText("640×480"))
+    resolution.activated.emit(resolution.currentIndex())
+    assert runner.cameras == [(0, 1280, 720), (0, 640, 480)]
+    assert (combo.count(), combo.currentText()) == (1, "動画ファイル: 面接の練習.flv")
+
+
+def test_video_file_does_not_replace_the_remembered_camera(
+    make_window: Callable[..., Harness], qapp: QApplication
+) -> None:
+    state = GuiState()
+    state.save(
+        camera_index=2,
+        camera_name="USB",
+        resolution=(960, 540),
+        preset=None,
+        geometry=QByteArray(),
+        splitter=QByteArray(),
+    )
+    harness = make_window(options=GuiOptions(camera_file=Path("clip.flv"), width=640, height=480))
+
+    harness.window.close()
+
+    state = GuiState()
+    assert (state.camera_index(), state.camera_name(), state.resolution()) == (2, "USB", (960, 540))
+
+
+def test_options_with_a_video_file_ignore_the_remembered_camera(qapp: QApplication) -> None:
+    state = GuiState()
+    state.save(camera_index=2, resolution=(960, 540), preset=None, geometry=QByteArray(), splitter=QByteArray())
+
+    options = options_from_args(argparse.Namespace(camera_file=Path("clip.flv")), state)
+
+    assert (options.camera_file, options.camera_index, options.camera_name) == (Path("clip.flv"), 0, None)
 
 
 # ---- shutdown and restore ----------------------------------------------------------------

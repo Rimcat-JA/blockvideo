@@ -29,6 +29,12 @@ class FrameContext:
 
     Coordinates are full-frame pixel coordinates (x right, y down) of the
     *unmirrored* camera frame.
+
+    The reshape effect (order 5) warps the frame, and then replaces ``landmarks``
+    with the warped positions and ``hair_mask`` / ``face_skin_mask`` /
+    ``body_skin_mask`` with copies warped by the same map, so effects that run
+    after it stay aligned with the reshaped face. ``landmarks_z`` is left as it
+    is. Treat these arrays as read-only; the originals stay untouched.
     """
 
     height: int

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import signal
 import sys
 import threading
@@ -25,7 +26,7 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, NoReturn, TextIO
 
 import cv2
 import numpy as np
@@ -55,6 +56,8 @@ STILL_FRAMES = 20
 STILL_FRAME_INTERVAL_MS = 33
 
 STATUS_REPEAT_S = 5.0
+# A video file that gives no first frame in this time is treated as unplayable.
+CAMERA_FILE_CHECK_TIMEOUT_S = 15.0
 # What the built-in preset files contain (file names stay ASCII so they
 # survive zip archives and every file system).
 BUILTIN_PRESET_LABELS = {
@@ -67,6 +70,38 @@ BUILTIN_PRESET_LABELS = {
 
 class CliError(Exception):
     """An expected failure; the message is Japanese and printed as is."""
+
+
+# argparse's own messages, as written by Python's standard library, in Japanese. Anything else passes unchanged.
+_USAGE_ERRORS = (
+    (re.compile(r"argument (.+): not allowed with argument (.+)"), "{0} と {1} は同時に指定できません"),
+    (re.compile(r"argument (.+): expected one argument"), "{0} には値を指定してください"),
+    (re.compile(r"argument (.+): ignored explicit argument (.+)"), "{0} には値を指定できません（{1}）"),
+    (re.compile(r"ambiguous option: (.+) could match (.+)"), "{0} だけでは {1} のどれか分かりません"),
+    (re.compile(r"unrecognized arguments: (.+)"), "使えないオプションです: {0}"),
+    (re.compile(r"argument (.+): (.+)", re.DOTALL), "{0}: {1}"),  # our own type checks word the second part
+)
+
+
+def _translate_usage_error(message: str) -> str:
+    for pattern, japanese in _USAGE_ERRORS:
+        match = pattern.fullmatch(message)
+        if match is not None:
+            return japanese.format(*match.groups())
+    return message
+
+
+class _JapaneseHelpFormatter(argparse.HelpFormatter):
+    def add_usage(self, usage: Any, actions: Any, groups: Any, prefix: str | None = None) -> None:
+        super().add_usage(usage, actions, groups, "使い方: " if prefix is None else prefix)
+
+
+class _JapaneseArgumentParser(argparse.ArgumentParser):
+    """Reports misuse in Japanese."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(2, f"エラー: {_translate_usage_error(message)}\n")
 
 
 # --------------------------------------------------------------------------
@@ -97,8 +132,9 @@ def _int(text: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     presets = "、".join(f"{name}＝{label}" for name, label in BUILTIN_PRESET_LABELS.items())
-    parser = argparse.ArgumentParser(
+    parser = _JapaneseArgumentParser(
         prog="python -m makeup_cam",
+        formatter_class=_JapaneseHelpFormatter,
         description="Web カメラの映像に自然なメイクをかけて、仮想カメラ（OBS Virtual Camera）に送ります。"
         "オプションなしで起動すると設定画面が開きます。",
         epilog=f"標準プリセット: {presets}",
@@ -134,7 +170,17 @@ def build_parser() -> argparse.ArgumentParser:
     image.add_argument("--compare", action="store_true", help="左に元画像、右にメイク後を並べて保存します")
 
     camera = parser.add_argument_group("カメラ")
-    camera.add_argument("--camera", metavar="N", type=_index, help="使うカメラの番号（--list-cameras で確認できます）")
+    camera_source = camera.add_mutually_exclusive_group()
+    camera_source.add_argument(
+        "--camera", metavar="N", type=_index, help="使うカメラの番号（--list-cameras で確認できます）"
+    )
+    camera_source.add_argument(
+        "--camera-file",
+        metavar="PATH",
+        type=Path,
+        help="カメラの代わりに動画ファイルを繰り返し再生します"
+        "（カメラなしでのテスト用。設定画面 / --headless で使えます）",
+    )
     camera.add_argument(
         "--width", metavar="W", type=_positive_int, help="カメラの横の解像度（例: 1280。--height と一緒に）"
     )
@@ -170,6 +216,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error(
             "--settings は --headless または --image と一緒に使います（設定画面ではプリセットを選んでください）"
         )
+    if args.camera_file is not None and (args.image is not None or args.list_cameras or args.download_models):
+        parser.error("--camera-file は設定画面または --headless で使います")
     return args
 
 
@@ -248,6 +296,39 @@ def prepare_models(stream: TextIO) -> None:
 def _start_failure(exc: Exception) -> CliError:
     logger.debug("pipeline start-up failed", exc_info=exc)
     return CliError(f"顔認識の準備に失敗しました。\n（詳細: {exc}）")
+
+
+def check_camera_file(path: Path, timeout_s: float | None = None) -> None:
+    """Stop right away on a video file that cannot be played, before the models load.
+
+    The check runs on its own thread: a decoder stuck inside a native call could
+    otherwise freeze the app with not even Ctrl+C getting through.
+    """
+    from .camera import CameraError, VideoFileSource
+
+    problems: list[str] = []
+
+    def check() -> None:
+        source = VideoFileSource(path)
+        try:
+            source.open()
+        except CameraError as exc:
+            problems.append(str(exc))
+        except Exception as exc:
+            logger.debug("checking the video file failed", exc_info=exc)
+            problems.append(f"動画ファイルを読み込めませんでした: {path}\n（詳細: {exc}）")
+        finally:
+            source.close()
+
+    checker = threading.Thread(target=check, name="camera-file-check", daemon=True)
+    checker.start()
+    deadline = time.monotonic() + (CAMERA_FILE_CHECK_TIMEOUT_S if timeout_s is None else timeout_s)
+    while checker.is_alive() and time.monotonic() < deadline:
+        checker.join(0.1)  # short waits, because a Python signal handler runs only between them
+    if checker.is_alive():
+        raise CliError(f"動画ファイルを読み込めませんでした（読み込みが終わりません）: {path}")
+    if problems:
+        raise CliError(problems[0])
 
 
 # --------------------------------------------------------------------------
@@ -434,9 +515,11 @@ def _raise_interrupt(_signum: int, _frame: object) -> None:
 
 
 def wait_for_interrupt() -> None:
-    """Block until Ctrl+C (or SIGTERM)."""
-    if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _raise_interrupt)
+    """Block until Ctrl+C, SIGTERM or, on Windows, Ctrl+Break or a closed console window."""
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGTERM", "SIGBREAK"):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), _raise_interrupt)
     try:
         while True:
             time.sleep(0.5)
@@ -444,7 +527,21 @@ def wait_for_interrupt() -> None:
         pass
 
 
+def _headless_camera(args: argparse.Namespace) -> tuple[int, str, dict[str, Any]]:
+    """The camera index, its description and the extra ``CameraRunner`` options for --headless."""
+    from .camera import resolve_camera, video_file_camera_factory
+
+    if args.camera_file is not None:
+        factory = video_file_camera_factory(args.camera_file)
+        return 0, f"動画ファイル「{args.camera_file.name}」", {"camera_factory": factory}
+    if args.camera is not None:
+        return args.camera, f"カメラ {args.camera}", {}
+    index, name = resolve_camera(None)  # the first real camera, never a virtual one
+    return index, f"カメラ {index}「{name}」" if name else f"カメラ {index}", {"camera_name": name}
+
+
 def run_headless(args: argparse.Namespace) -> int:
+    from .camera import virtual_camera_size
     from .runner import CameraRunner
 
     settings, source = resolve_settings(args)
@@ -453,7 +550,7 @@ def run_headless(args: argparse.Namespace) -> int:
         pipeline = MakeupPipeline(settings)
     except (OSError, RuntimeError) as exc:
         raise _start_failure(exc) from exc
-    camera_index = args.camera if args.camera is not None else 0
+    camera_index, camera_label, camera_options = _headless_camera(args)
     width, height = (args.width, args.height) if args.width else (DEFAULT_WIDTH, DEFAULT_HEIGHT)
     fps = args.fps or DEFAULT_FPS
     printer = StatusPrinter(sys.stdout, virtual_camera_enabled=not args.no_vcam)
@@ -467,9 +564,11 @@ def run_headless(args: argparse.Namespace) -> int:
         height=height,
         fps=fps,
         virtual_camera=not args.no_vcam,
+        output_size=virtual_camera_size(width, height),
         on_status=printer,
+        **camera_options,
     )
-    print(f"{source}でメイクを始めます（カメラ {camera_index}、{width}x{height}、{fps} fps）。Ctrl+C で終了します。")
+    print(f"{source}でメイクを始めます（{camera_label}、{width}x{height}、{fps} fps）。Ctrl+C で終了します。")
     runner.start()
     try:
         wait_for_interrupt()
@@ -520,16 +619,21 @@ def dispatch(args: argparse.Namespace) -> int:
         return run_download_models()
     if args.image is not None:
         return run_image(args)
+    if args.camera_file is not None:
+        check_camera_file(args.camera_file)
     if args.headless:
         return run_headless(args)
     return run_window(args)
 
 
-def _configure_output(verbose: bool) -> None:
+def _make_console_safe() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:  # never crash on a console that cannot show a character
             reconfigure(errors="replace")
+
+
+def _configure_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.INFO if verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -537,8 +641,9 @@ def _configure_output(verbose: bool) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _make_console_safe()
     args = parse_args(argv)
-    _configure_output(args.verbose)
+    _configure_logging(args.verbose)
     try:
         return dispatch(args)
     except CliError as exc:

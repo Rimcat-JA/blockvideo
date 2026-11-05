@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import io
 import json
+import signal
+import threading
+import time
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +25,9 @@ from makeup_cam.runner import RunnerStatus
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the user's own presets and session out of these tests."""
+    """Keep the user's own presets, session and devices out of these tests."""
     monkeypatch.setenv("AI_MAKEUP_CAM_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(camera, "_device_names", dict)
 
 
 # ---- argument parsing --------------------------------------------------------
@@ -35,12 +40,18 @@ def test_no_options_means_the_window_with_nothing_overridden() -> None:
     # gui.run_gui treats None as "not given" and falls back to remembered values.
     assert (args.camera, args.width, args.height, args.fps, args.preset) == (None, None, None, None, None)
     assert args.no_vcam is False
+    assert args.camera_file is None
 
 
 def test_camera_options_are_parsed() -> None:
     args = cli.parse_args(["--headless", "--camera", "1", "--width", "640", "--height", "480", "--fps", "15"])
     assert (args.camera, args.width, args.height, args.fps) == (1, 640, 480, 15)
     assert cli.parse_args(["--no-virtual-camera"]).no_vcam is True
+
+
+def test_camera_file_works_with_the_window_and_headless() -> None:
+    assert cli.parse_args(["--camera-file", "面接.flv"]).camera_file == Path("面接.flv")
+    assert cli.parse_args(["--headless", "--camera-file", "a.flv"]).camera_file == Path("a.flv")
 
 
 @pytest.mark.parametrize(
@@ -56,6 +67,10 @@ def test_camera_options_are_parsed() -> None:
         ["--camera", "-1"],
         ["--fps", "0"],
         ["--width", "abc", "--height", "480"],
+        ["--camera", "1", "--camera-file", "a.flv"],
+        ["--camera-file", "a.flv", "--image", "a.png", "--out", "b.png"],
+        ["--camera-file", "a.flv", "--list-cameras"],
+        ["--camera-file", "a.flv", "--download-models"],
     ],
 )
 def test_misuse_is_a_usage_error(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
@@ -63,6 +78,54 @@ def test_misuse_is_a_usage_error(argv: list[str], capsys: pytest.CaptureFixture[
         cli.parse_args(argv)
     assert exc_info.value.code == 2
     assert capsys.readouterr().err
+
+
+ENGLISH_FROM_ARGPARSE = (
+    "error:",
+    "usage:",
+    "not allowed",
+    "expected one",
+    "unrecognized",
+    "ambiguous",
+    "ignored explicit",
+    "invalid",
+    "argument --",
+)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--camera", "1", "--camera-file", "a.flv"], "--camera-file と --camera は同時に指定できません"),
+        (["--headless", "--image", "a.png", "--out", "b.png"], "--image と --headless は同時に指定できません"),
+        (["--preset", "a", "--settings", "b", "--headless"], "--settings と --preset は同時に指定できません"),
+        (["--camera-file"], "--camera-file には値を指定してください"),
+        (["--camera"], "--camera には値を指定してください"),
+        (["--bogus"], "使えないオプションです: --bogus"),
+        (["--cam", "1"], "--cam だけでは"),
+        (["--headless=1"], "--headless には値を指定できません"),
+        (["--camera", "abc"], "--camera: 整数を指定してください: abc"),
+        (["--fps", "0"], "--fps: 1 以上の整数を指定してください: 0"),
+        (["--width", "640"], "--width と --height は両方を指定してください"),  # our own check goes through as it is
+    ],
+)
+def test_misuse_is_explained_in_japanese(argv: list[str], expected: str, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.parse_args(argv)
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert f"エラー: {expected}" in err
+    assert "使い方:" in err
+    assert not [english for english in ENGLISH_FROM_ARGPARSE if english in err]
+
+
+def test_help_has_no_english_headings(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.parse_args(["--help"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("使い方:")
+    assert "usage:" not in out and "options:" not in out
 
 
 def test_builtin_presets_are_complete_and_listed_in_the_help() -> None:
@@ -182,13 +245,190 @@ def test_headless_runs_until_interrupted(monkeypatch: pytest.MonkeyPatch, capsys
     assert "カメラ 接続中" not in out  # nothing is printed after stopping
 
 
+@pytest.fixture
+def fake_headless(monkeypatch: pytest.MonkeyPatch) -> type[FakeRunner]:
+    FakeRunner.instances.clear()
+    monkeypatch.setattr(cli, "prepare_models", lambda stream: None)
+    monkeypatch.setattr(cli, "MakeupPipeline", FakePipeline)
+    monkeypatch.setattr(runner, "CameraRunner", FakeRunner)
+    monkeypatch.setattr(cli, "wait_for_interrupt", lambda: None)
+    return FakeRunner
+
+
+def write_clip(path: Path) -> Path:
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter.fourcc(*"mp4v"), 20.0, (64, 48))
+    for _ in range(3):
+        writer.write(np.zeros((48, 64, 3), np.uint8))
+    writer.release()
+    return path
+
+
+def test_headless_default_camera_is_never_the_virtual_camera(
+    fake_headless: type[FakeRunner], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(camera, "_device_names", lambda: {0: "OBS Virtual Camera", 1: "HD Pro Webcam C920"})
+
+    assert cli.main(["--headless", "--preset", "natural"]) == cli.EXIT_OK
+
+    assert fake_headless.instances[0].kwargs["camera_index"] == 1
+    assert "カメラ 1「HD Pro Webcam C920」" in capsys.readouterr().out
+
+
+def test_headless_with_only_a_virtual_camera_still_starts(
+    fake_headless: type[FakeRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(camera, "_device_names", lambda: {0: "OBS Virtual Camera"})
+
+    assert cli.main(["--headless", "--preset", "natural"]) == cli.EXIT_OK
+
+    # CameraSource refuses this device; the runner keeps sending its placeholder.
+    assert fake_headless.instances[0].kwargs["camera_index"] == 0
+
+
+def test_headless_plays_a_video_file_instead_of_a_camera(
+    fake_headless: type[FakeRunner], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clip = write_clip(tmp_path / "面接の練習.mp4")
+
+    assert cli.main(["--headless", "--preset", "natural", "--camera-file", str(clip)]) == cli.EXIT_OK
+
+    source = fake_headless.instances[0].kwargs["camera_factory"](index=0, width=640, height=480, fps=30)
+    assert isinstance(source, camera.VideoFileSource)
+    assert (source.path, source.width, source.height) == (clip, 640, 480)
+    assert "動画ファイル「面接の練習.mp4」" in capsys.readouterr().out
+
+
+def test_window_gets_the_video_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    gui = pytest.importorskip("makeup_cam.gui")
+    clip = write_clip(tmp_path / "clip.mp4")
+    received: list[Any] = []
+    monkeypatch.setattr(gui, "run_gui", lambda args: received.append(args) or 0)
+
+    assert cli.main(["--camera-file", str(clip), "--no-virtual-camera"]) == 0
+    assert received[0].camera_file == clip
+
+
+@pytest.mark.parametrize("content", [None, b"not a video"])
+@pytest.mark.parametrize("mode", [["--headless"], []])
+def test_unplayable_video_file_stops_early_with_a_friendly_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: list[str],
+    content: bytes | None,
+) -> None:
+    def must_not_run(*_args: Any) -> None:
+        raise AssertionError("started despite the bad file")
+
+    monkeypatch.setattr(cli, "prepare_models", must_not_run)
+    monkeypatch.setattr(cli, "run_window", must_not_run)
+    path = tmp_path / "bad.mp4"
+    if content is not None:
+        path.write_bytes(content)
+
+    assert cli.main([*mode, "--camera-file", str(path)]) == cli.EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "エラー: 動画ファイル" in err and str(path) in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("mode", [["--headless"], []])
+def test_audio_only_file_stops_early_instead_of_freezing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: list[str]
+) -> None:
+    def must_not_run(*_args: Any) -> None:
+        raise AssertionError("started despite the bad file")
+
+    monkeypatch.setattr(cli, "prepare_models", must_not_run)
+    monkeypatch.setattr(cli, "run_window", must_not_run)
+    path = tmp_path / "音声だけ.wav"
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(b"\0\0" * 8000)
+
+    started = time.monotonic()
+    assert cli.main([*mode, "--camera-file", str(path)]) == cli.EXIT_ERROR
+
+    assert time.monotonic() - started < cli.CAMERA_FILE_CHECK_TIMEOUT_S  # not even the safety net was needed
+    err = capsys.readouterr().err
+    assert "エラー: 動画ファイルを読み込めませんでした" in err and str(path) in err
+
+
+class StuckVideoFile:
+    """A decoder stuck inside a native call, as far as the caller can tell."""
+
+    release = threading.Event()
+
+    def __init__(self, path: Path) -> None:
+        pass
+
+    def open(self) -> None:
+        StuckVideoFile.release.wait(30.0)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def stuck_decoder(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(camera, "VideoFileSource", StuckVideoFile)
+    StuckVideoFile.release.clear()
+    yield
+    StuckVideoFile.release.set()
+
+
+def test_a_stuck_decoder_cannot_freeze_the_start(stuck_decoder: Any, tmp_path: Path) -> None:
+    path = tmp_path / "stuck.mp4"
+
+    started = time.monotonic()
+    with pytest.raises(cli.CliError, match="動画ファイルを読み込めませんでした"):
+        cli.check_camera_file(path, timeout_s=0.1)
+
+    assert time.monotonic() - started < 2.0
+
+
+def test_ctrl_c_gets_through_while_a_decoder_is_stuck(stuck_decoder: Any, tmp_path: Path) -> None:
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    timer = threading.Timer(0.1, signal.raise_signal, args=(signal.SIGINT,))
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cli.check_camera_file(tmp_path / "stuck.mp4", timeout_s=20.0)
+    finally:
+        timer.join()
+        signal.signal(signal.SIGINT, previous)
+
+    assert time.monotonic() - started < 5.0
+
+
+def test_headless_keeps_the_output_16_to_9_and_passes_the_device_name(
+    fake_headless: type[FakeRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(camera, "_device_names", lambda: {0: "OBS Virtual Camera", 1: "HD Pro Webcam C920"})
+
+    assert cli.main(["--headless", "--preset", "natural", "--width", "640", "--height", "480"]) == cli.EXIT_OK
+
+    kwargs = fake_headless.instances[0].kwargs
+    assert (kwargs["width"], kwargs["height"]) == (640, 480)
+    assert kwargs["output_size"] == (1280, 720)  # OBS would stretch 640x480 to a 16:9 meeting app
+    assert (kwargs["camera_index"], kwargs["camera_name"]) == (1, "HD Pro Webcam C920")
+
+
 def test_wait_for_interrupt_returns_on_ctrl_c(monkeypatch: pytest.MonkeyPatch) -> None:
     def interrupt(_seconds: float) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.signal, "signal", lambda *args: None)
+    handled: list[int] = []
+    monkeypatch.setattr(cli.signal, "signal", lambda signum, _handler: handled.append(signum))
     monkeypatch.setattr(cli.time, "sleep", interrupt)
     cli.wait_for_interrupt()
+    assert cli.signal.SIGTERM in handled
+    if hasattr(cli.signal, "SIGBREAK"):  # Ctrl+Break, and closing the console window on Windows
+        assert cli.signal.SIGBREAK in handled
 
 
 def test_status_printer_repeats_slowly_and_reports_each_problem_once() -> None:

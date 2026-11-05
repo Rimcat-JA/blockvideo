@@ -16,6 +16,12 @@ processed and original frame per effect, without copying frames. Effects
 that do not need a face (hair) are not faded, because they do not depend on
 it. Constructing the pipeline without ``tracker`` / ``segmenter`` loads (and
 if needed downloads) the models, which may raise ``ModelDownloadError``.
+
+Background plate: the pipeline holds one float32 picture of the empty room for
+the current resolution and hands it to effects as ``ctx.background``. It is
+loaded from disk when the resolution changes (never more often), replaced by
+``capture_background`` and dropped by ``clear_background``; see ``background.py``.
+Deleting wins over a capture that is still running, whichever finishes first.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -30,6 +37,7 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
+from . import background as plates
 from .config import GeneralSettings, MakeupSettings
 from .effects.base import Effect, FrameContext
 from .models import FACE_LANDMARKER, SELFIE_MULTICLASS, ensure_model
@@ -101,6 +109,7 @@ class MakeupPipeline:
         segmenter: MaskSource | None = None,
         model_dir: Path | None = None,
         effects: list[Effect] | None = None,
+        person_probe: plates.PersonProbe | None = None,
     ) -> None:
         self._settings = (settings or MakeupSettings()).copy()
         self._bypass = False
@@ -119,6 +128,13 @@ class MakeupPipeline:
             raise
         self._tracker: Tracker = tracker
         self._segmenter: MaskSource = segmenter
+        self._model_dir = model_dir
+        self._person_probe = person_probe  # None: load the real model for each capture
+        self._plate: np.ndarray | None = None
+        self._plate_lock = threading.Lock()  # never held by process() except for an assignment
+        self._plate_clears = 0  # counts clear_background: a capture begun before the last one is void
+        self._plate_commits = 0  # counts plates put to use: an older one read from disk must not replace them
+        self._unsaved_plates: dict[tuple[int, int], np.ndarray] = {}  # plates that could not be written, by (H, W)
         self._applied_model_settings: tuple[float, int] | None = None
         self._face = _Face()
         self._frame_shape: tuple[int, int] | None = None
@@ -147,6 +163,46 @@ class MakeupPipeline:
     def bypass(self, value: bool) -> None:
         with self._settings_lock:
             self._bypass = bool(value)
+
+    @property
+    def has_background(self) -> bool:
+        """True while a background plate for the current resolution is in use."""
+        return self._plate is not None
+
+    @property
+    def background_generation(self) -> int:
+        """Changes with every ``clear_background``. Read it when the user asks for a capture
+        (before the countdown) and pass it to ``capture_background``."""
+        with self._plate_lock:
+            return self._plate_clears
+
+    def capture_background(self, frames: Sequence[np.ndarray], generation: int | None = None) -> plates.PlateResult:
+        """Build, save and start using a plate from raw uint8 BGR camera frames.
+
+        ``frames`` come from a ``background.PlateCollector``. Takes up to about
+        a second (median, segmentation model): call it on a worker thread, not
+        on a camera thread. Never raises; the result's ``message`` says what
+        happened, in Japanese. A rejected capture keeps the previous plate.
+
+        If the background is deleted after ``generation`` was read (by default:
+        after this call began), nothing is saved or used and the result is not ok.
+        """
+        started = self.background_generation if generation is None else generation
+        result = self._capture_plate(frames)
+        if result.plate is None:
+            return result
+        with self._plate_lock:
+            if self._plate_clears != started:
+                return plates.PlateResult(False, plates.CAPTURE_CANCELLED_MESSAGE)
+            return self._commit_plate(result)
+
+    def clear_background(self) -> plates.PlateResult:
+        """Stop using the plate and delete every saved one. Never raises."""
+        with self._plate_lock:
+            self._plate_clears += 1
+            self._plate = None
+            self._unsaved_plates.clear()
+            return plates.clear_plates()
 
     # ---- processing -------------------------------------------------------
 
@@ -202,6 +258,56 @@ class MakeupPipeline:
             self._frame_shape = shape
             self._face = _Face()
             self._reset_effects()
+            self._load_plate(shape)
+
+    def _load_plate(self, shape: tuple[int, int]) -> None:
+        """Use the plate of this resolution, if any (a plate of another size is invalid)."""
+        with self._plate_lock:
+            self._plate = self._unsaved_plates.get(shape)
+            if self._plate is not None:
+                return
+            state = (self._plate_clears, self._plate_commits)
+        try:
+            plate = plates.load_plate(shape[1], shape[0])  # slow: outside the lock
+        except Exception as exc:
+            self._log_once("background", exc)
+            return
+        if plate is None:
+            return
+        image = plates.plate_to_float(plate)
+        with self._plate_lock:
+            if state == (self._plate_clears, self._plate_commits) and shape == self._frame_shape:
+                self._plate = image
+
+    def _commit_plate(self, result: plates.PlateResult) -> plates.PlateResult:
+        """Save a captured plate and put it to use; the caller holds the plate lock."""
+        shape = result.plate.shape[:2]
+        image = plates.plate_to_float(result.plate)
+        self._plate_commits += 1
+        try:
+            plates.save_plate(result.plate)
+            self._unsaved_plates.pop(shape, None)
+        except (OSError, ValueError, cv2.error) as exc:
+            self._log_once("background", exc)
+            # Older files on the disk must not come back when the resolution changes and returns.
+            self._unsaved_plates[shape] = image
+            result = plates.PlateResult(True, plates.SUCCESS_NOT_SAVED_MESSAGE, result.plate, result.person_fraction)
+        if self._frame_shape is None or self._frame_shape == shape:
+            self._plate = image
+        return result
+
+    def _capture_plate(self, frames: Sequence[np.ndarray]) -> plates.PlateResult:
+        probe, owned = self._person_probe, None
+        try:
+            if probe is None:
+                probe = owned = plates.MediaPipePersonProbe(ensure_model(SELFIE_MULTICLASS, directory=self._model_dir))
+            return plates.capture(frames, probe)
+        except Exception as exc:
+            self._log_once("background", exc)
+            return plates.PlateResult(False, plates.CHECK_FAILED_MESSAGE)
+        finally:
+            if owned is not None:
+                owned.close()
 
     def _apply_model_settings(self, general: GeneralSettings) -> None:
         wanted = (general.landmark_smoothing, general.segmentation_interval)
@@ -269,6 +375,7 @@ class MakeupPipeline:
         if any(_uses_masks(step.effect) for step in steps):
             masks = self._segment(frame, ts_ms, timings)
         height, width = frame.shape[:2]
+        plate = self._plate  # another thread may replace it: read it once
         ctx = FrameContext(
             height=height,
             width=width,
@@ -277,6 +384,7 @@ class MakeupPipeline:
             hair_mask=masks.hair,
             face_skin_mask=masks.face_skin,
             body_skin_mask=masks.body_skin,
+            background=plate if plate is not None and plate.shape[:2] == (height, width) else None,
         )
         image = np.multiply(frame, np.float32(1.0 / 255.0), dtype=np.float32)
         for step in steps:

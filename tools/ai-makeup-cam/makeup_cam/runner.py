@@ -55,6 +55,10 @@ _EMA_ALPHA = 0.1
 _POLL_S = 0.05
 _MISS_WAIT_S = 0.01
 _MAX_LOGGED_ERRORS = 256
+# A meeting app's OBS filter holds the old virtual camera until its next frame (measured: at most 40 ms),
+# and until then starting it again fails. That is no failure yet.
+_VCAM_RESTART_RETRY_S = 0.05
+_VCAM_RESTART_GRACE_S = 1.0
 _PLACEHOLDER_BG = (38, 38, 38)
 _PLACEHOLDER_FG = (150, 150, 150)
 
@@ -62,7 +66,7 @@ T = TypeVar("T")
 
 
 class FrameSource(Protocol):
-    """What the runner needs from a camera (``CameraSource`` or a test fake)."""
+    """What the runner needs from a camera (``CameraSource``, ``VideoFileSource`` or a test fake)."""
 
     def open(self) -> None: ...
     def read(self) -> np.ndarray | None: ...
@@ -78,7 +82,7 @@ class FrameSink(Protocol):
     def close(self) -> None: ...
 
 
-CameraFactory = Callable[..., FrameSource]  # called as (index=, width=, height=, fps=)
+CameraFactory = Callable[..., FrameSource]  # called as (index=, width=, height=, fps=), and name= when known
 VcamFactory = Callable[..., FrameSink]  # called as (width=, height=, fps=)
 
 
@@ -230,6 +234,7 @@ class _CameraRequest:
     height: int
     fps: int
     generation: int  # bumped by every set_camera(), so re-selecting a camera reconnects it
+    name: str | None = None  # the device, when known; it beats the index
 
 
 @dataclass(frozen=True)
@@ -302,8 +307,9 @@ class _CaptureWorker:
             return
         camera: FrameSource | None = None
         try:
+            device = {} if request.name is None else {"name": request.name}
             camera = self._w.camera_factory(
-                index=request.index, width=request.width, height=request.height, fps=request.fps
+                index=request.index, width=request.width, height=request.height, fps=request.fps, **device
             )
             camera.open()
         except Exception as exc:
@@ -351,6 +357,7 @@ class _VcamLink:
         self._vcam: FrameSink | None = None
         self._device: str | None = None
         self._next_open_at = 0.0
+        self._quiet_until = 0.0  # open failures before this are expected, see _VCAM_RESTART_GRACE_S
         self.error: str | None = None
 
     @property
@@ -367,6 +374,7 @@ class _VcamLink:
         if request != self._request:
             self.close()
             self._request, self._next_open_at, self.error = request, now, None
+            self._quiet_until = now + _VCAM_RESTART_GRACE_S
         if request.enabled and self._vcam is None and now >= self._next_open_at:
             self._open(now)
 
@@ -389,7 +397,10 @@ class _VcamLink:
         try:
             vcam = self._w.vcam_factory(width=request.width, height=request.height, fps=request.fps)
         except Exception as exc:
-            self._failed(exc, now, "仮想カメラを開始できませんでした")
+            if now < self._quiet_until:
+                self._next_open_at = now + _VCAM_RESTART_RETRY_S
+            else:
+                self._failed(exc, now, "仮想カメラを開始できませんでした")
             return
         self._vcam, self._device, self.error = vcam, str(vcam.device), None
 
@@ -542,6 +553,12 @@ class CameraRunner:
     blocking (e.g. a queued Qt signal). ``on_status`` fires on every state
     change and at least every ``STATUS_INTERVAL_S`` while running. The runner
     does not close the pipeline; its owner does.
+
+    ``camera_name`` says which device ``camera_index`` meant when it was chosen,
+    so a renumbered camera is still found. ``output_size`` fixes the size of the
+    virtual camera for good (see ``camera.virtual_camera_size``); without it, the
+    virtual camera follows the capture size and restarts whenever that changes,
+    which a meeting app attached to OBS Virtual Camera sees as its logo.
     """
 
     def __init__(
@@ -549,10 +566,12 @@ class CameraRunner:
         pipeline: MakeupPipeline,
         *,
         camera_index: int = 0,
+        camera_name: str | None = None,
         width: int = 1280,
         height: int = 720,
         fps: int = 30,
         virtual_camera: bool = True,
+        output_size: tuple[int, int] | None = None,
         on_frame: Callable[[ProcessResult], None] | None = None,
         on_status: Callable[[RunnerStatus], None] | None = None,
         camera_factory: CameraFactory = CameraSource,
@@ -561,14 +580,16 @@ class CameraRunner:
         camera_timeout_s: float = CAMERA_TIMEOUT_S,
     ) -> None:
         self._pipeline = pipeline
+        self._output_size = output_size
+        output_width, output_height = output_size or (width, height)
         self._wiring = _Wiring(
             pipeline=pipeline,
             camera_factory=camera_factory,
             vcam_factory=vcam_factory,
             on_frame=on_frame,
             on_status=on_status,
-            camera_request=_Locked(_CameraRequest(camera_index, width, height, fps, generation=0)),
-            vcam_request=_Locked(_VcamRequest(virtual_camera, width, height, fps)),
+            camera_request=_Locked(_CameraRequest(camera_index, width, height, fps, generation=0, name=camera_name)),
+            vcam_request=_Locked(_VcamRequest(virtual_camera, output_width, output_height, fps)),
             camera_error=_Locked(None),
             status=_Locked(RunnerStatus()),
             errors=_ErrorLog(),
@@ -584,7 +605,7 @@ class CameraRunner:
 
     @property
     def camera_index(self) -> int:
-        """The selected camera (e.g. for ``list_cameras(in_use={runner.camera_index})``)."""
+        """The camera index asked for last; the device itself may have been renumbered since."""
         return self._wiring.camera_request.get().index
 
     @property
@@ -611,10 +632,14 @@ class CameraRunner:
     def set_bypass(self, bypass: bool) -> None:
         self._pipeline.bypass = bypass
 
-    def set_camera(self, index: int, width: int | None = None, height: int | None = None) -> None:
+    def set_camera(
+        self, index: int, width: int | None = None, height: int | None = None, name: str | None = None
+    ) -> None:
         """Switch to camera ``index`` (reconnects even if unchanged).
 
-        A new size also restarts the virtual camera at that size.
+        ``name`` is the device's name, when known: it finds the device even if
+        ``index`` has gone to another one. Unless ``output_size`` was given, a new
+        size also restarts the virtual camera at that size.
         """
         request = self._wiring.camera_request.update(
             lambda old: _CameraRequest(
@@ -623,11 +648,13 @@ class CameraRunner:
                 old.height if height is None else height,
                 old.fps,
                 old.generation + 1,
+                name,
             )
         )
-        self._wiring.vcam_request.update(
-            lambda old: dataclasses.replace(old, width=request.width, height=request.height)
-        )
+        if self._output_size is None:
+            self._wiring.vcam_request.update(
+                lambda old: dataclasses.replace(old, width=request.width, height=request.height)
+            )
 
     def set_virtual_camera(self, enabled: bool) -> None:
         """Start or stop the virtual camera output (applied on the output thread)."""

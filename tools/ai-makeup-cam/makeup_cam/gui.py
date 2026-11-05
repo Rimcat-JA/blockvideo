@@ -125,11 +125,14 @@ _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 _ERROR_COLOR = "#D32F2F"
 _OK_COLOR = "#2E7D32"
 _MODIFIED_COLOR = "#E65100"
+_CAMERA_NOT_FOUND = "カメラが見つかりませんでした。接続を確認して ↻ を押してください"
+# Camera menu items hold the device index as their data, and the device's real name under this role, if any.
+_DEVICE_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
 
 FrameCallback = Callable[["ProcessResult"], None]
 StatusCallback = Callable[["RunnerStatus"], None]
-# Called with the camera indices this app has open (listed without re-probing).
-CameraLister = Callable[[Collection[int]], "list[CameraInfo]"]
+# Called with what this app has open, as device names or else indices (listed without re-probing).
+CameraLister = Callable[[Collection[int] | Collection[str]], "list[CameraInfo]"]
 
 
 class Runner(Protocol):
@@ -139,7 +142,9 @@ class Runner(Protocol):
     def stop(self, timeout: float = 2.0) -> None: ...
     def set_settings(self, settings: MakeupSettings) -> None: ...
     def set_bypass(self, bypass: bool) -> None: ...
-    def set_camera(self, index: int, width: int | None = None, height: int | None = None) -> None: ...
+    def set_camera(
+        self, index: int, width: int | None = None, height: int | None = None, name: str | None = None
+    ) -> None: ...
     def set_virtual_camera(self, enabled: bool) -> None: ...
 
 
@@ -195,6 +200,21 @@ def format_field_value(meta: dict[str, Any], value: Any) -> str:
     if kind == "choice":
         return dict(meta["choices"]).get(value, str(value))
     return str(value)
+
+
+def _placeholder_camera_name(index: int) -> str:
+    from .camera import default_camera_name
+
+    return default_camera_name(index)
+
+
+def _selected_row(entries: list[tuple[int, str, int, int]], index: int, name: str | None) -> int | None:
+    """The menu row of the selected camera: its name decides, because plugging in a camera renumbers the others."""
+    if name is None:
+        return next((row for row, entry in enumerate(entries) if entry[0] == index), None)
+    same_name = [row for row, entry in enumerate(entries) if entry[1] == name]
+    # Two identical cameras have the same name; only there does the index still say which one.
+    return next((row for row in same_name if entries[row][0] == index), same_name[0] if same_name else None)
 
 
 def stop_runner(runner: Runner, deadline_s: float = RUNNER_STOP_DEADLINE_S) -> bool:
@@ -746,6 +766,10 @@ class GuiState:
     def camera_index(self) -> int | None:
         return _as_int(self._store.value("camera/index"))
 
+    def camera_name(self) -> str | None:
+        value = self._store.value("camera/name")
+        return value if isinstance(value, str) and value else None
+
     def resolution(self) -> tuple[int, int] | None:
         width, height = _as_int(self._store.value("camera/width")), _as_int(self._store.value("camera/height"))
         return (width, height) if width and height else None
@@ -763,15 +787,19 @@ class GuiState:
     def save(
         self,
         *,
-        camera_index: int,
+        camera_index: int | None,
         resolution: tuple[int, int],
         preset: str | None,
         geometry: QByteArray,
         splitter: QByteArray,
+        camera_name: str | None = None,
     ) -> None:
-        self._store.setValue("camera/index", camera_index)
-        self._store.setValue("camera/width", resolution[0])
-        self._store.setValue("camera/height", resolution[1])
+        """Remember the choices; ``camera_index=None`` keeps the remembered camera and resolution."""
+        if camera_index is not None:
+            self._store.setValue("camera/index", camera_index)
+            self._store.setValue("camera/name", camera_name or "")
+            self._store.setValue("camera/width", resolution[0])
+            self._store.setValue("camera/height", resolution[1])
         self._store.setValue("presets/current", preset or "")
         self._store.setValue("window/geometry", geometry)
         self._store.setValue("window/splitter", splitter)
@@ -800,6 +828,10 @@ class GuiOptions:
     virtual_camera: bool = True
     # A preset named on the command line; it replaces the restored last session.
     preset: str | None = None
+    # The device name behind ``camera_index``, when known at start-up.
+    camera_name: str | None = None
+    # A video file played in place of the webcam (testing without a camera).
+    camera_file: Path | None = None
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -809,23 +841,32 @@ class GuiOptions:
 def options_from_args(args: argparse.Namespace | None, state: GuiState) -> GuiOptions:
     """Merge command-line arguments (when given) with the remembered state.
 
-    Reads the optional attributes ``camera``, ``width``, ``height``, ``fps``,
-    ``no_vcam`` and ``preset``; a missing or None attribute means "not given".
+    Reads the optional attributes ``camera``, ``camera_file``, ``width``,
+    ``height``, ``fps``, ``no_vcam`` and ``preset``; a missing or None attribute
+    means "not given". The remembered camera is looked up by name, because its
+    index may have changed since the last run.
     """
+    from .camera import resolve_camera
 
     def arg(name: str) -> Any:
         return getattr(args, name, None)
 
-    camera = arg("camera")
+    camera, camera_file = arg("camera"), arg("camera_file")
     width, height = arg("width"), arg("height")
     resolution = (width, height) if width and height else state.resolution() or RESOLUTIONS[0]
+    if camera is not None or camera_file is not None:
+        camera_index, camera_name = camera or 0, None
+    else:
+        camera_index, camera_name = resolve_camera(state.camera_index(), state.camera_name())
     return GuiOptions(
-        camera_index=camera if camera is not None else state.camera_index() or 0,
+        camera_index=camera_index,
         width=resolution[0],
         height=resolution[1],
         fps=arg("fps") or 30,
         virtual_camera=not arg("no_vcam"),
         preset=arg("preset"),
+        camera_name=camera_name,
+        camera_file=Path(camera_file) if camera_file is not None else None,
     )
 
 
@@ -857,7 +898,11 @@ class MainWindow(QMainWindow):
         self._presets: dict[str, PresetInfo] = {}
         self._preset_name: str | None = None
         self._preset_baseline: dict[str, Any] | None = None
-        self._camera_choice = (self._options.camera_index, *self._options.resolution)
+        # Names of the real cameras as of the latest probe; None until something is known.
+        self._camera_names: dict[int, str] | None = (
+            {self._options.camera_index: self._options.camera_name} if self._options.camera_name else None
+        )
+        self._camera_found = True  # whether the latest probe found any device it can vouch for
         self._last_result: ProcessResult | None = None
         self._last_status: RunnerStatus | None = None
         self._comparing = False
@@ -878,6 +923,7 @@ class MainWindow(QMainWindow):
         self._runner = runner_factory(self._frame_relay.post, self._status_relay.post)
 
         self._build_ui()
+        self._camera_choice = self._camera_key()
         self._select_preset(preset_name)
         self._refresh_preset_combo()
         self._show_settings()
@@ -917,8 +963,9 @@ class MainWindow(QMainWindow):
         self._probing = True
         self._rescan_button.setEnabled(False)
         self._camera_combo.setToolTip("カメラを検索しています…")
-        in_use = (self._current_camera_index(),)
-        threading.Thread(target=self._probe_worker, args=(in_use,), name="camera-probe", daemon=True).start()
+        threading.Thread(
+            target=self._probe_worker, args=(self._cameras_in_use(),), name="camera-probe", daemon=True
+        ).start()
 
     def restore_layout(self) -> None:
         """Restore the window geometry and splitter position saved by the last run."""
@@ -1007,12 +1054,15 @@ class MainWindow(QMainWindow):
         self._camera_combo = QComboBox()
         self._camera_combo.setMinimumWidth(220)
         self._camera_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._set_camera_items([], self._options.camera_index)
         self._camera_combo.activated.connect(self._on_camera_chosen)
         self._rescan_button = QToolButton()
         self._rescan_button.setText("↻")
         self._rescan_button.setToolTip("カメラを再検索")
         self._rescan_button.clicked.connect(self.probe_cameras)
+        if self._options.camera_file is not None:
+            self._show_camera_file(self._options.camera_file)
+        else:
+            self._set_camera_items([], self._options.camera_index, self._options.camera_name)
 
         self._resolutions = list(RESOLUTIONS)
         if self._options.resolution not in self._resolutions:
@@ -1021,6 +1071,9 @@ class MainWindow(QMainWindow):
         for width, height in self._resolutions:
             self._resolution_combo.addItem(f"{width}×{height}")
         self._resolution_combo.setCurrentIndex(self._resolutions.index(self._options.resolution))
+        self._resolution_combo.setToolTip(
+            "カメラから取り込む解像度です。動作が重いときは下げてください。相手に送る映像の形（16:9）は変わりません"
+        )
         self._resolution_combo.activated.connect(self._on_camera_chosen)
         self._wheel_guard.guard(self._camera_combo)
         self._wheel_guard.guard(self._resolution_combo)
@@ -1160,13 +1213,35 @@ class MainWindow(QMainWindow):
 
     def _persist_session(self) -> None:
         save_last_session(self._settings)
+        camera_index, camera_name = self._camera_to_remember()
         self._state.save(
-            camera_index=self._current_camera_index(),
+            camera_index=camera_index,
+            camera_name=camera_name,
             resolution=self._current_resolution(),
             preset=self._preset_name,
             geometry=self.saveGeometry(),
             splitter=self._splitter.saveState(),
         )
+
+    def _camera_to_remember(self) -> tuple[int | None, str | None]:
+        """What the next run should start with; an index of None keeps what is stored.
+
+        A test video, or a selection known not to be a real camera (a virtual
+        camera at the default index, an unplugged device), replaces nothing. Nor
+        does a bare number replace a stored name, which says more.
+        """
+        if self._options.camera_file is not None:
+            return None, None
+        index, name = self._current_camera_index(), self._current_camera_name()
+        if self._camera_names is not None and not self._is_listed(index, name):
+            return None, None
+        if name is None and self._state.camera_name():
+            return None, None
+        return index, name
+
+    def _is_listed(self, index: int, name: str | None) -> bool:
+        names = self._camera_names or {}
+        return name in names.values() if name else index in names
 
     # ---- presets ---------------------------------------------------------
 
@@ -1297,27 +1372,62 @@ class MainWindow(QMainWindow):
 
     # ---- camera / output controls ----------------------------------------
 
-    def _set_camera_items(self, cameras: list[CameraInfo], selected: int) -> None:
-        """Fill the camera combo; the selected index stays listed even if the probe missed it."""
+    def _set_camera_items(self, cameras: list[CameraInfo], selected: int, selected_name: str | None = None) -> None:
+        """Fill the camera combo; the selected camera stays listed even if the probe missed it."""
         entries = [(camera.index, camera.name, camera.width, camera.height) for camera in cameras]
-        if selected not in {entry[0] for entry in entries}:
-            entries.insert(0, (selected, f"カメラ {selected}", 0, 0))
+        row = _selected_row(entries, selected, selected_name)
+        if row is None:
+            row = 0
+            entries.insert(0, (selected, selected_name or _placeholder_camera_name(selected), 0, 0))
         with signals_blocked(self._camera_combo):
             self._camera_combo.clear()
             for index, name, width, height in entries:
                 self._camera_combo.addItem(name, index)
+                item = self._camera_combo.count() - 1
                 tooltip = f"デバイス番号 {index}" + (f"（{width}×{height}）" if width and height else "")
-                self._camera_combo.setItemData(self._camera_combo.count() - 1, tooltip, Qt.ItemDataRole.ToolTipRole)
-            self._camera_combo.setCurrentIndex(self._camera_combo.findData(selected))
+                self._camera_combo.setItemData(item, tooltip, Qt.ItemDataRole.ToolTipRole)
+                device_name = None if name == _placeholder_camera_name(index) else name
+                self._camera_combo.setItemData(item, device_name, _DEVICE_NAME_ROLE)
+            self._camera_combo.setCurrentIndex(row)
+
+    def _show_camera_file(self, path: Path) -> None:
+        """The one camera entry while a video file stands in for the webcam."""
+        self._camera_combo.addItem(f"動画ファイル: {path.name}", self._options.camera_index)
+        self._camera_combo.setToolTip(f"カメラの代わりに動画ファイルを再生しています（カメラなしでのテスト用）\n{path}")
+        self._rescan_button.setEnabled(False)
+        self._rescan_button.setToolTip("動画ファイルの再生中はカメラを検索しません")
 
     def _current_camera_index(self) -> int:
         index = self._camera_combo.currentData()
         return index if index is not None else self._options.camera_index
 
+    def _current_camera_name(self) -> str | None:
+        """The selected device's real name, if known."""
+        return self._camera_combo.currentData(_DEVICE_NAME_ROLE)
+
     def _current_resolution(self) -> tuple[int, int]:
         return self._resolutions[max(0, self._resolution_combo.currentIndex())]
 
-    def _probe_worker(self, in_use: Collection[int]) -> None:
+    def _camera_key(self) -> tuple[int | str, int, int]:
+        """What identifies the current choice of camera and size."""
+        return (self._current_camera_name() or self._current_camera_index(), *self._current_resolution())
+
+    def _camera_failing(self) -> bool:
+        return self._last_status is not None and bool(self._last_status.camera_error)
+
+    def _cameras_in_use(self) -> tuple[int, ...] | tuple[str, ...]:
+        """What the probe must leave alone; on DirectShow, opening and closing a live device stops it.
+
+        A device name finds the device wherever it is now. Without a name, or among
+        identical cameras, there is only the index, and not while the camera is
+        failing: nothing is open then, so the probe can find out what is really there.
+        """
+        name = self._current_camera_name()
+        if name is not None and list((self._camera_names or {}).values()).count(name) < 2:
+            return (name,)
+        return () if self._camera_failing() else (self._current_camera_index(),)
+
+    def _probe_worker(self, in_use: Collection[int] | Collection[str]) -> None:
         try:
             cameras = list(self._camera_lister(in_use)) if self._camera_lister else []
         except Exception:
@@ -1331,18 +1441,35 @@ class MainWindow(QMainWindow):
             return
         self._probing = False
         self._rescan_button.setEnabled(True)
-        self._camera_combo.setToolTip(
-            "" if cameras else "カメラが見つかりませんでした。接続を確認して ↻ を押してください"
+        self._camera_names = {camera.index: camera.name for camera in cameras}
+        # Listed without being probed and without a name: only the selection itself, which may not exist.
+        self._camera_found = any(
+            camera.width or camera.height or camera.name != _placeholder_camera_name(camera.index)
+            for camera in cameras
         )
-        self._set_camera_items(cameras, self._current_camera_index())
+        self._update_camera_hint()
+        index, name = self._current_camera_index(), self._current_camera_name()
+        # The selection failed and is not a real camera (e.g. a virtual one), and one has just appeared: use it.
+        if self._camera_failing() and cameras and not self._is_listed(index, name):
+            self._set_camera_items(cameras, cameras[0].index, cameras[0].name)
+            self._on_camera_chosen(self._camera_combo.currentIndex())
+        else:
+            self._set_camera_items(cameras, index, name)
+            self._camera_choice = self._camera_key()  # the same camera, possibly under a new number
+
+    def _update_camera_hint(self) -> None:
+        if self._probing or self._options.camera_file is not None:
+            return
+        working = self._last_status is not None and self._last_status.camera_ok
+        self._camera_combo.setToolTip(_CAMERA_NOT_FOUND if not self._camera_found and not working else "")
 
     def _on_camera_chosen(self, _index: int) -> None:
-        choice = (self._current_camera_index(), *self._current_resolution())
         # Re-choosing the working camera would only blank the call while it reconnects.
-        if choice == self._camera_choice and self._camera_ok():
+        if self._camera_key() == self._camera_choice and self._camera_ok():
             return
-        self._camera_choice = choice
-        self._runner.set_camera(*choice)
+        self._camera_choice = self._camera_key()
+        width, height = self._current_resolution()
+        self._runner.set_camera(self._current_camera_index(), width, height, name=self._current_camera_name())
         self._autosave_timer.start()
 
     def _on_virtual_camera_toggled(self, enabled: bool) -> None:
@@ -1400,6 +1527,7 @@ class MainWindow(QMainWindow):
         self._face_status.setText(f"顔検出 <b style='color:{face_color}'>{face_text}</b>")
         _show_problem(self._camera_status, "カメラ", "未接続", status.camera_error)
         _show_problem(self._processing_status, "メイク処理", "エラー", status.processing_error)
+        self._update_camera_hint()
         self._update_virtual_camera_status()
         self._update_preview_overlays()
 
@@ -1458,10 +1586,10 @@ def _single_shot_timer(parent: QObject, interval_ms: int, slot: Callable[[], Non
 def run_gui(args: argparse.Namespace | None = None) -> int:
     """Run the settings window until it is closed; returns the process exit code.
 
-    ``args`` may carry ``camera``, ``width``, ``height``, ``fps``, ``no_vcam``
-    and ``preset`` (see ``options_from_args``).
+    ``args`` may carry ``camera``, ``camera_file``, ``width``, ``height``,
+    ``fps``, ``no_vcam`` and ``preset`` (see ``options_from_args``).
     """
-    from .camera import list_cameras
+    from .camera import CameraSource, list_cameras, video_file_camera_factory, virtual_camera_size
     from .pipeline import MakeupPipeline
     from .runner import CameraRunner
 
@@ -1480,17 +1608,21 @@ def run_gui(args: argparse.Namespace | None = None) -> int:
         logger.exception("could not start the makeup pipeline")
         QMessageBox.critical(None, APP_TITLE, f"顔認識の準備に失敗しました。\n{exc}")
         return 1
+    camera_file = options.camera_file
 
     def make_runner(on_frame: FrameCallback, on_status: StatusCallback) -> Runner:
         return CameraRunner(
             pipeline,
             camera_index=options.camera_index,
+            camera_name=options.camera_name,
             width=options.width,
             height=options.height,
             fps=options.fps,
             virtual_camera=options.virtual_camera,
+            output_size=virtual_camera_size(options.width, options.height),
             on_frame=on_frame,
             on_status=on_status,
+            camera_factory=video_file_camera_factory(camera_file) if camera_file is not None else CameraSource,
         )
 
     window: MainWindow | None = None
@@ -1499,7 +1631,7 @@ def run_gui(args: argparse.Namespace | None = None) -> int:
             make_runner,
             settings=settings,
             preset_name=preset_name or state.preset(),
-            camera_lister=lambda in_use: list_cameras(in_use=in_use),
+            camera_lister=None if camera_file is not None else lambda in_use: list_cameras(in_use=in_use),
             options=options,
             state=state,
         )

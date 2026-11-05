@@ -15,14 +15,18 @@ pixel by how tooth-like it looks in Lab:
   skin; teeth are less red, and teeth in the shade (warmer and yellower than
   the lit ones, or the lit ones carry a greenish cast) stay in because they
   are yellow rather than pink. Chroma is smoothed first because webcams
-  subsample color, which would otherwise make the mask blocky.
+  subsample color, which would otherwise make the mask blocky,
+* not skin: in a warm light skin passes both redness tests, so a pixel with
+  the chroma of the skin around the mouth is out (a hand passing in front).
 
 References. The teeth's lightness and a* are measured on the mouth interior
 every frame (the brightest, least red pixels) and folded into a
 confidence-weighted running mean: a measurement counts less when the mouth
 is only a slit (it then mostly shows the inner lip edge) and when it looks
 redder or darker than the current state (a half-closed mouth, a hand
-passing), so the mask stays steady while talking. The skin around the mouth
+passing), so the mask stays steady while talking; one that looks clearly less
+red or brighter replaces the state quickly (the state was measured on lips or
+the tongue). The skin around the mouth
 (sampled on two rings of points outside the lips) gives the scene's light
 level and color cast; it is smoothed with a plain EMA. ``reset`` clears both.
 
@@ -31,29 +35,44 @@ before any image work); the effect fades in with the mouth opening. A
 "presence" check fades it out when nothing tooth-like is visible (an open
 mouth showing only the tongue or the dark cavity): visible teeth are clearly
 less red than the skin and not much darker than it. The presence changes by
-at most ``_PRESENCE_STEP`` per frame, so it never pops.
+at most ``_PRESENCE_STEP`` per frame, so it never pops. When this frame's teeth
+measurement has the color of this frame's skin ring, a hand covers the mouth:
+the frame is left alone at once and the references do not follow it, so the
+teeth come back as they were (``_SAME_AS_SKIN``).
 
 What it does:
 
 * ``whitening`` lifts the teeth's lightness with a gain (shading and texture
-  scale with it instead of flattening), limited so that the teeth reference
-  stays below ``_REFERENCE_CEILING``, and softly compressed toward ``_L_CAP``
-  above ``_SHOULDER_KNEE``. Darker, translucent enamel at the biting edges
-  gets a smaller lift, as with real whitening.
+  scale with it instead of flattening). The gain fades out smoothly as the
+  teeth reference gets brighter (``_WHITENING_ROOM``), which keeps the
+  reference below about L 89 and, unlike a hard ceiling, does not turn the
+  reference's frame-to-frame jitter into flicker. The result is softly
+  compressed toward ``_L_CAP`` above ``_SHOULDER_KNEE``. The curve works on the
+  tooth surface (the lightness with its narrow dips filled along the rows) and
+  its lift is added, so a gap keeps its depth where the shoulder compresses.
 * ``yellow_reduction`` pulls b* (and a little of a*) toward a slightly warm
-  neutral that follows the scene's light, never past it: teeth never turn
-  blue or gray.
+  neutral that follows the scene's light, never past it, and fades out on
+  dim teeth: teeth never turn blue or gray.
 * ``evenness`` evens the color (a*, b*) between neighbouring teeth, lifts
   small dark blotches toward an edge-preserving (self-guided) smoothing of
   the lightness (highlights are kept, so the teeth do not turn matte), and
   partially lifts narrow dark gaps and overlap shadows (a morphological
-  black-hat on lightness). The lift closes at most ``_GAP_LIFT`` of a gap's
-  depth, so the separations stay visible and the teeth never merge into one
-  white block.
+  black-hat along the rows of the lightness). The lift closes at most
+  ``_GAP_LIFT`` of a gap's depth (the blotch lift stays out of the gaps), so the
+  separations stay visible and the teeth never merge into one white block.
+
+Support. The made-up image is computed at full strength and its change is
+blended in with one mask: the feathered mouth opening, multiplied by a window
+at the frame's resolution that reaches exactly 0 at ``_FEATHER_REACH`` sigmas
+(Euclidean) from the inner lip line. Outside that distance the frame is
+bit-identical. The window is needed because a float32 ``cv2.GaussianBlur``
+has a square kernel of +-4 sigmas, so the plain feather is still non-zero
+more than 5 sigmas away along the diagonals.
 
 Close-up faces (face scale above ``_MAX_WORK_SCALE``) are processed on a
-downscaled copy of the mouth ROI and the upsampled change is added back,
-which keeps the cost bounded.
+downscaled copy of the mouth ROI (the change and the feather are upsampled),
+and the window still applies at full resolution, which keeps the cost bounded
+without widening the support.
 """
 
 from __future__ import annotations
@@ -68,6 +87,8 @@ from .. import blend, regions
 from ..config import TeethSettings
 from .base import Effect, FrameContext, register_effect
 
+_Lab = tuple[float, float, float]
+
 # All lengths below are fractions of the face scale (inter-ocular distance)
 # unless noted otherwise.
 
@@ -79,13 +100,17 @@ _OPEN_PAIRS = slice(2, -2)  # pairs of LIPS_UPPER_INNER / LIPS_LOWER_INNER away 
 # Mouth-opening feather (sigma): base + feather slider x range.
 _FEATHER_BASE = 0.004
 _FEATHER_RANGE = 0.02
-_FEATHER_REACH = 3.0  # the ROI covers the feather out to this many sigmas
-# The mouth-opening polygon is moved this far outward before feathering
-# (negative = inward); the color weight keeps the lips out.
-_EDGE_OFFSET = 0.0
+_FEATHER_REACH = 3.0  # nothing changes farther than this many sigmas from the inner lip line
+_MIN_REACH_PX = 1.5  # keeps the polygon's anti-aliased edge under very small feathers
+_FILL_SHIFT = 4  # fractional bits of the polygon vertices in cv2.fillPoly
 # Statistics use the interior shrunk by this (clear of the lip line).
 _STATS_INSET = 0.012
 _MIN_FACE_SCALE = 12.0  # px; smaller faces are skipped
+# Largest believable mouth opening (bounding box, x face scale; real ones reach
+# about 1.15) and face scale (x the frame's longer side): beyond these the
+# landmarks are broken.
+_MAX_MOUTH_SIZE = 2.5
+_MAX_FACE_SCALE_IN_FRAME = 2.0
 # Larger faces (face scale in px) are processed at a reduced resolution.
 _MAX_WORK_SCALE = 150.0
 
@@ -125,6 +150,23 @@ _SKIN_RINGS = (0.08, 0.14)  # outer lip line grown by these -> sample points
 _MIN_SKIN_SAMPLES = 8
 _REFERENCE_SKIN = (65.0, 11.0, 18.0)  # typical skin L, a*, b* in neutral light
 _SKIN_EMA = 0.3
+# Something skin-colored in front of the mouth (a hand): a pixel counts as skin
+# when its chroma is this close to the skin's (fully at the first, not at the
+# second; a*, b* units) and closer to it than to the teeth's: at most these
+# fractions of the teeth <-> skin distance. When those two are nearer than
+# _SKIN_APART (no test at the first value, full at the second), color cannot
+# tell them apart.
+_SKIN_CLOSE = (2.5, 5.0)
+_SKIN_CLOSE_SHARE = (0.25, 0.5)
+_SKIN_APART = (4.0, 8.0)
+_SKIN_SAME = 1.5  # the current skin chroma counts as new when this far from the smoothed one
+# The same cue for the whole mouth: this frame's teeth measurement (a* and b*)
+# has the color of this frame's skin ring when something skin-colored covers
+# the opening. No effect and no measurement at the first distance, no
+# reaction at the second. Measured at full cover, also on shaded, creased and
+# noisy simulated hands: at most 1.5. On real teeth: median 14, below 3 in
+# 0.7 % of the open-mouth frames.
+_SAME_AS_SKIN = (1.5, 3.0)
 
 # ---- temporal smoothing of the teeth references ------------------------------
 # A measurement's confidence (0..1) grows with the mouth opening and with the
@@ -136,25 +178,35 @@ _CONFIDENCE_OPENING = (0.03, 0.1)
 _FULL_CONFIDENCE_AREA = 0.03  # interior pixels (x scale^2) for full confidence
 _STATS_MEMORY = 2.3
 # Measurements redder / darker than the state are outliers: the confidence is
-# divided by 1 + r^2, r being that excess in these units (a*, L). Less red or
-# brighter ones count fully, so teeth showing up after a tongue-only start
-# are adopted at once; lasting changes (the light) still get through, just
-# more gradually.
+# divided by 1 + r^2, r being that excess in these units (a*, L); lasting
+# changes (the light) still get through, just more gradually. Less red or
+# brighter ones mean the state was measured on lips or the tongue: the same
+# formula divides the state's memory instead, so the teeth showing up are
+# adopted within a frame or two.
 _OUTLIER_SCALE = (6.0, 15.0)
 
 # ---- whitening ----------------------------------------------------------------
 _MAX_GAIN = 0.16  # lightness gain at whitening 1.0
-_REFERENCE_CEILING = 88.0  # the teeth reference is never lifted above this L
+# The tone curve works on the tooth surface: the lightness with dark features
+# narrower than this (about a tooth) filled along the rows.
+_SURFACE_WIDTH = 0.12
+# The gain is full up to the first teeth L and gone at the second. Wide on
+# purpose: the lift's sensitivity to the teeth reference is proportional to
+# the slope of this ramp.
+_WHITENING_ROOM = (74.0, 90.0)
 _SHOULDER_KNEE = 82.0  # above this the lift is compressed ...
 _L_CAP = 92.0  # ... toward this L (never reached)
 
 # ---- yellow reduction ---------------------------------------------------------
 _NEUTRAL_AB = (1.0, 5.0)  # slightly warm off-white (a*, b*) in neutral light
 _NEUTRAL_FLOOR = (0.0, 3.0)  # the target never gets greener / bluer than this
-_CAST_ADAPTATION = 0.5  # share of the skin's color cast the neutral follows
+_CAST_ADAPTATION = 0.8  # share of the skin's color cast the neutral follows
 _MAX_CAST = 10.0
 _MAX_YELLOW_CUT = 0.65  # share of the b* excess over the neutral removed at 1.0
 _A_PULL = 0.4  # a* is pulled toward the neutral by this share of the b* cut
+# Teeth reference L: no reduction at the first value, full at the second.
+# Dim teeth (a dark room) with less yellow just read as gray.
+_YELLOW_LIGHT = (35.0, 65.0)
 
 # ---- evenness -----------------------------------------------------------------
 _AB_EVEN_SIGMA = 0.05  # color evening reach (about half a front tooth)
@@ -165,7 +217,8 @@ _L_EVEN_RANGE = 0.08  # ... and edge threshold as a fraction of the teeth lightn
 _L_EVEN = 0.6  # share of the smoothing applied at 1.0
 _GAP_WIDTH = 0.05  # dark features narrower than this are gaps
 _MAX_GAP_KERNEL = 15  # px
-_GAP_LIFT = 0.45  # share of a gap's depth lifted at 1.0 (keeps the separations)
+_GAP_LIFT = 0.35  # share of a gap's depth lifted at 1.0 (keeps the separations)
+_VALLEY_DEPTH = (0.5, 2.5)  # closing minus lightness (L): blotch lift full below, none above
 
 
 @dataclass(frozen=True)
@@ -284,8 +337,12 @@ class TeethEffect(Effect):
         opening = _opening(landmarks) / scale
         if not opening > _OPEN_RAMP[0]:
             return frame  # closed mouth (or broken landmarks): nothing to do
-        feather = _feather(settings)
-        margin = _FEATHER_REACH * feather * scale + _gap_kernel_size(scale) / 2.0 + 2.0
+        if self._teeth is None and opening <= _CONFIDENCE_OPENING[0]:
+            return frame  # a slit, and no references yet: nothing to measure or use
+        if not _is_believable_mouth(landmarks[regions.LIPS_INNER], scale, frame.shape):
+            return frame
+        sigma = _feather(settings) * scale
+        margin = _support_reach(sigma) + _gap_kernel_size(scale) / 2.0 + 2.0
         roi = regions.roi_around(landmarks[regions.LIPS_INNER], frame.shape, 0.0, margin)
         if roi is None or roi.w < 4 or roi.h < 4:
             return frame
@@ -294,29 +351,31 @@ class TeethEffect(Effect):
         lab = blend.bgr_to_lab(work.image)
         chroma_sigma = max(_CHROMA_SIGMA * work.scale, 0.5)
         chroma = cv2.GaussianBlur(lab[..., 1:], (0, 0), chroma_sigma, borderType=cv2.BORDER_REPLICATE)
-        self._update_skin(_skin_reference(frame, landmarks, scale))
-        self._update_teeth(lab[..., 0], chroma, work, opening)
+        skin_now = _skin_reference(frame, landmarks, scale)
+        self._update_skin(skin_now)
+        visible = self._update_teeth(lab[..., 0], chroma, work, opening, skin_now)
         stats = self.stats
         if stats is None:
             return frame
-        gate = self._step_presence(stats.presence()) * _smoothstep_scalar(opening, *_OPEN_RAMP)
+        gate = self._step_presence(stats.presence()) * _smoothstep_scalar(opening, *_OPEN_RAMP) * visible
         if gate <= 0.0:
             return frame
-        inner = regions.expand_polygon(work.landmarks[regions.LIPS_INNER], _EDGE_OFFSET * work.scale)
-        area = regions.polygon_mask(inner, work.roi, feather * work.scale)
-        area *= np.float32(gate)
-        made_up = _make_up(lab, chroma, area, stats, levels, work.scale)
+        made_up = _make_up(lab, chroma, stats, levels, work.scale, skin_now)
         delta = blend.lab_to_bgr(made_up)
         delta -= blend.lab_to_bgr(lab)
+        area = regions.polygon_mask(work.landmarks[regions.LIPS_INNER], work.roi, sigma * work.scale / scale)
         if work.downscaled:
             delta = cv2.resize(delta, (roi.w, roi.h), interpolation=cv2.INTER_LINEAR)
+            area = cv2.resize(area, (roi.w, roi.h), interpolation=cv2.INTER_LINEAR)
+        area *= _support_window(landmarks[regions.LIPS_INNER], roi, sigma)
+        delta *= area[..., None] * np.float32(gate)
         view += delta
         np.clip(view, 0.0, 1.0, out=view)
         return frame
 
     # ---- temporal state -------------------------------------------------------
 
-    def _update_skin(self, measured: tuple[float, float, float] | None) -> None:
+    def _update_skin(self, measured: _Lab | None) -> None:
         if measured is None:
             return
         if self._skin is None:
@@ -324,29 +383,40 @@ class TeethEffect(Effect):
         else:
             self._skin = tuple(old + _SKIN_EMA * (new - old) for old, new in zip(self._skin, measured))
 
-    def _update_teeth(self, lightness: np.ndarray, chroma: np.ndarray, work: _Work, opening: float) -> None:
-        """Measure the teeth references and fold them into the smoothed state."""
+    def _update_teeth(
+        self, lightness: np.ndarray, chroma: np.ndarray, work: _Work, opening: float, skin_now: _Lab | None
+    ) -> float:
+        """Measure the teeth references and fold them into the smoothed state.
+
+        Returns 0..1, how much this frame's mouth interior can be something
+        other than skin (see ``_SAME_AS_SKIN``). What is not is not measured,
+        and the caller does not touch it.
+        """
         confidence = _smoothstep_scalar(opening, *_CONFIDENCE_OPENING)
         if confidence <= 0.0:
-            return
-        inner = regions.expand_polygon(work.landmarks[regions.LIPS_INNER], -_STATS_INSET * work.scale)
-        interior = regions.polygon_mask(inner, work.roi) > 0.5
+            return 1.0
+        interior = _interior(work)
         count = int(np.count_nonzero(interior))
         if count < _MIN_INTERIOR_PIXELS:
-            return
-        confidence *= min(count / (_FULL_CONFIDENCE_AREA * work.scale * work.scale), 1.0)
+            return 1.0
         measured = _teeth_reference(lightness[interior], chroma[interior])
+        visible = _unlike_skin(measured, skin_now)
+        confidence *= min(count / (_FULL_CONFIDENCE_AREA * work.scale * work.scale), 1.0) * visible
         if self._teeth is None:
             self._teeth, self._weight = measured, confidence
-            return
-        residual = math.hypot(
-            max(measured[1] - self._teeth[1], 0.0) / _OUTLIER_SCALE[0],
-            max(self._teeth[0] - measured[0], 0.0) / _OUTLIER_SCALE[1],
-        )
-        confidence /= 1.0 + residual * residual
-        share = confidence / (self._weight + confidence)
+            return visible
+        if confidence <= 0.0:
+            return visible
+        redder = max(measured[1] - self._teeth[1], 0.0) / _OUTLIER_SCALE[0]
+        darker = max(self._teeth[0] - measured[0], 0.0) / _OUTLIER_SCALE[1]
+        confidence /= 1.0 + redder * redder + darker * darker
+        less_red = max(self._teeth[1] - measured[1], 0.0) / _OUTLIER_SCALE[0]
+        brighter = max(measured[0] - self._teeth[0], 0.0) / _OUTLIER_SCALE[1]
+        memory = self._weight / (1.0 + less_red * less_red + brighter * brighter)
+        share = confidence / (memory + confidence)
         self._teeth = tuple(old + share * (new - old) for old, new in zip(self._teeth, measured))
-        self._weight = min(self._weight + confidence, _STATS_MEMORY)
+        self._weight = min(memory + confidence, _STATS_MEMORY)
+        return visible
 
     def _step_presence(self, target: float) -> float:
         """Move the presence toward ``target`` by at most ``_PRESENCE_STEP``."""
@@ -367,6 +437,16 @@ def _opening(landmarks: np.ndarray) -> float:
     return float(np.max(np.linalg.norm(upper - lower, axis=1)))
 
 
+def _is_believable_mouth(polygon: np.ndarray, scale: float, shape: tuple[int, ...]) -> bool:
+    """False for lip points no real face gives: not finite (``_opening`` only looks
+    at the middle pairs) or absurdly far apart. Rasterizing those stalls ``cv2``
+    for up to seconds per frame (the coordinates overflow), so they stop here."""
+    if not np.isfinite(polygon).all():
+        return False
+    size = float((polygon.max(axis=0) - polygon.min(axis=0)).max())
+    return size <= _MAX_MOUTH_SIZE * scale and scale <= _MAX_FACE_SCALE_IN_FRAME * max(shape[0], shape[1])
+
+
 def _work_copy(view: np.ndarray, landmarks: np.ndarray, roi: regions.Roi, scale: float) -> _Work:
     """The ROI to process: ``view`` itself, or for close-up faces a copy
     downscaled to a face scale of about ``_MAX_WORK_SCALE``."""
@@ -379,7 +459,15 @@ def _work_copy(view: np.ndarray, landmarks: np.ndarray, roi: regions.Roi, scale:
     return _Work(small, local, regions.Roi(0, 0, *size), scale * float(ratio[0]), True)
 
 
-def _teeth_reference(lightness: np.ndarray, chroma: np.ndarray) -> tuple[float, float, float]:
+def _interior(work: _Work) -> np.ndarray:
+    """Boolean mask of the mouth opening shrunk by ``_STATS_INSET``, clear of the lip line."""
+    opening = regions.polygon_mask(work.landmarks[regions.LIPS_INNER], work.roi) > 0.5
+    size = 2 * math.ceil(_STATS_INSET * work.scale) + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    return cv2.erode(opening.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
+
+
+def _teeth_reference(lightness: np.ndarray, chroma: np.ndarray) -> _Lab:
     """(L, a*, b*) of the teeth from the mouth interior's pixels (chroma: (N, 2)).
 
     The teeth are the brightest, least red pixels of the mouth opening. When
@@ -392,10 +480,17 @@ def _teeth_reference(lightness: np.ndarray, chroma: np.ndarray) -> tuple[float, 
     return max(float(np.median(lightness[teeth])), 1.0), float(a), float(b)
 
 
+def _unlike_skin(teeth: _Lab, skin: _Lab | None) -> float:
+    """0..1: 0 when the color measured as teeth is the color of the skin around the mouth."""
+    if skin is None:
+        return 1.0
+    return _smoothstep_scalar(math.hypot(teeth[1] - skin[1], teeth[2] - skin[2]), *_SAME_AS_SKIN)
+
+
 _PATCH = np.arange(-1, 2)
 
 
-def _skin_reference(frame: np.ndarray, landmarks: np.ndarray, scale: float) -> tuple[float, float, float] | None:
+def _skin_reference(frame: np.ndarray, landmarks: np.ndarray, scale: float) -> _Lab | None:
     """Median Lab of the lit skin on two rings around the lips (3x3 patches), or None."""
     outer = landmarks[regions.LIPS_OUTER]
     points = np.vstack([regions.expand_polygon(outer, ring * scale) for ring in _SKIN_RINGS])
@@ -419,41 +514,61 @@ def _skin_reference(frame: np.ndarray, landmarks: np.ndarray, scale: float) -> t
 
 
 def _make_up(
-    lab: np.ndarray,
-    chroma: np.ndarray,
-    area: np.ndarray,
-    stats: _Stats,
-    levels: _Levels,
-    scale: float,
+    lab: np.ndarray, chroma: np.ndarray, stats: _Stats, levels: _Levels, scale: float, skin_now: _Lab | None
 ) -> np.ndarray:
-    """The made-up Lab image. ``area``: feathered mouth opening x presence/opening gate."""
+    """The Lab image with the teeth fully made up; the caller blends the change in."""
     lightness = lab[..., 0]
     kernel = _gap_kernel(scale)
     filled = cv2.morphologyEx(lightness, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_REPLICATE)
+    surface = _row_closing(lightness, _odd_size(_SURFACE_WIDTH * scale))
     red, hue = stats.red_threshold(), stats.hue_threshold()
-    not_red = 1.0 - _smoothstep(chroma[..., 0], red, red + _RED_WIDTH)
-    not_red *= 1.0 - _smoothstep(chroma[..., 0] - np.float32(_HUE_B_WEIGHT) * chroma[..., 1], hue, hue + _HUE_WIDTH)
+    color = 1.0 - _smoothstep(chroma[..., 0], red, red + _RED_WIDTH)
+    color *= 1.0 - _smoothstep(chroma[..., 0] - np.float32(_HUE_B_WEIGHT) * chroma[..., 1], hue, hue + _HUE_WIDTH)
+    for skin in _skin_colors(stats.skin, skin_now):
+        _exclude_skin(color, chroma, stats, skin)
     likeness = _smoothstep(lightness * np.float32(1.0 / stats.teeth_l), *_L_RATIO)
     likeness *= _smoothstep(lightness / np.maximum(filled, np.float32(1.0)), *_GAP_RATIO)
-    likeness *= not_red
-    teeth = likeness * area
+    likeness *= color
     out = lab.copy()
     if levels.evenness > 0.0:
-        gaps = (filled - lightness, cv2.morphologyEx(likeness, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_REPLICATE))
-        _even_out(out, lab, likeness, teeth, gaps, not_red * area, stats.teeth_l, levels.evenness, scale)
+        between = cv2.morphologyEx(likeness, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_REPLICATE)
+        _even_out(out, lab, likeness, surface, between * color, stats.teeth_l, levels.evenness, scale)
     if levels.whitening > 0.0:
-        _whiten(out[..., 0], teeth, stats.teeth_l, levels.whitening)
+        _whiten(out[..., 0], surface, likeness, stats.teeth_l, levels.whitening)
     if levels.yellow > 0.0:
-        _reduce_yellow(out, teeth, stats.neutral(), levels.yellow)
+        amount = levels.yellow * _smoothstep_scalar(stats.teeth_l, *_YELLOW_LIGHT)
+        _reduce_yellow(out, likeness, stats.neutral(), amount)
     return out
+
+
+def _skin_colors(smoothed: _Lab | None, current: _Lab | None) -> tuple[_Lab, ...]:
+    """The skin colors to exclude: the smoothed one, and this frame's while it
+    differs (a hand arriving changes it at once, the smoothed one lags)."""
+    if smoothed is None or current is None:
+        return ()
+    if math.hypot(smoothed[1] - current[1], smoothed[2] - current[2]) < _SKIN_SAME:
+        return (smoothed,)
+    return (smoothed, current)
+
+
+def _exclude_skin(weight: np.ndarray, chroma: np.ndarray, stats: _Stats, skin: _Lab) -> None:
+    """In place on ``weight``: fade out what has the color of ``skin`` (see ``_SKIN_CLOSE``)."""
+    apart = math.hypot(stats.teeth_a - skin[1], stats.teeth_b - skin[2])
+    strength = _smoothstep_scalar(apart, *_SKIN_APART)
+    if strength <= 0.0:
+        return
+    near = min(_SKIN_CLOSE[0], _SKIN_CLOSE_SHARE[0] * apart)
+    far = min(_SKIN_CLOSE[1], _SKIN_CLOSE_SHARE[1] * apart)
+    distance = (chroma[..., 0] - np.float32(skin[1])) ** 2 + (chroma[..., 1] - np.float32(skin[2])) ** 2
+    close = _smoothstep(distance, near * near, far * far)
+    weight *= 1.0 - np.float32(strength) * (1.0 - close)
 
 
 def _even_out(
     out: np.ndarray,
     lab: np.ndarray,
     likeness: np.ndarray,
-    teeth: np.ndarray,
-    gaps: tuple[np.ndarray, np.ndarray],
+    surface: np.ndarray,
     gap_area: np.ndarray,
     teeth_l: float,
     amount: float,
@@ -461,8 +576,8 @@ def _even_out(
 ) -> None:
     """In place on ``out``: color evening, lightness smoothing and gap lift.
 
-    ``gaps``: the depth of narrow dark valleys (closing minus lightness) and
-    the teeth area with its gaps filled (closing of ``likeness``).
+    ``surface``: the lightness with its dips filled along the rows;
+    ``gap_area``: the teeth area with its gaps filled, where gaps may be lifted.
     """
     lightness = lab[..., 0]
     # Color: blend a*/b* toward their average over nearby teeth (normalized
@@ -473,29 +588,36 @@ def _even_out(
     weighted[..., 0] = likeness
     weighted = _blur(weighted, sigma)
     average = weighted[..., 1:] / np.maximum(weighted[..., :1], np.float32(1e-3))
-    share = teeth * np.float32(amount * _AB_EVEN)
+    share = likeness * np.float32(amount * _AB_EVEN)
     out[..., 1:] += (average - lab[..., 1:]) * share[..., None]
     # Lightness: lift small dark blotches toward an edge-preserving smoothing
-    # (one-sided: the highlights, the enamel's natural gloss, stay).
+    # (one-sided: the highlights, the enamel's natural gloss, stay). Not in
+    # the dips of the surface: on top of the gap lift it would close them
+    # further than _GAP_LIFT allows, and blurred webcam gaps are shallow enough
+    # for the filter to smooth.
     radius = max(int(round(_L_EVEN_RADIUS * scale)), 1)
     smooth = _self_guided_filter(lightness, radius, (_L_EVEN_RANGE * teeth_l) ** 2)
-    out[..., 0] += np.maximum(smooth - lightness, 0.0) * (teeth * np.float32(amount * _L_EVEN))
-    # Gaps: lift narrow dark valleys between teeth part of the way.
-    depth, between = gaps
-    out[..., 0] += depth * (between * gap_area * np.float32(amount * _GAP_LIFT))
+    blotches = np.maximum(smooth - lightness, 0.0) * (1.0 - _smoothstep(surface - lightness, *_VALLEY_DEPTH))
+    out[..., 0] += blotches * (likeness * np.float32(amount * _L_EVEN))
+    # Gaps: lift narrow dark valleys between teeth part of the way. Measured
+    # along the rows, so a valley's depth is what separates it from the teeth
+    # beside it: the brighter tooth below a lip's shadow does not count.
+    depth = _row_closing(lightness, _gap_kernel_size(scale)) - lightness
+    out[..., 0] += depth * (gap_area * np.float32(amount * _GAP_LIFT))
 
 
-def _whiten(lightness: np.ndarray, teeth: np.ndarray, teeth_l: float, amount: float) -> None:
-    """In place on Lab L: gain with a soft shoulder (see module docstring)."""
-    gain = min(1.0 + amount * _MAX_GAIN, max(_REFERENCE_CEILING / teeth_l, 1.0))
+def _whiten(lightness: np.ndarray, surface: np.ndarray, teeth: np.ndarray, teeth_l: float, amount: float) -> None:
+    """In place on Lab L: gain with a soft shoulder (see module docstring), on the
+    tooth surface. The lift is added, so gaps and texture keep their depth."""
+    gain = 1.0 + amount * _MAX_GAIN * (1.0 - _smoothstep_scalar(teeth_l, *_WHITENING_ROOM))
     if gain <= 1.0:
         return
-    lifted = lightness * np.float32(gain)
+    lifted = surface * np.float32(gain)
     knee, room = np.float32(_SHOULDER_KNEE), np.float32(_L_CAP - _SHOULDER_KNEE)
     shoulder = knee + room * np.tanh((lifted - knee) / room)
     lifted = np.where(lifted > knee, shoulder, lifted)
-    np.maximum(lifted, lightness, out=lifted)  # never darken (bright speculars stay)
-    lightness += (lifted - lightness) * teeth
+    lift = np.maximum(lifted - surface, 0.0)  # never darken (bright speculars stay)
+    lightness += lift * teeth
 
 
 def _reduce_yellow(out: np.ndarray, teeth: np.ndarray, neutral: tuple[float, float], amount: float) -> None:
@@ -549,15 +671,47 @@ def _feather(settings: TeethSettings) -> float:
     return _FEATHER_BASE + _FEATHER_RANGE * _clamp01(settings.feather)
 
 
+def _support_reach(sigma: float) -> float:
+    """Largest distance (px) from the inner lip line at which anything changes."""
+    return max(_FEATHER_REACH * sigma, _MIN_REACH_PX)
+
+
+def _support_window(polygon: np.ndarray, roi: regions.Roi, sigma: float) -> np.ndarray:
+    """ROI-sized factor for the feather: exactly 0 beyond ``_support_reach(sigma)``
+    from ``polygon`` (see the module docstring), give or take a pixel diagonal of
+    rasterization, and exactly 1 up to one sigma before that.
+
+    It only touches the feather's last sigma, where the feather is already
+    below about 2 %, so the result looks like the plain Gaussian feather.
+    """
+    outside = np.ones((roi.h, roi.w), np.uint8)
+    corners = (np.asarray(polygon, np.float64) - roi.offset - 0.5) * (1 << _FILL_SHIFT)
+    cv2.fillPoly(outside, [np.round(corners).astype(np.int32)], 0, cv2.LINE_8, _FILL_SHIFT)
+    distance = cv2.distanceTransform(outside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    reach = _support_reach(sigma)
+    return 1.0 - _smoothstep(distance, reach - sigma, reach)
+
+
 def _gap_kernel_size(scale: float) -> int:
     """Odd structuring-element size (px) for the gap search."""
-    size = int(round(_GAP_WIDTH * scale))
-    return min(max(size | 1, 3), _MAX_GAP_KERNEL)
+    return min(_odd_size(_GAP_WIDTH * scale), _MAX_GAP_KERNEL)
+
+
+def _odd_size(length: float) -> int:
+    """An odd kernel size (px, at least 3) close to ``length``."""
+    return max(int(round(length)) | 1, 3)
 
 
 def _gap_kernel(scale: float) -> np.ndarray:
     size = _gap_kernel_size(scale)
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
+def _row_closing(image: np.ndarray, size: int) -> np.ndarray:
+    """Grayscale closing along the rows: dips narrower than ``size`` px are filled
+    up to the lower of their two rims."""
+    kernel = np.ones((1, size), np.uint8)
+    return cv2.morphologyEx(image, cv2.MORPH_CLOSE, kernel, borderType=cv2.BORDER_REPLICATE)
 
 
 def _smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:

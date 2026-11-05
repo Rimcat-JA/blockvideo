@@ -11,7 +11,9 @@ import cv2
 import numpy as np
 import pytest
 
+from makeup_cam import background as plates
 from makeup_cam import effects as effects_pkg
+from makeup_cam import pipeline as pipeline_module
 from makeup_cam.config import MakeupSettings
 from makeup_cam.effects.base import Effect, FrameContext
 from makeup_cam.models import MODEL_SPECS
@@ -418,6 +420,188 @@ def test_builtin_effects_load_lazily_only_without_explicit_effects(monkeypatch: 
 
 
 # ---------------------------------------------------------------------------
+# Background plate
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A private user data folder: the user's real plate is never read or written."""
+    folder = tmp_path / "home"
+    monkeypatch.setenv("AI_MAKEUP_CAM_HOME", str(folder))
+    return folder
+
+
+def room_frame(value: int = 200) -> np.ndarray:
+    return np.full((H, W, 3), value, np.uint8)
+
+
+def empty_room(_: np.ndarray) -> float:
+    return 0.0
+
+
+def run_once(pipeline: MakeupPipeline, lips: FakeEffect, ts: int = 0, frame: np.ndarray | None = None) -> FrameContext:
+    pipeline.process(sample_frame() if frame is None else frame, ts)
+    return lips.calls[-1]
+
+
+def test_without_a_plate_effects_get_none(home: Path) -> None:
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    assert run_once(pipeline, lips).background is None
+    assert not pipeline.has_background
+
+
+def test_a_saved_plate_is_used_as_float32_and_only_read(home: Path) -> None:
+    plates.save_plate(room_frame(51))
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    plate = run_once(pipeline, lips).background
+    assert plate is not None and plate.dtype == np.float32 and plate.shape == (H, W, 3)
+    np.testing.assert_allclose(plate, 0.2, atol=1e-6)
+    assert not plate.flags.writeable
+    assert pipeline.has_background
+    assert run_once(pipeline, lips, 33).background is plate  # converted once, not per frame
+
+
+def test_a_plate_is_invalid_when_the_resolution_changes(home: Path) -> None:
+    plates.save_plate(room_frame())
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    assert run_once(pipeline, lips).background is not None
+    bigger = np.zeros((H * 2, W * 2, 3), np.uint8)
+    assert run_once(pipeline, lips, 33, bigger).background is None
+    assert not pipeline.has_background
+    assert run_once(pipeline, lips, 66).background is not None  # back at its own resolution
+
+
+def test_capture_background_saves_and_starts_using_the_plate(home: Path) -> None:
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), person_probe=empty_room)
+    run_once(pipeline, lips)
+    result = pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES)
+    assert result.ok and result.message == plates.SUCCESS_MESSAGE
+    assert pipeline.has_background
+    assert plates.plate_path(W, H).is_file()
+    np.testing.assert_allclose(run_once(pipeline, lips, 33).background, 200 / 255, atol=1e-6)
+
+
+def test_a_rejected_capture_keeps_the_previous_plate(home: Path) -> None:
+    plates.save_plate(room_frame(100))
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), person_probe=lambda _: 0.5)
+    before = run_once(pipeline, lips).background
+    result = pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES)
+    assert not result.ok and "人" in result.message
+    assert run_once(pipeline, lips, 33).background is before
+    np.testing.assert_array_equal(plates.load_plate(W, H), room_frame(100))
+
+
+def test_a_capture_at_another_resolution_is_saved_but_not_used(home: Path) -> None:
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), person_probe=empty_room)
+    run_once(pipeline, lips)
+    other = np.full((H * 2, W * 2, 3), 90, np.uint8)
+    assert pipeline.capture_background([other] * plates.CAPTURE_FRAMES).ok
+    assert run_once(pipeline, lips, 33).background is None
+    assert plates.plate_path(W * 2, H * 2).is_file()
+
+
+def test_clear_background(home: Path) -> None:
+    plates.save_plate(room_frame())
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    run_once(pipeline, lips)
+    result = pipeline.clear_background()
+    assert result.ok and result.message == plates.CLEARED_MESSAGE
+    assert not pipeline.has_background and not plates.plate_path(W, H).exists()
+    assert run_once(pipeline, lips, 33).background is None
+
+
+def test_a_plate_that_cannot_be_saved_is_used_until_the_app_closes(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(_: np.ndarray) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plates, "save_plate", refuse)
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), person_probe=empty_room)
+    run_once(pipeline, lips)
+    result = pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES)
+    assert result.ok and result.message == plates.SUCCESS_NOT_SAVED_MESSAGE
+    assert run_once(pipeline, lips, 33).background is not None
+
+
+def test_a_plate_file_that_cannot_be_read_only_means_no_plate(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(width: int, height: int) -> np.ndarray:
+        raise RuntimeError("cannot read")
+
+    monkeypatch.setattr(plates, "load_plate", broken)
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    assert run_once(pipeline, lips).background is None
+
+
+def test_capture_uses_its_own_model_and_closes_it(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[bool] = []
+
+    class FakeProbe:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def __call__(self, frame: np.ndarray) -> float:
+            return 0.0
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(pipeline_module, "ensure_model", lambda name, directory=None: Path("model.tflite"))
+    monkeypatch.setattr(plates, "MediaPipePersonProbe", FakeProbe)
+    pipeline, _, _ = make_pipeline([], settings_with())
+    assert pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES).ok
+    assert closed == [True]
+
+
+def test_capture_never_raises_when_the_model_is_unavailable(
+    home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def fail(name: str, directory: Path | None = None) -> Path:
+        raise RuntimeError("no model")
+
+    monkeypatch.setattr(pipeline_module, "ensure_model", fail)
+    pipeline, _, _ = make_pipeline([], settings_with())
+    with caplog.at_level(logging.ERROR, logger="makeup_cam.pipeline"):
+        result = pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES)
+    assert not result.ok and result.message == plates.CHECK_FAILED_MESSAGE
+    assert any("no model" in record.getMessage() for record in caplog.records)
+    assert not pipeline.has_background
+
+
+def test_capturing_and_clearing_while_processing(home: Path) -> None:
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), person_probe=empty_room)
+    stop = threading.Event()
+    rounds: list[int] = []
+
+    def churn() -> None:
+        while not stop.is_set():
+            pipeline.capture_background([room_frame()] * plates.MIN_FRAMES)
+            pipeline.clear_background()
+            rounds.append(1)
+
+    thread = threading.Thread(target=churn)
+    thread.start()
+    try:
+        results = []
+        while len(rounds) < 5:
+            results += run(pipeline, 10, start_ms=33 * len(results))
+    finally:
+        stop.set()
+        thread.join()
+    assert all(r.output.shape == (H, W, 3) for r in results)
+    assert all(ctx.background is None or ctx.background.shape == (H, W, 3) for ctx in lips.calls)
+
+
+# ---------------------------------------------------------------------------
 # Real models (skipped when models / scikit-image are unavailable)
 # ---------------------------------------------------------------------------
 
@@ -439,3 +623,60 @@ def test_real_models_on_astronaut_portrait(models_dir: Path) -> None:
     assert landmarks[[33, 263], 1].mean() < landmarks[1, 1] < landmarks[13, 1]
     assert 40 < np.linalg.norm(landmarks[33] - landmarks[263]) < 90
     np.testing.assert_array_equal(result.output, frame)  # no effects -> untouched
+
+
+def test_deleting_during_a_capture_wins(home: Path) -> None:
+    """The room's picture is gone once the user was told so, even if a capture was still running."""
+    calls: list[int] = []
+
+    def clearing_probe(_: np.ndarray) -> float:
+        if not calls:
+            assert pipeline.clear_background().ok
+        calls.append(1)
+        return 0.0
+
+    pipeline = MakeupPipeline(
+        tracker=FakeTracker(), segmenter=FakeSegmenter(), effects=[effect("lips", 1)], person_probe=clearing_probe
+    )
+    result = pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES)
+    assert not result.ok and result.message == plates.CAPTURE_CANCELLED_MESSAGE
+    assert result.plate is None
+    assert not pipeline.has_background
+    assert not home.exists() or list(home.iterdir()) == []
+
+
+def test_deleting_during_the_countdown_cancels_a_capture_started_afterwards(home: Path) -> None:
+    pipeline = MakeupPipeline(
+        tracker=FakeTracker(), segmenter=FakeSegmenter(), effects=[effect("lips", 1)], person_probe=empty_room
+    )
+    requested = pipeline.background_generation
+    pipeline.clear_background()
+    assert not pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES, requested).ok
+    assert not pipeline.has_background and (not home.exists() or list(home.iterdir()) == [])
+    # A new request after the deletion is fine, with or without naming when it was made.
+    assert pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES, pipeline.background_generation).ok
+    assert pipeline.capture_background([room_frame()] * plates.CAPTURE_FRAMES).ok
+
+
+def test_a_plate_that_cannot_be_saved_survives_a_change_of_resolution(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is promised for as long as the app runs, and an older file must not silently come back."""
+    plates.save_plate(room_frame(40))
+    lips = effect("lips", 1)
+    pipeline = MakeupPipeline(tracker=FakeTracker(), segmenter=FakeSegmenter(), effects=[lips], person_probe=empty_room)
+    run_once(pipeline, lips, 0)
+
+    def refuse(_: np.ndarray) -> Path:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(plates, "save_plate", refuse)
+    result = pipeline.capture_background([room_frame(200)] * plates.CAPTURE_FRAMES)
+    assert result.message == plates.SUCCESS_NOT_SAVED_MESSAGE
+    smaller = room_frame()[: H // 2, : W // 2]
+    run_once(pipeline, lips, 33, smaller)
+    assert not pipeline.has_background
+    ctx = run_once(pipeline, lips, 66)
+    assert ctx.background is not None and abs(float(ctx.background.mean()) - 200 / 255) < 1e-3
+    # Deleting also forgets it.
+    pipeline.clear_background()
+    run_once(pipeline, lips, 99, smaller)
+    assert run_once(pipeline, lips, 132).background is None
