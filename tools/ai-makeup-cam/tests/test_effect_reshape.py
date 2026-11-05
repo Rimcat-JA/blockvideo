@@ -1266,3 +1266,92 @@ def test_real_models_end_to_end(face_frame_720p, models_dir) -> None:
     box = regions.roi_around(spy.seen[-1][regions.FACE_OVAL], face_frame_720p.shape, pad=0.5)
     assert box.x0 <= xs.min() and xs.max() < box.x1
     assert box.y0 <= ys.min() and ys.max() < box.y1
+
+
+def test_warped_masks_are_new_objects_in_reused_memory() -> None:
+    """The hair effect tells masks apart by identity, so reusing the memory must not reuse the object."""
+    module = reshape_module
+    roi = regions.Roi(10, 10, 30, 30)
+    area = module._Area(roi, (slice(0, 1), slice(0, 1)), 8)
+    map_y, map_x = np.mgrid[10.0:30.0, 11.0:31.0].astype(np.float32)
+    memory = [np.empty((0, 0), np.float32)]
+    first_mask = np.random.default_rng(0).uniform(0.0, 1.0, (60, 80)).astype(np.float32)
+    first_mask.setflags(write=False)
+    first = module._warp_mask(first_mask, area, map_x, map_y, memory, 0)
+    expected = first_mask.copy()
+    expected[roi.slices] = cv2.remap(first_mask, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    np.testing.assert_array_equal(first, expected)
+    assert not first.flags.writeable
+    second = module._warp_mask(first_mask[::-1].copy(), area, map_x, map_y, memory, 0)
+    assert second is not first and np.shares_memory(second, first)
+    larger = module._warp_mask(np.zeros((70, 90), np.float32), area, map_x, map_y, memory, 0)
+    assert larger.shape == (70, 90)
+    assert module._warp_mask(None, area, map_x, map_y, memory, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# No plate: slimming gives way to lines next to the jaw
+# ---------------------------------------------------------------------------
+
+
+def jaw_width_change(frame: np.ndarray, out: np.ndarray, lm: np.ndarray) -> float:
+    """How much of the frame changed: the larger the slimming, the larger this is."""
+    return float(np.abs(out - frame).mean())
+
+
+def run_frames(frame: np.ndarray, lm: np.ndarray, fake_ctx, masks, effect: ReshapeEffect, count: int, **sliders) -> np.ndarray:
+    out = frame
+    for _ in range(count):
+        out, _ = run(frame, lm, fake_ctx, masks=masks, effect=effect, **sliders)
+    return out
+
+
+def test_lines_next_to_the_jaw_slowly_take_back_the_slimming(face_landmarks_720p, fake_ctx) -> None:
+    lm = face_landmarks_720p
+    frame, person = with_person(lined_room(720, 1280), lm)
+    masks = (None, person, None)
+    effect = ReshapeEffect()
+    first = jaw_width_change(frame, run_frames(frame, lm, fake_ctx, masks, effect, 1, face_slim=1.0), lm)
+    previous = effect._slim_level
+    assert previous == 1.0
+    steps = []
+    for _ in range(90):
+        run(frame, lm, fake_ctx, masks=masks, effect=effect, face_slim=1.0)
+        steps.append(previous - effect._slim_level)
+        previous = effect._slim_level
+    assert effect._slim_level == pytest.approx(reshape_module._BUSY_ROOM_FLOOR, abs=0.01)
+    assert max(steps) <= reshape_module._BUSY_ROOM_FALL + 1e-6  # slowly: the face never jumps
+    last = jaw_width_change(frame, run_frames(frame, lm, fake_ctx, masks, effect, 1, face_slim=1.0), lm)
+    assert last < 0.6 * first
+
+
+def test_a_plain_wall_keeps_all_of_the_slimming(face_landmarks_720p, fake_ctx) -> None:
+    lm = face_landmarks_720p
+    wall = np.full((720, 1280, 3), 0.7, np.float32)
+    frame, person = with_person(wall, lm)
+    effect = ReshapeEffect()
+    run_frames(frame, lm, fake_ctx, (None, person, None), effect, 60, face_slim=1.0)
+    assert effect._slim_level == 1.0
+
+
+def test_a_plate_in_use_keeps_all_of_the_slimming(face_landmarks_720p, fake_ctx) -> None:
+    lm = face_landmarks_720p
+    room = lined_room(720, 1280)
+    frame, person = with_person(room, lm)
+    effect = ReshapeEffect()
+    for _ in range(60):
+        run(frame, lm, fake_ctx, masks=(None, person, None), background=room, effect=effect, face_slim=1.0)
+    assert effect._plate_on
+    assert effect._slim_level == 1.0
+
+
+def test_the_room_check_leaves_the_other_sliders_alone(face_landmarks_720p, fake_ctx) -> None:
+    lm = face_landmarks_720p
+    frame, person = with_person(lined_room(720, 1280), lm)
+    masks = (None, person, None)
+    effect = ReshapeEffect()
+    run_frames(frame, lm, fake_ctx, masks, effect, 30, eye_size=1.0)
+    assert effect._slim_level == 1.0
+    fresh, _ = run(frame, lm, fake_ctx, masks=masks, eye_size=1.0)
+    out, _ = run(frame, lm, fake_ctx, masks=masks, effect=effect, eye_size=1.0)
+    assert np.array_equal(out, fresh)

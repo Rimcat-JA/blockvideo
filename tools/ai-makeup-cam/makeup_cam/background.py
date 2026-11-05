@@ -52,7 +52,7 @@ MIN_MEAN_LUMINANCE = 0.03  # a darker picture is a covered lens or a switched-of
 # ---- messages shown to the user -------------------------------------------
 COUNTDOWN_MESSAGE = "{seconds}秒後に背景を撮影します。カメラの前から離れてください"
 CAPTURING_MESSAGE = "背景を撮影しています。そのままお待ちください"
-SUCCESS_MESSAGE = "背景を撮影しました。アホ毛消しと髪型の補正に使います"
+SUCCESS_MESSAGE = "背景を撮影しました。アホ毛消しと髪型・顔の形の補正に使います"
 SUCCESS_NOT_SAVED_MESSAGE = "背景を撮影しましたが、保存できませんでした。アプリを閉じるまでの間だけ使います"
 PERSON_VISIBLE_MESSAGE = (
     "人や髪が映っています（画面の約{percent:.0f}%）。カメラの前から完全に離れて、もう一度撮影してください"

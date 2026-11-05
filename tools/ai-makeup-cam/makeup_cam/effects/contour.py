@@ -52,8 +52,8 @@ TearbagEffect ("tearbag", order 45, after the eyeshadow)
     eye opening (smoothed, so a blink does not pulse it).
 
     The eye opening is cut out with a grown outline that fades outward. The
-    landmarks are smoothed, so they trail the real eye when the head moves: in
-    a fast nod the real lower lid is up to 5 % of the face scale below them,
+    landmarks still trail the real eye a little when the head moves (up to about
+    3 % of the face scale in a fast nod; the tracker removes most of the lag),
     and a band hanging off them would light up the white of the eye. The lid's
     own step between frames predicts that lag well, so while the lid moves
     down the band, its shadow and the lower edge of the cut all move ahead of
@@ -921,7 +921,7 @@ _EYE_CUT_FEATHER = 0.03
 # down: this many times its step between frames, once the step passes the dead
 # zone (tracking jitter), up to the maximum. A larger step is a jump (a face
 # found again), not motion, and starts the bag afresh.
-_LID_LAG_PER_STEP = 1.5
+_LID_LAG_PER_STEP = 0.5
 _LID_LAG_DEAD_ZONE = 0.002
 _LID_LAG_MAX = 0.08
 _LID_JUMP = 0.25

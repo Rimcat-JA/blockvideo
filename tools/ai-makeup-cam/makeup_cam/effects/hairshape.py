@@ -221,6 +221,7 @@ _FOREHEAD, _CHIN = 10, 152
 _LUMA_WEIGHTS = np.array([0.114, 0.587, 0.299], np.float32)  # B, G, R
 _RECT_3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 _RECT_5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+_NO_ZERO_DISTANCE = 1e6  # farther than anything on a grid (see _distance_to_zero)
 
 
 @dataclass(frozen=True)
@@ -358,12 +359,15 @@ class _Scene:
         """A strand mask without the mass of this very frame (the head may have moved over
         remembered strands) and without pixels that are background already, which keep
         their live noise."""
-        visible = (self.difference > self.floor * np.float32(_VISIBLE_SHARE)).astype(np.float32)
-        return mask * (1.0 - self.mass) * visible
+        needed = 1.0 - self.mass
+        needed *= mask
+        needed *= _above(self.difference, self.floor * np.float32(_VISIBLE_SHARE))
+        return needed
 
     def background_like(self) -> np.ndarray:
         """What looks like the reference (1) and what does not (0)."""
-        limit = cv2.max(self.pure_hair * np.float32(_BACKGROUND_LIKE), self.floor)
+        limit = self.pure_hair * np.float32(_BACKGROUND_LIKE)
+        limit = cv2.max(limit, self.floor, dst=limit)
         return (self.difference < limit).astype(np.float32)
 
 
@@ -431,7 +435,8 @@ class HairShapeEffect(Effect):
             pure_hair = _difference(reference, hair)
             scene = self._compare(_difference(work, reference), pure_hair, outline, head, slider, True)
             if flyaway:
-                band = head.grid_to_work(_band(outline, reach)) * scene.sparse
+                band = head.grid_to_work(_band(outline, reach))
+                band *= scene.sparse
                 mask = self._memory.update(_strands_from_scene(scene, band, head), head)
                 _replace_by_plate(frame, scene.where_needed(mask), _opacity(flyaway) * fit.level, head, plate, fit)
         elif (flyaway or warping) and self._hair_color is not None and self._update_background(colors, outline, head):
@@ -442,9 +447,10 @@ class HairShapeEffect(Effect):
             pure_hair = head.grid_to_work(np.abs(background_luma - np.float32(hair_luma)))
             difference = cv2.absdiff(luma, head.grid_to_work(background_luma))
             scene = self._compare(difference, pure_hair, outline, head, slider, False)
-            room_busy = self._measure_room_busy(difference, scene, outline, head)
+            room_busy = self._measure_room_busy(difference, scene, outline, head) if warping else 0.0
             if flyaway:
-                band = head.grid_to_work(_band(outline, reach)) * scene.sparse
+                band = head.grid_to_work(_band(outline, reach))
+                band *= scene.sparse
                 contrast = background_luma - np.float32(hair_luma)
                 alpha, busy = self._strands_from_image(luma, contrast, band, scene, outline, head, reach, slider)
                 mask = scene.where_needed(self._memory.update(alpha, head))
@@ -561,7 +567,7 @@ class HairShapeEffect(Effect):
         self._noise = _smoothed(self._noise, _ring_percentile(difference, outline, head, percentile))
         floor = _NOISE_FLOOR + (self._noise or 0.0)
         full = cv2.max(pure_hair, floor)
-        seed = (difference > cv2.max(full * np.float32(_MASS_SEED), floor)).astype(np.uint8)
+        seed = (difference > cv2.max(full * np.float32(_MASS_SEED), floor)).view(np.uint8)
         mass = _thick_part(seed, head, outline, slider)
         return _Scene(difference, full, floor, mass, _sparse_strands(_clip01(difference / full), mass, head, slider))
 
@@ -587,8 +593,12 @@ class HairShapeEffect(Effect):
         for operation, side in ((cv2.MORPH_BLACKHAT, contrast), (cv2.MORPH_TOPHAT, -contrast)):
             weight = _smoothstep(side, *_POLARITY)
             if weight.any():  # usually only one polarity exists around a head
-                part = cv2.morphologyEx(luma8, operation, kernel).astype(np.float32) * head.grid_to_work(weight)
-                response = part if response is None else response + part
+                part = cv2.morphologyEx(luma8, operation, kernel).astype(np.float32)
+                part *= head.grid_to_work(weight)
+                if response is None:
+                    response = part
+                else:
+                    response += part
         if response is None:
             return np.zeros_like(band), 0.0  # hair and background look the same: nothing to tell apart
         response *= np.float32(1.0 / 255.0)
@@ -597,11 +607,14 @@ class HairShapeEffect(Effect):
         outside = outline.distance > 0
         typical_contrast = float(np.abs(contrast[outside]).mean()) if outside.any() else 0.0
         full = max(typical_contrast * _RELATIVE_FULL, _MIN_FULL_RANGE)
-        alpha = _clip01((response - np.float32(_ABS_FLOOR + _FLOOR_PER_LEVEL * level)) * np.float32(1.0 / full))
+        response -= np.float32(_ABS_FLOOR + _FLOOR_PER_LEVEL * level)
+        response *= np.float32(1.0 / full)
+        alpha = _clip01(response)
         alpha *= head.grid_to_work(_search_zone(outline, reach))
         busy = _ramp(level / max(typical_contrast, 1e-3), *_BUSY_RATIO)
         previous = self._memory.projected(head, alpha.shape)
-        return _keep_attached(alpha * (scene.mass < 0.5), band, outline.distance, head, reach, previous), busy
+        alpha = cv2.bitwise_and(alpha, alpha, mask=(scene.mass < 0.5).view(np.uint8))  # alpha * (mass < 0.5)
+        return _keep_attached(alpha, band, outline.distance, head, reach, previous), busy
 
     def _measure_room_busy(self, difference: np.ndarray, scene: _Scene, outline: _Silhouette, head: _Head) -> float:
         """How much of the background is unlike its smooth self compared to hair (0..1). A few
@@ -689,16 +702,27 @@ class _StrandMemory:
     def __init__(self) -> None:
         self._mask: np.ndarray | None = None
         self._head: _Head | None = None
+        self._projected: tuple[_Head, tuple[int, ...], np.ndarray] | None = None  # for this frame's head
 
     def update(self, alpha: np.ndarray, head: _Head) -> np.ndarray:
         previous = self.projected(head, alpha.shape)
-        moved_toward = previous + (alpha - previous) * np.float32(_MEMORY_RISE)
-        mask = cv2.max(moved_toward, previous * np.float32(_MEMORY_DECAY))
-        self._mask, self._head = mask, head
+        moved_toward = alpha - previous
+        moved_toward *= np.float32(_MEMORY_RISE)
+        moved_toward += previous
+        mask = cv2.max(moved_toward, previous * np.float32(_MEMORY_DECAY), dst=moved_toward)
+        self._mask, self._head, self._projected = mask, head, None
         return mask
 
     def projected(self, head: _Head, shape: tuple[int, ...]) -> np.ndarray:
-        """The last mask on the current working copy, moved along with the head."""
+        """The last mask on the current working copy, moved along with the head (treat as read-only)."""
+        cached = self._projected
+        if cached is not None and cached[0] is head and cached[1] == shape:
+            return cached[2]
+        result = self._project(head, shape)
+        self._projected = (head, shape, result)
+        return result
+
+    def _project(self, head: _Head, shape: tuple[int, ...]) -> np.ndarray:
         old, last = self._mask, self._head
         if old is None or last is None or last.factor != head.factor:
             return np.zeros(shape, np.float32)
@@ -767,10 +791,10 @@ def _silhouette(head: _Head, ctx: FrameContext) -> _Silhouette:
     solid = cv2.morphologyEx(solid, cv2.MORPH_CLOSE, _ellipse(_SILHOUETTE_CLOSE * cells))
     solid = cv2.morphologyEx(solid, cv2.MORPH_OPEN, _ellipse(_SILHOUETTE_OPEN * cells))
     solid = _without_holes(solid | oval)  # the skin of a forehead between hairline and oval is no background
-    distance = cv2.distanceTransform(1 - solid, cv2.DIST_L2, 3) - cv2.distanceTransform(solid, cv2.DIST_L2, 3)
+    distance = _distance_to_zero(1 - solid) - _distance_to_zero(solid)
     distance *= np.float32(1.0 / cells)
     hair_seed = (hair > _HAIR_NEAR_THRESHOLD).astype(np.uint8)
-    to_hair = cv2.distanceTransform(1 - hair_seed, cv2.DIST_L2, 3) * np.float32(1.0 / cells)
+    to_hair = _distance_to_zero(1 - hair_seed) * np.float32(1.0 / cells)
     near_hair = 1.0 - _smoothstep(to_hair, _HAIR_NEAR * 0.7, _HAIR_NEAR)
     skin = _skin_guard(head, ctx)
     height = _height_window(head, landmarks) * _area_fade(head)
@@ -978,18 +1002,27 @@ def _keep_attached(
     bridged = cv2.dilate(candidates, _RECT_3)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(bridged, connectivity=8)
     d = head.grid_to_work(distance)
+    # Label 0 is the rest of the picture, which is never kept: only the candidates' pixels count.
+    where = np.flatnonzero(labels)
+    found = labels.ravel()[where]
+    near = d.ravel()[where]
     attached = np.zeros(count, bool)
-    attached[labels[d <= _ATTACH]] = True
+    attached[found[near <= _ATTACH]] = True
     limit = _LEAVES_LENGTH * head.work_scale * _LEAVES_WIDTH
-    beyond = np.bincount(labels[d > reach + _LONG_STRUCTURE], minlength=count).astype(np.float32)
+    beyond = np.bincount(found[near > reach + _LONG_STRUCTURE], minlength=count).astype(np.float32)
     for border in (labels[0], labels[-1], labels[:, 0], labels[:, -1]):
         beyond[border] = np.float32(limit * _LEAVES_HOLD)  # nothing in the work area's border is a loose strand
     area = stats[:, cv2.CC_STAT_AREA]
-    held = np.bincount(labels[previous > 0.5], minlength=count) > _HELD_SHARE * area
+    held = np.bincount(found[previous.ravel()[where] > 0.5], minlength=count) > _HELD_SHARE * area
     leaves = beyond >= np.where(held, limit * _LEAVES_HOLD, limit)
     keep = attached & ~leaves & (area >= _MIN_AREA * head.work_scale * head.work_scale)
     keep[0] = False
-    return _finish_alpha(alpha * keep[labels].astype(np.float32)) * band
+    kept = np.zeros_like(alpha)
+    chosen = where[keep[found]]
+    kept.ravel()[chosen] = alpha.ravel()[chosen]
+    finished = _finish_alpha(kept)
+    finished *= band
+    return finished
 
 
 def _strands_from_scene(scene: _Scene, band: np.ndarray, head: _Head) -> np.ndarray:
@@ -1002,13 +1035,16 @@ def _strands_from_scene(scene: _Scene, band: np.ndarray, head: _Head) -> np.ndar
     count, labels, stats, _ = cv2.connectedComponentsWithStats(bridged, connectivity=8)
     keep = stats[:, cv2.CC_STAT_AREA] >= _MIN_AREA * head.work_scale * head.work_scale
     keep[0] = False
-    return _finish_alpha(alpha * keep[labels].astype(np.float32)) * band
+    finished = _finish_alpha(alpha * keep[labels].astype(np.float32))
+    finished *= band
+    return finished
 
 
 def _finish_alpha(alpha: np.ndarray) -> np.ndarray:
     """Cover the strands' soft sides as well: replacing a bit of background is harmless."""
-    boosted = cv2.min(alpha * np.float32(1.0 / _ALPHA_BOOST), 1.0)
-    return cv2.blur(cv2.dilate(boosted, _RECT_3), (3, 3))
+    boosted = alpha * np.float32(1.0 / _ALPHA_BOOST)
+    cv2.min(boosted, 1.0, dst=boosted)
+    return cv2.blur(cv2.dilate(boosted, _RECT_3), (3, 3), dst=boosted)
 
 
 def _replace_by_plate(
@@ -1043,7 +1079,9 @@ def _replace_by_surroundings(
     """
     like = scene.background_like()
     known = _small_blur(head.to_grid(like), head)
-    placed = _masked_pixels(mask * _smoothstep(head.grid_to_work(known), *_FILL_KNOWN), amount, head, frame.shape[1])
+    usable = _smoothstep(head.grid_to_work(known), *_FILL_KNOWN)
+    usable *= mask
+    placed = _masked_pixels(usable, amount, head, frame.shape[1])
     if placed is None:
         return
     index, rows, cols, weight = placed
@@ -1302,13 +1340,33 @@ def _ramp(value: float, start: float, full: float) -> float:
 def _clip01(image: np.ndarray) -> np.ndarray:
     if image.ndim != 2:  # cv2 would treat a 1-D array as an N x 1 image
         return np.clip(image, 0.0, 1.0)
-    return cv2.min(cv2.max(image, 0.0), 1.0)  # several times faster than np.clip on images
+    clipped = cv2.max(image, 0.0)  # several times faster than np.clip on images
+    return cv2.min(clipped, 1.0, dst=clipped)
+
+
+def _distance_to_zero(image: np.ndarray) -> np.ndarray:
+    """Distance of each cell to the nearest zero. With no zero at all (no hair in the mask: it happens
+    in a deep bow), OpenCV's answer is a number so large that the arithmetic after it overflows."""
+    return cv2.min(cv2.distanceTransform(image, cv2.DIST_L2, 3), _NO_ZERO_DISTANCE)
 
 
 def _smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
-    return _smoothstep_t((x - np.float32(lo)) * np.float32(1.0 / (hi - lo)))
+    t = x - np.float32(lo)
+    t *= np.float32(1.0 / max(hi - lo, 1e-6))  # lengths can vanish in odd poses
+    return _smoothstep_t(t)
 
 
 def _smoothstep_t(t: np.ndarray) -> np.ndarray:
+    """``t * t * (3 - 2 * t)`` of ``t`` clipped to [0, 1], without temporary images: one
+    just big enough costs about 0.15 ms, as the OS page-faults fresh memory of a megabyte or more."""
     t = _clip01(t)
-    return t * t * (3.0 - 2.0 * t)
+    rest = np.multiply(t, 2.0)
+    np.subtract(3.0, rest, out=rest)
+    t *= t
+    t *= rest
+    return t
+
+
+def _above(image: np.ndarray, level: float) -> np.ndarray:
+    """``(image > level).astype(float32)`` for a float32 image and level, at a third of the cost."""
+    return cv2.threshold(image, float(level), 1.0, cv2.THRESH_BINARY)[1]

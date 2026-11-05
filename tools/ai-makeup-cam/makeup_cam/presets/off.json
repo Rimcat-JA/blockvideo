@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "display_name": "全部オフ",
   "general": {
     "intensity": 1.0,
     "mirror_preview": true,
@@ -21,14 +22,14 @@
   },
   "contour": {
     "enabled": false,
-    "shading_color": "#9A7563",
-    "shading": 0.15,
+    "shading_color": "#A0745F",
+    "shading": 0.4,
     "jawline": 0.6,
     "cheek_hollow": 0.5,
-    "nose_shadow": 0.4,
-    "forehead": 0.3,
+    "nose_shadow": 0.5,
+    "forehead": 0.5,
     "highlight_color": "#FFF4EA",
-    "highlight": 0.15,
+    "highlight": 0.4,
     "nose_bridge": 0.6,
     "cheekbone": 0.6,
     "chin": 0.4,
@@ -64,9 +65,9 @@
   },
   "tearbag": {
     "enabled": false,
-    "strength": 0.2,
+    "strength": 0.4,
     "width": 0.5,
-    "shadow": 0.3,
+    "shadow": 0.4,
     "softness": 0.6
   },
   "eyeliner": {

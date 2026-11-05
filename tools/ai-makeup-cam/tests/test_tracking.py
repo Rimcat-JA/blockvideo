@@ -11,14 +11,18 @@ import pytest
 
 from makeup_cam.models import FACE_LANDMARKER, MODEL_SPECS
 from makeup_cam.tracking import (
+    _WindowBuffers,
+    _MAX_COAST_FRAMES,
     EYE_OUTER_CORNERS,
     NUM_LANDMARKS,
     DetectionWindow,
+    FaceMotion,
     FaceTracker,
     OneEuroFilter,
     follow_face,
     search_windows,
     smoothing_params,
+    window_rgb,
 )
 
 FPS = 30.0
@@ -312,3 +316,231 @@ def test_real_model_finds_a_dim_face_in_a_wide_frame(landmarker_path: Path, face
         assert_plausible_face(last, dim.shape)
     finally:
         tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# Reused image buffers
+# ---------------------------------------------------------------------------
+
+
+def test_window_rgb_gives_the_same_picture_with_buffers() -> None:
+    frame = np.random.default_rng(4).integers(0, 255, (720, 1280, 3), np.uint8)
+    untouched = frame.copy()
+    buffers = _WindowBuffers()
+    for window, side in (
+        (DetectionWindow(280, 0, 720), 640),  # downscaled
+        (DetectionWindow(0, 0, 720), 640),
+        (DetectionWindow(100, 50, 300), 640),  # not downscaled: must not write into the frame
+        (DetectionWindow(280, 0, 720), 480),  # another size
+        (DetectionWindow(280, 0, 720), 640),  # and back
+    ):
+        np.testing.assert_array_equal(window_rgb(frame, window, side, buffers), window_rgb(frame, window, side))
+    np.testing.assert_array_equal(frame, untouched)
+
+
+def test_window_buffers_are_reused_while_the_size_stays() -> None:
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    buffers = _WindowBuffers()
+    window = DetectionWindow(0, 0, 720)
+    first = window_rgb(frame, window, 640, buffers)
+    assert window_rgb(frame, window, 640, buffers) is first or np.shares_memory(
+        window_rgb(frame, window, 640, buffers), first
+    )
+    assert window_rgb(frame, window, 320, buffers).shape == (320, 320, 3)
+    assert all(array.shape == (320, 320, 3) for array in buffers.for_side(320))
+
+
+def test_tracker_follows_frame_size_changes_with_its_buffers() -> None:
+    tracker, model = make_tracker()
+    sizes = (((720, 1280), 640, 360), ((480, 640), 320, 240), ((1080, 1920), 960, 540), ((720, 1280), 640, 360))
+    for shape, cx, cy in sizes:
+        landmarks, _ = tracker.detect(blob_frame(cx, cy, shape=shape), len(model.inputs) * 33)
+        assert landmarks is not None
+        np.testing.assert_allclose(landmarks, expected_landmarks(cx, cy), atol=2.5)
+    assert [size[0][0] for size in model.inputs] == [640, 480, 640, 640]
+
+
+# ---------------------------------------------------------------------------
+# Image motion: the landmarks follow the picture, not the model's lag
+# ---------------------------------------------------------------------------
+
+
+def textured_frame(dx: float = 0.0, dy: float = 0.0, shape: tuple[int, int] = (720, 720)) -> np.ndarray:
+    """A picture full of corners, moved by a sub-pixel amount. Square: the detection window then stays put."""
+    noise = np.random.default_rng(5).integers(0, 256, (shape[0] // 8, shape[1] // 8), np.uint8)
+    big = cv2.GaussianBlur(cv2.resize(noise, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST), (0, 0), 2.0)
+    moved = cv2.warpAffine(big, np.float32([[1, 0, dx], [0, 1, dy]]), (shape[1], shape[0]), borderMode=cv2.BORDER_REFLECT)
+    return cv2.cvtColor(moved, cv2.COLOR_GRAY2BGR)
+
+
+class ScriptedPoints:
+    """A landmark model that answers with the given normalized points, one call after another."""
+
+    def __init__(self, script: list[np.ndarray | None]) -> None:
+        self.script = script
+        self.calls = 0
+
+    def detect(self, rgb: np.ndarray, ts_ms: int) -> np.ndarray | None:
+        answer = self.script[min(self.calls, len(self.script) - 1)]
+        self.calls += 1
+        return answer
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def face(face_landmarks_720p: np.ndarray) -> np.ndarray:
+    """The test face's landmarks, in the middle of a square frame."""
+    return face_landmarks_720p - (280.0, 0.0)
+
+
+def points_at(landmarks: np.ndarray, dy: float) -> np.ndarray:
+    """What the model answers for a face moved by ``dy``: normalized (478, 3)."""
+    points = (landmarks + (0.0, dy)) / 720.0
+    return np.c_[points, np.zeros(NUM_LANDMARKS)].astype(np.float32)
+
+
+def test_motion_of_a_textured_picture_is_measured(face: np.ndarray) -> None:
+    motion = FaceMotion()
+    motion.update(textured_frame())
+    motion.update(textured_frame(6.0, -4.0))
+    fit = motion.measure(face)
+    assert fit is not None
+    moved = face @ fit[:2, :2].T + fit[:2, 2]
+    np.testing.assert_allclose(moved - face, np.broadcast_to([6.0, -4.0], moved.shape), atol=0.25)
+
+
+def test_no_motion_is_told_without_texture_or_a_previous_frame(face: np.ndarray) -> None:
+    motion = FaceMotion()
+    assert motion.measure(face) is None
+    motion.update(np.zeros((720, 720, 3), np.uint8))
+    assert motion.measure(face) is None
+    motion.update(np.zeros((720, 720, 3), np.uint8))
+    assert motion.measure(face) is None
+
+
+def test_a_face_outside_the_picture_has_no_motion(face: np.ndarray) -> None:
+    motion = FaceMotion()
+    motion.update(textured_frame())
+    motion.update(textured_frame(3.0, 3.0))
+    assert motion.measure(face + (0.0, 2000.0)) is None
+
+
+def test_a_still_picture_reports_no_motion_at_all(face: np.ndarray) -> None:
+    motion = FaceMotion()
+    motion.update(textured_frame())
+    motion.update(textured_frame())
+    fit = motion.measure(face)
+    assert fit is not None
+    assert np.array_equal(fit, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+
+
+def test_the_landmarks_keep_up_with_the_picture_when_the_model_lags(face: np.ndarray) -> None:
+    """The filter alone trails a nod by several pixels; with the image motion it hardly does."""
+    frames = [12.0 * np.sin(2 * np.pi * i / 30) for i in range(45)]
+    model_positions = [0.0, *frames[:-1]]  # the model answers with where the face was a frame ago
+    script = [points_at(face, dy) for dy in model_positions]
+    tracker = FaceTracker(None, 0.5, model=ScriptedPoints(script))
+    errors, filter_only = [], []
+    plain = OneEuroFilter(*_params_of(0.5))
+    for i, dy in enumerate(frames):
+        landmarks, _ = tracker.detect(textured_frame(0.0, dy), 33 * i)
+        assert landmarks is not None
+        errors.append(abs(float(landmarks[33, 1] - face[33, 1]) - dy))
+        filtered = plain(np.array([face[33, 1] + model_positions[i]]), i * 33 / 1000.0)
+        filter_only.append(abs(float(filtered[0] - face[33, 1]) - dy))
+    assert max(errors[5:]) < 0.5 * max(filter_only[5:])
+    assert max(errors[5:]) < 2.0
+
+
+def _params_of(smoothing: float) -> tuple[float, float, float]:
+    params = smoothing_params(smoothing)
+    assert params is not None
+    return params.min_cutoff, params.beta / 120.0, params.d_cutoff
+
+
+def test_the_face_is_carried_along_while_the_model_finds_nothing(face: np.ndarray) -> None:
+    script: list[np.ndarray | None] = [points_at(face, 0.0)] * 3 + [None] * 4
+    tracker = FaceTracker(None, 0.5, model=ScriptedPoints(script))
+    for i in range(3):
+        assert tracker.detect(textured_frame(), 33 * i)[0] is not None
+    assert tracker.coast() is None  # the model found it: nothing to carry
+    for i in range(1, 5):
+        assert tracker.detect(textured_frame(0.0, 5.0 * i), 99 + 33 * i) == (None, None)
+        coast = tracker.coast()
+        assert coast is not None
+        np.testing.assert_allclose(coast[0][33], face[33] + (0.0, 5.0 * i), atol=0.6)
+        assert coast[1].shape == (NUM_LANDMARKS,)
+
+
+def test_coasting_ends_when_the_picture_gives_no_motion_and_after_a_while(face: np.ndarray) -> None:
+    tracker = FaceTracker(None, 0.5, model=ScriptedPoints([points_at(face, 0.0), None]))
+    tracker.detect(textured_frame(), 0)
+    tracker.detect(np.zeros((720, 720, 3), np.uint8), 33)
+    assert tracker.coast() is None
+
+    tracker = FaceTracker(None, 0.5, model=ScriptedPoints([points_at(face, 0.0), None]))
+    tracker.detect(textured_frame(), 0)
+    for i in range(_MAX_COAST_FRAMES):
+        tracker.detect(textured_frame(), 33 * (i + 1))
+        assert tracker.coast() is not None
+    tracker.detect(textured_frame(), 33 * (_MAX_COAST_FRAMES + 1))
+    assert tracker.coast() is None
+
+
+def test_a_one_frame_dropout_causes_no_jump(face: np.ndarray) -> None:
+    good = points_at(face, 0.0)
+    tracker = FaceTracker(None, 1.0, model=ScriptedPoints([good, good, None, good]))
+    frame = textured_frame()
+    before, _ = tracker.detect(frame, 0)
+    before, _ = tracker.detect(frame, 33)
+    tracker.detect(frame, 66)
+    after, _ = tracker.detect(frame, 99)
+    assert before is not None and after is not None
+    np.testing.assert_allclose(after, before, atol=0.01)
+
+
+def test_a_face_found_far_from_where_it_went_starts_the_filter_anew(face: np.ndarray) -> None:
+    near, far = points_at(face, 0.0), points_at(face, 120.0)
+    tracker = FaceTracker(None, 1.0, model=ScriptedPoints([near, None, far]))
+    frame = textured_frame()
+    tracker.detect(frame, 0)
+    tracker.detect(frame, 33)
+    landmarks, _ = tracker.detect(frame, 66)
+    assert landmarks is not None
+    np.testing.assert_allclose(landmarks[33], face[33] + (0.0, 120.0), atol=0.01)  # no lag from before
+
+
+def test_real_model_keeps_up_with_a_nod(landmarker_path: Path, face_frame_720p: np.ndarray) -> None:
+    """The eyeliner's problem: a soft nod used to leave the lash line over 6 px behind the eye."""
+    still = FaceTracker(landmarker_path, smoothing=0.5)
+    moving = FaceTracker(landmarker_path, smoothing=0.5)
+    try:
+        for i in range(20):
+            rest, _ = still.detect(face_frame_720p, 33 * i)
+            moving.detect(face_frame_720p, 33 * i)
+        assert rest is not None
+        worst = 0.0
+        for i in range(60):
+            dy = 25.0 * np.sin(2 * np.pi * 1.2 * i / 30)
+            moved = cv2.warpAffine(face_frame_720p, np.float32([[1, 0, 0], [0, 1, dy]]), (1280, 720), borderMode=cv2.BORDER_REPLICATE)
+            landmarks, _ = moving.detect(moved, 33 * (20 + i))
+            assert landmarks is not None
+            if i >= 8:
+                worst = max(worst, float(np.abs(landmarks[[159, 386], 1] - rest[[159, 386], 1] - dy).max()))
+        assert worst < 5.0
+    finally:
+        still.close()
+        moving.close()
+
+
+def test_slack_keeps_small_differences_from_counting_as_speed() -> None:
+    def after_step(slack: float, size: float) -> float:
+        f = OneEuroFilter(1.0, 1.0, 8.0)
+        f.slack = slack
+        f(np.zeros((1, 2)), 0.0)
+        return float(f(np.full((1, 2), size), 1.0 / FPS)[0, 0])
+
+    assert after_step(0.0, 2.0) > 1.5 * after_step(2.0, 2.0)  # calm within the slack
+    assert after_step(2.0, 40.0) > 0.8 * after_step(0.0, 40.0) * 0.9  # a real change still gets through

@@ -6,6 +6,12 @@ presets live in ``user_presets_dir()``. A user preset with the same name as a
 built-in one overrides it, and deleting that user preset brings the built-in
 one back.
 
+Built-in file names stay ASCII. What the user sees is ``PresetInfo.display_name``:
+the optional top-level "display_name" string of the file, or else the preset's
+name (user presets are saved without the field; their name already is what the
+user typed). The field is not a setting: ``MakeupSettings`` ignores it, and
+saving settings over a file does not keep it.
+
 Error policy: functions the user triggers explicitly (``load_preset``,
 ``save_preset``, ``delete_preset``) raise ``PresetError`` with a Japanese
 message the GUI can show as is. The last-session helpers are best effort:
@@ -32,6 +38,8 @@ PRESET_SUFFIX = ".json"
 DEFAULT_PRESET_NAME = "natural"
 LAST_SESSION_FILENAME = "last_session.json"
 MAX_NAME_LENGTH = 64
+# Optional top-level key of a preset file: the name shown to the user.
+DISPLAY_NAME_KEY = "display_name"
 
 # Characters that are path separators or invalid in Windows/macOS file names.
 _FORBIDDEN_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
@@ -45,9 +53,16 @@ class PresetError(Exception):
 
 @dataclass(frozen=True)
 class PresetInfo:
+    """``name`` identifies the preset (file stem); ``display_name`` is what to show, never empty."""
+
     name: str
     path: Path
     builtin: bool
+    display_name: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.display_name:
+            object.__setattr__(self, "display_name", self.name)
 
 
 def sanitize_preset_name(name: str) -> str:
@@ -78,6 +93,11 @@ def list_presets() -> list[PresetInfo]:
     return _sorted_values(visible_builtin) + _sorted_values(user)
 
 
+def builtin_display_names() -> set[str]:
+    """What the built-in presets are called in the list (their file names are not shown)."""
+    return {info.display_name for info in _scan(config.BUILTIN_PRESETS_DIR, builtin=True).values() if info.display_name != info.name}
+
+
 def find_preset(name: str) -> PresetInfo | None:
     """The preset ``list_presets`` would show under ``name``, if any."""
     return next((info for info in list_presets() if info.name == name), None)
@@ -103,6 +123,8 @@ def save_preset(name: str, settings: MakeupSettings) -> PresetInfo:
     preset of that name is overwritten.
     """
     safe_name = sanitize_preset_name(name)
+    if safe_name in builtin_display_names():
+        raise PresetError(f"『{safe_name}』は標準プリセットの表示名と同じで、一覧で見分けがつかなくなります。別の名前を付けてください。")
     path = config.user_presets_dir() / f"{safe_name}{PRESET_SUFFIX}"
     try:
         settings.save(path)
@@ -181,8 +203,20 @@ def _scan(directory: Path, *, builtin: bool) -> dict[str, PresetInfo]:
     for path in directory.glob(f"*{PRESET_SUFFIX}"):
         if path.is_file():
             name = unicodedata.normalize("NFC", path.stem)
-            found[name] = PresetInfo(name, path, builtin)
+            found[name] = PresetInfo(name, path, builtin, _read_display_name(path))
     return found
+
+
+def _read_display_name(path: Path) -> str:
+    """The file's "display_name", or "" if it has none or cannot be read (listing never fails)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return ""
+    value = data.get(DISPLAY_NAME_KEY) if isinstance(data, dict) else None
+    if not isinstance(value, str):
+        return ""
+    return unicodedata.normalize("NFC", value).strip()[:MAX_NAME_LENGTH]
 
 
 def _sorted_values(presets: dict[str, PresetInfo]) -> list[PresetInfo]:
@@ -191,7 +225,7 @@ def _sorted_values(presets: dict[str, PresetInfo]) -> list[PresetInfo]:
 
 def _read_settings(path: Path) -> MakeupSettings:
     """Parse a settings file; ValueError if it is not a JSON object."""
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))  # Windows Notepad may save with a BOM
     if not isinstance(data, dict):
         raise ValueError(f"{path} does not contain a JSON object")
     return MakeupSettings.from_dict(data)

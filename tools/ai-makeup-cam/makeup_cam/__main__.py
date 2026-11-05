@@ -7,6 +7,9 @@ One mode per run:
   printing status lines until Ctrl+C,
 - ``--image IN --out OUT``: apply the makeup to a still image (no camera
   needed), optionally as a side-by-side before/after (``--compare``),
+- ``--video IN --out OUT``: the same for a video file, frame by frame (for checking
+  the makeup in motion; the result is an .mp4 without sound),
+- ``--from-photo MAKEUP --name NAME``: make a preset from a photo of the makeup,
 - ``--list-cameras`` / ``--download-models``: small maintenance tasks.
 
 Messages for the user are Japanese. Expected failures (missing preset, model
@@ -23,8 +26,9 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
 
@@ -32,11 +36,11 @@ import cv2
 import numpy as np
 
 from . import __version__
-from .config import MakeupSettings
+from .config import SECTION_LABELS, MakeupSettings
 from .models import FACE_LANDMARKER, SELFIE_MULTICLASS, ModelDownloadError, ensure_all_models, ensure_model, models_dir
 from .pipeline import MakeupPipeline, ProcessResult
-from .presets import PresetError, initial_settings, last_session_path, list_presets, load_preset
-from .runner import RunnerStatus
+from .presets import DEFAULT_PRESET_NAME, PresetError, initial_settings, last_session_path, list_presets, load_preset
+from .runner import ConsoleCloseWatch, RunnerStatus
 from .segmentation import Segmenter
 from .tracking import FaceTracker
 
@@ -55,6 +59,12 @@ DEFAULT_FPS = 30
 STILL_FRAMES = 20
 STILL_FRAME_INTERVAL_MS = 33
 
+VIDEO_OUT_SUFFIX = ".mp4"
+VIDEO_FOURCC = "mp4v"  # what every OpenCV build can write, without extra codec libraries
+VIDEO_FALLBACK_FPS = 30.0  # when a file does not state a believable frame rate
+VIDEO_FPS_RANGE = (2.0, 240.0)
+VIDEO_PROGRESS_EVERY = 30  # frames
+
 STATUS_REPEAT_S = 5.0
 # A video file that gives no first frame in this time is treated as unplayable.
 CAMERA_FILE_CHECK_TIMEOUT_S = 15.0
@@ -64,6 +74,7 @@ BUILTIN_PRESET_LABELS = {
     "natural": "就活ナチュラル（標準）",
     "bare": "すっぴん風補正",
     "polished": "しっかりメイク",
+    "strong": "しっかりメイク＋小顔補正",
     "off": "全部オフ",
 }
 
@@ -150,6 +161,19 @@ def build_parser() -> argparse.ArgumentParser:
     exclusive.add_argument(
         "--image", metavar="IN", type=Path, help="静止画にメイクをかけます（カメラ不要。--out が必要）"
     )
+    exclusive.add_argument(
+        "--video",
+        metavar="IN",
+        type=Path,
+        help="動画ファイルに 1 フレームずつメイクをかけて .mp4 で保存します"
+        "（カメラ不要。動きの確認用。音声は入りません。--out が必要）",
+    )
+    exclusive.add_argument(
+        "--from-photo",
+        metavar="MAKEUP",
+        type=Path,
+        help="メイクをした顔の写真からプリセットを作ります（カメラ不要。--name が必要）",
+    )
     exclusive.add_argument("--list-cameras", action="store_true", help="接続されているカメラの番号と名前を表示します")
     exclusive.add_argument("--download-models", action="store_true", help="顔認識モデルをダウンロードして終了します")
 
@@ -162,12 +186,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--settings",
         metavar="FILE",
         type=Path,
-        help="設定ファイル（プリセットの JSON）を使います（--headless / --image 用）",
+        help="設定ファイル（プリセットの JSON）を使います（--headless / --image / --video 用）",
     )
 
-    image = parser.add_argument_group("静止画（--image）")
-    image.add_argument("--out", metavar="OUT", type=Path, help="保存先の画像ファイル（.png / .jpg）")
-    image.add_argument("--compare", action="store_true", help="左に元画像、右にメイク後を並べて保存します")
+    image = parser.add_argument_group("静止画・動画（--image / --video）")
+    image.add_argument("--out", metavar="OUT", type=Path, help="保存先のファイル（--image は .png / .jpg、--video は .mp4）")
+    image.add_argument("--compare", action="store_true", help="左に元の映像、右にメイク後を並べて保存します")
+
+    photo = parser.add_argument_group("写真から作る（--from-photo）")
+    photo.add_argument(
+        "--bare",
+        metavar="BARE",
+        type=Path,
+        help="同じ場所・同じ照明で撮ったすっぴんの写真（強くおすすめします。1 枚ではアイシャドウをほとんど測れません）",
+    )
+    photo.add_argument("--name", metavar="NAME", help="保存するプリセットの名前（標準プリセットと同じ名前は使えません）")
 
     camera = parser.add_argument_group("カメラ")
     camera_source = camera.add_mutually_exclusive_group()
@@ -208,16 +241,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.image is not None and args.out is None:
         parser.error("--image には保存先の --out も指定してください")
-    if args.image is None and (args.out is not None or args.compare):
-        parser.error("--out と --compare は --image と一緒に使います")
+    if args.video is not None and args.out is None:
+        parser.error("--video には保存先の --out も指定してください")
+    if args.image is None and args.video is None and (args.out is not None or args.compare):
+        parser.error("--out と --compare は --image または --video と一緒に使います")
+    if args.video is not None and args.out.suffix.lower() != VIDEO_OUT_SUFFIX:
+        parser.error(f"--video の保存先は {VIDEO_OUT_SUFFIX} にしてください: {args.out}")
+    if args.video is not None and args.video.resolve() == args.out.resolve():
+        parser.error("--video の保存先には、元の動画と別のファイルを指定してください")
     if (args.width is None) != (args.height is None):
         parser.error("--width と --height は両方を指定してください")
-    if args.settings is not None and not (args.headless or args.image is not None):
+    if args.settings is not None and not (args.headless or args.image is not None or args.video is not None):
         parser.error(
-            "--settings は --headless または --image と一緒に使います（設定画面ではプリセットを選んでください）"
+            "--settings は --headless、--image、--video のどれかと一緒に使います"
+            "（設定画面ではプリセットを選んでください）"
         )
-    if args.camera_file is not None and (args.image is not None or args.list_cameras or args.download_models):
+    other_mode = (
+        args.image is not None
+        or args.video is not None
+        or args.from_photo is not None
+        or args.list_cameras
+        or args.download_models
+    )
+    if args.camera_file is not None and other_mode:
         parser.error("--camera-file は設定画面または --headless で使います")
+    if args.from_photo is not None and not args.name:
+        parser.error("--from-photo には保存するプリセットの --name も指定してください")
+    if args.from_photo is None and (args.bare is not None or args.name is not None):
+        parser.error("--bare と --name は --from-photo と一緒に使います")
     return args
 
 
@@ -227,7 +278,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def resolve_settings(args: argparse.Namespace) -> tuple[MakeupSettings, str]:
-    """Settings for --headless / --image and a Japanese description of where they came from.
+    """Settings for --headless / --image / --video and a Japanese description of where they came from.
 
     Without ``--preset`` / ``--settings`` this is what the window would start
     with: the last session, else the default built-in preset.
@@ -336,22 +387,30 @@ def check_camera_file(path: Path, timeout_s: float | None = None) -> None:
 # --------------------------------------------------------------------------
 
 
+@contextmanager
+def file_pipeline(settings: MakeupSettings) -> Iterator[MakeupPipeline]:
+    """The real pipeline for stills and video files: never mirrored, and segmentation runs
+    inline, one run per ``segmentation_interval`` frames, so the same file gives the same result."""
+    unmirrored = settings.copy()
+    unmirrored.general.mirror_output = False
+    general = unmirrored.general
+    with ExitStack() as stack:
+        tracker = FaceTracker(ensure_model(FACE_LANDMARKER), general.landmark_smoothing)
+        stack.callback(tracker.close)
+        segmenter = Segmenter(ensure_model(SELFIE_MULTICLASS), general.segmentation_interval, background=False)
+        stack.callback(segmenter.close)
+        pipeline = MakeupPipeline(unmirrored, tracker=tracker, segmenter=segmenter)
+        stack.callback(pipeline.close)
+        yield pipeline
+
+
 def render_still(frame: np.ndarray, settings: MakeupSettings) -> ProcessResult:
     """Apply ``settings`` to one uint8 BGR image with the real models.
 
     The image is fed as a short static video (``STILL_FRAMES``) so tracking,
-    segmentation and the fade-in settle; segmentation runs inline so the
-    result is deterministic. Stills are never mirrored.
+    segmentation and the fade-in settle.
     """
-    still = settings.copy()
-    still.general.mirror_output = False
-    with ExitStack() as stack:
-        tracker = FaceTracker(ensure_model(FACE_LANDMARKER), still.general.landmark_smoothing)
-        stack.callback(tracker.close)
-        segmenter = Segmenter(ensure_model(SELFIE_MULTICLASS), background=False)
-        stack.callback(segmenter.close)
-        pipeline = MakeupPipeline(still, tracker=tracker, segmenter=segmenter)
-        stack.callback(pipeline.close)
+    with file_pipeline(settings) as pipeline:
         result = pipeline.process(frame, 0)
         for index in range(1, STILL_FRAMES):
             result = pipeline.process(frame, index * STILL_FRAME_INTERVAL_MS)
@@ -426,12 +485,161 @@ def run_image(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# --video
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class VideoSummary:
+    """What ``process_video`` went through."""
+
+    frames: int = 0
+    frames_with_face: int = 0
+    total_ms: float = 0.0  # sum of the pipeline's own time per frame
+
+
+def _open_video(path: Path) -> tuple[Any, float]:
+    """A capture of a file that ``check_camera_file`` accepted, and its frame rate."""
+    from .camera import quiet_opencv_logs
+
+    with quiet_opencv_logs:
+        for api in (cv2.CAP_FFMPEG, cv2.CAP_ANY):
+            cap = cv2.VideoCapture(str(path), api)
+            if cap.isOpened():
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                low, high = VIDEO_FPS_RANGE
+                return cap, fps if low <= fps <= high else VIDEO_FALLBACK_FPS
+            cap.release()
+    raise CliError(f"動画ファイルを読み込めませんでした: {path}")
+
+
+def next_video_timestamp(position_ms: float, previous_ms: int | None, interval_ms: float) -> int:
+    """The timestamp of a decoded frame: the one in the file, if it is usable.
+
+    The landmark model needs strictly increasing milliseconds. Containers without
+    timestamps report 0 or NaN, and those frames get the nominal frame interval.
+    """
+    if previous_ms is None:
+        return max(0, round(position_ms)) if position_ms == position_ms else 0
+    if position_ms != position_ms or position_ms <= previous_ms:  # NaN, or going nowhere
+        return previous_ms + max(1, round(interval_ms))
+    return max(previous_ms + 1, round(position_ms))
+
+
+def video_frames(path: Path) -> Iterator[tuple[np.ndarray, int, float]]:
+    """Every frame of a video file, in order: (uint8 BGR, timestamp in ms, the file's frame rate)."""
+    from .camera import _to_bgr
+
+    cap, fps = _open_video(path)
+    interval_ms = 1000.0 / fps
+    timestamp = None
+    try:
+        while True:
+            try:
+                ok, frame = cap.read()
+            except cv2.error as exc:
+                logger.debug("reading %s stopped: %s", path, exc)
+                return
+            if not ok or frame is None or not frame.size:
+                return  # the end of the file, or a damaged tail
+            timestamp = next_video_timestamp(float(cap.get(cv2.CAP_PROP_POS_MSEC)), timestamp, interval_ms)
+            yield _to_bgr(frame), timestamp, fps
+    finally:
+        cap.release()
+
+
+def process_video(
+    path: Path,
+    settings: MakeupSettings,
+    on_frame: Callable[[np.ndarray, ProcessResult, float], None],
+) -> VideoSummary:
+    """Run every frame of a video file through the real pipeline with the file's own timestamps.
+
+    Calls ``on_frame(input frame, result, file frame rate)`` for each frame. Nothing is dropped,
+    however slow it is. Live, the masks come from a worker thread and may be one model run older.
+    """
+    summary = VideoSummary()
+    with file_pipeline(settings) as pipeline:
+        for frame, timestamp, fps in video_frames(path):
+            result = pipeline.process(frame, timestamp)
+            summary.frames += 1
+            summary.frames_with_face += result.face_found
+            summary.total_ms += result.timings_ms.get("total", 0.0)
+            on_frame(frame, result, fps)
+    return summary
+
+
+class _Mp4Writer:
+    """Opens the file at the first frame, when the size is known, and says so if that fails."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._writer: cv2.VideoWriter | None = None
+
+    def write(self, image: np.ndarray, fps: float) -> None:
+        if self._writer is None:
+            self._writer = self._open(image, fps)
+        self._writer.write(image)
+
+    def _open(self, image: np.ndarray, fps: float) -> cv2.VideoWriter:
+        height, width = image.shape[:2]
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CliError(f"動画を保存できませんでした: {self._path}\n（詳細: {exc}）") from exc
+        fourcc = cv2.VideoWriter.fourcc(*VIDEO_FOURCC)
+        writer = cv2.VideoWriter(str(self._path), cv2.CAP_FFMPEG, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            writer.release()
+            raise CliError(f"動画を保存できませんでした: {self._path}")
+        return writer
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.release()  # also after an interruption: what was written stays playable
+            self._writer = None
+
+
+def run_video(args: argparse.Namespace) -> int:
+    settings, source = resolve_settings(args)
+    check_camera_file(args.video)
+    prepare_models(sys.stderr)
+    writer = _Mp4Writer(args.out)
+    count = [0]
+
+    def on_frame(frame: np.ndarray, result: ProcessResult, fps: float) -> None:
+        writer.write(side_by_side(frame, result.output) if args.compare else result.output, fps)
+        count[0] += 1
+        if count[0] % VIDEO_PROGRESS_EVERY == 0:
+            print(f"\r処理中… {count[0]} フレーム", end="", file=sys.stderr, flush=True)
+
+    try:
+        summary = process_video(args.video, settings, on_frame)
+    except (OSError, RuntimeError) as exc:
+        raise _start_failure(exc) from exc
+    finally:
+        writer.close()
+        if count[0] >= VIDEO_PROGRESS_EVERY:
+            print(file=sys.stderr)
+    if summary.frames == 0:
+        raise CliError(f"動画ファイルからフレームを読み込めませんでした: {args.video}")
+    average_ms = summary.total_ms / summary.frames
+    print(
+        f"保存しました: {args.out}（{source}、{summary.frames} フレーム、"
+        f"顔あり {summary.frames_with_face} フレーム、平均 {average_ms:.1f} ms）"
+    )
+    if summary.frames_with_face == 0:
+        print("注意: どのフレームでも顔が見つからなかったため、髪以外のメイクはかかっていません。", file=sys.stderr)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
 # --headless
 # --------------------------------------------------------------------------
 
 
 def format_status(status: RunnerStatus, *, virtual_camera_enabled: bool) -> str:
-    """One status line, e.g. ``カメラ OK ｜ 仮想カメラ OBS Virtual Camera ｜ 顔 検出中 ｜ 29.8 fps ｜ 処理 31.0 ms``."""
+    """One status line, e.g. ``カメラ OK ｜ 仮想カメラ OBS Virtual Camera ｜ 顔 あり ｜ 29.8 fps ｜ 処理 31.0 ms``."""
     camera = "OK" if status.camera_ok else "エラー" if status.camera_error else "接続中…"
     if not virtual_camera_enabled:
         virtual = "オフ"
@@ -439,7 +647,7 @@ def format_status(status: RunnerStatus, *, virtual_camera_enabled: bool) -> str:
         virtual = status.virtual_camera
     else:
         virtual = "エラー" if status.virtual_camera_error else "準備中…"
-    face = "検出中" if status.face_found else "なし"
+    face = "あり" if status.face_found else "なし"
     return (
         f"カメラ {camera} ｜ 仮想カメラ {virtual} ｜ 顔 {face} ｜ "
         f"{status.fps:.1f} fps ｜ 処理 {status.processing_ms:.1f} ms"
@@ -514,16 +722,24 @@ def _raise_interrupt(_signum: int, _frame: object) -> None:
     raise KeyboardInterrupt
 
 
-def wait_for_interrupt() -> None:
-    """Block until Ctrl+C, SIGTERM or, on Windows, Ctrl+Break or a closed console window."""
+def wait_for_interrupt(console: ConsoleCloseWatch | None = None) -> None:
+    """Block until Ctrl+C, SIGTERM, a closed terminal or, on Windows, Ctrl+Break or a closed console window."""
     if threading.current_thread() is threading.main_thread():
-        for name in ("SIGTERM", "SIGBREAK"):
+        for name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), _raise_interrupt)
     try:
-        while True:
-            time.sleep(0.5)
+        while console is None or not console.closing.is_set():
+            time.sleep(0.2)
     except KeyboardInterrupt:
+        pass
+
+
+def _say_quietly(text: str) -> None:
+    """Print without letting a console that is going away stop the cleanup."""
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError):
         pass
 
 
@@ -569,15 +785,78 @@ def run_headless(args: argparse.Namespace) -> int:
         **camera_options,
     )
     print(f"{source}でメイクを始めます（{camera_label}、{width}x{height}、{fps} fps）。Ctrl+C で終了します。")
+    console = ConsoleCloseWatch()
     runner.start()
     try:
-        wait_for_interrupt()
+        wait_for_interrupt(console)
     finally:
         printer.close()
-        print("終了しています…")
+        _say_quietly("終了しています…")
         runner.stop()
         pipeline.close()
+        console.finish()
     return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# --from-photo
+# --------------------------------------------------------------------------
+
+
+def run_from_photo(args: argparse.Namespace) -> int:
+    """Measure the makeup in a photo and save it as a preset. The photos themselves are not kept."""
+    from .analyze import AnalysisError, analyze_makeup, read_photo, save_as_preset
+
+    base_name = args.preset or DEFAULT_PRESET_NAME
+    base = _load_named_preset(base_name)
+    try:
+        makeup = read_photo(args.from_photo)
+        bare = read_photo(args.bare) if args.bare is not None else None
+    except AnalysisError as exc:
+        raise CliError(str(exc)) from exc
+    prepare_models(sys.stderr)
+    if bare is None:
+        print(
+            "注意: すっぴんの写真（--bare）がありません。メイクの写真 1 枚だけでは、アイシャドウをほとんど測れません。"
+            "同じ場所・同じ照明で撮ったすっぴんの写真を入れることを強くおすすめします。",
+            file=sys.stderr,
+        )
+    print("写真を解析しています…", flush=True)
+    try:
+        result = analyze_makeup(makeup, bare, base=base)
+    except (AnalysisError, ModelDownloadError) as exc:
+        raise CliError(str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise _start_failure(exc) from exc
+    if _print_photo_report(result, base_name) == 0:
+        raise CliError("どの項目も測れなかったので、プリセットは保存していません。写真を確認して、撮り直してください。")
+    try:
+        info = save_as_preset(result, args.name)
+    except PresetError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"プリセット『{info.name}』を保存しました: {info.path}")
+    return EXIT_OK
+
+
+def _print_photo_report(result: Any, base_name: str) -> int:
+    """Print the confidence per section and the notes; returns how many sections were measured at all."""
+    from .analyze import MEASURED_SECTIONS
+
+    measured = 0
+    print("項目ごとの信頼度（1 に近いほど確か）:")
+    for section in MEASURED_SECTIONS:
+        confidence = result.confidence.get(section, 0.0)
+        label = SECTION_LABELS.get(section, section)
+        if confidence > 0.0:
+            measured += 1
+            print(f"  {label}: {confidence:.2f}")
+        else:
+            print(f"  {label}: 測れなかった（{base_name} の値のまま）")
+    if result.notes:
+        print("メモ:")
+        for note in result.notes:
+            print(f"  ・{note}")
+    return measured
 
 
 # --------------------------------------------------------------------------
@@ -619,6 +898,10 @@ def dispatch(args: argparse.Namespace) -> int:
         return run_download_models()
     if args.image is not None:
         return run_image(args)
+    if args.video is not None:
+        return run_video(args)
+    if args.from_photo is not None:
+        return run_from_photo(args)
     if args.camera_file is not None:
         check_camera_file(args.camera_file)
     if args.headless:

@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "display_name": "しっかりメイク",
   "general": {
     "intensity": 1.0,
     "mirror_preview": true,
@@ -16,19 +17,19 @@
     "redness": 0.3,
     "under_eye": 0.45,
     "tone_color": "#F1D3C0",
-    "tone_strength": 0.18,
-    "brightness": 0.04
+    "tone_strength": 0.15,
+    "brightness": 0.03
   },
   "contour": {
     "enabled": true,
-    "shading_color": "#9A7563",
-    "shading": 0.3,
+    "shading_color": "#A0745F",
+    "shading": 0.65,
     "jawline": 0.6,
     "cheek_hollow": 0.5,
-    "nose_shadow": 0.4,
-    "forehead": 0.3,
+    "nose_shadow": 0.5,
+    "forehead": 0.5,
     "highlight_color": "#FFF4EA",
-    "highlight": 0.25,
+    "highlight": 0.45,
     "nose_bridge": 0.6,
     "cheekbone": 0.6,
     "chin": 0.4,
@@ -37,17 +38,17 @@
   },
   "lips": {
     "enabled": true,
-    "color": "#B04A5A",
-    "opacity": 0.7,
+    "color": "#B5525E",
+    "opacity": 0.62,
     "finish": "satin",
-    "gloss": 0.4,
+    "gloss": 0.35,
     "feather": 0.4,
     "outline": 0.0
   },
   "blush": {
     "enabled": true,
     "color": "#E8878C",
-    "opacity": 0.38,
+    "opacity": 0.32,
     "shape": "oval",
     "size": 1.0,
     "offset_x": 0.0,
@@ -57,39 +58,39 @@
   "eyeshadow": {
     "enabled": true,
     "color": "#946150",
-    "opacity": 0.85,
-    "height": 0.7,
+    "opacity": 0.8,
+    "height": 0.65,
     "softness": 0.6,
-    "shimmer": 0.15
+    "shimmer": 0.1
   },
   "tearbag": {
     "enabled": true,
-    "strength": 0.35,
+    "strength": 0.5,
     "width": 0.5,
-    "shadow": 0.3,
+    "shadow": 0.4,
     "softness": 0.6
   },
   "eyeliner": {
     "enabled": true,
     "color": "#2E211C",
-    "opacity": 0.8,
-    "thickness": 0.5,
-    "wing": 0.3,
+    "opacity": 0.75,
+    "thickness": 0.45,
+    "wing": 0.25,
     "lower": 0.2,
     "softness": 0.4
   },
   "brows": {
     "enabled": true,
     "color": "#5C4334",
-    "opacity": 0.5,
-    "thickness": 0.1,
+    "opacity": 0.42,
+    "thickness": 0.05,
     "softness": 0.5
   },
   "teeth": {
     "enabled": true,
-    "whitening": 0.3,
-    "yellow_reduction": 0.4,
-    "evenness": 0.3,
+    "whitening": 0.4,
+    "yellow_reduction": 0.55,
+    "evenness": 0.35,
     "feather": 0.5
   },
   "reshape": {
@@ -118,7 +119,7 @@
   },
   "hairshape": {
     "enabled": true,
-    "flyaway": 0.3,
+    "flyaway": 0.4,
     "volume_top": 0.0,
     "width_sides": 0.0,
     "use_background_plate": true

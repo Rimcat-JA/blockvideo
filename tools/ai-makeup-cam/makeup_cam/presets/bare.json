@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "display_name": "すっぴん風補正",
   "general": {
     "intensity": 1.0,
     "mirror_preview": true,
@@ -16,19 +17,19 @@
     "redness": 0.3,
     "under_eye": 0.4,
     "tone_color": "#F1D3C0",
-    "tone_strength": 0.06,
-    "brightness": 0.02
+    "tone_strength": 0.05,
+    "brightness": 0.01
   },
   "contour": {
     "enabled": false,
-    "shading_color": "#9A7563",
-    "shading": 0.15,
+    "shading_color": "#A0745F",
+    "shading": 0.3,
     "jawline": 0.6,
     "cheek_hollow": 0.5,
     "nose_shadow": 0.4,
-    "forehead": 0.3,
+    "forehead": 0.4,
     "highlight_color": "#FFF4EA",
-    "highlight": 0.15,
+    "highlight": 0.3,
     "nose_bridge": 0.6,
     "cheekbone": 0.6,
     "chin": 0.4,
@@ -36,7 +37,7 @@
     "softness": 0.7
   },
   "lips": {
-    "enabled": true,
+    "enabled": false,
     "color": "#B9706C",
     "opacity": 0.15,
     "finish": "satin",
@@ -64,7 +65,7 @@
   },
   "tearbag": {
     "enabled": false,
-    "strength": 0.2,
+    "strength": 0.3,
     "width": 0.5,
     "shadow": 0.3,
     "softness": 0.6
@@ -79,7 +80,7 @@
     "softness": 0.4
   },
   "brows": {
-    "enabled": true,
+    "enabled": false,
     "color": "#5C4334",
     "opacity": 0.15,
     "thickness": 0.0,

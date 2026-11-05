@@ -31,6 +31,11 @@ purpose: a partial mix of the bent and the straight room would show every line
 twice. While the plate does not match the room any more (camera moved, light
 changed) the warp falls back to bending the room next to the person.
 
+Without a plate, slimming the face has to stretch the room next to the jaw. On a plain
+wall that cannot be seen, but a door frame or a shelf right next to the jaw would bend. So
+while there are such lines next to the jaw, slimming (only that) fades to ``_BUSY_ROOM_FLOOR``:
+slowly, so the face never visibly changes shape, and more slowly back when they are gone.
+
 Limits: displacements are capped at ``_MAX_FIELD`` of the face width with all
 sliders at their ends, and fade out near the frame's edges, so the warp never
 reads past them. Poses beyond the interview envelope (a deep bow, a turn past
@@ -43,6 +48,7 @@ comes back untouched and the context is not modified.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
@@ -211,6 +217,20 @@ _PLATE_RETURN_FRAMES = 60
 _PLATE_ADAPT = 0.1
 _PLATE_FADE_FRAMES = 15
 
+# Room next to the jaw, without a plate: the nodes that surely show the room between these oval
+# radii, from the eye line to the chin. Pixels there on an edge (difference from their neighborhood above
+# _BUSY_ROOM_EDGE) as a share of them: slimming is at full strength below the first value and at the
+# floor above the second. Measured every _BUSY_ROOM_EVERY frames; changes by these steps per frame.
+_BUSY_ROOM_OVAL_U = (1.05, 1.5)
+_BUSY_ROOM_EDGE = 0.035
+_BUSY_ROOM_SHARE = (0.01, 0.03)
+_BUSY_ROOM_FLOOR = 0.25
+_BUSY_ROOM_EVERY = 8
+_BUSY_ROOM_MIN_NODES = 16
+_BUSY_ROOM_FALL = 1.0 / 45.0
+_BUSY_ROOM_RISE = 1.0 / 150.0
+_SLIM_SETTLED_INTENSITY = 0.5  # below this the warp is still fading in: the level may jump
+
 # Pose fade: fully on up to the first value, off from the second. Yaw: left/right
 # asymmetry of the nose in the face outline. Pitch: nose tip position between the
 # eye line (0) and the chin (1). Calibrated on real 3D landmarks rotated in software:
@@ -260,6 +280,9 @@ class _Amounts:
 
     def any(self) -> bool:
         return any(getattr(self, name) != 0.0 for name in self.__dataclass_fields__)
+
+    def slims(self) -> bool:
+        return self.face_slim != 0.0 or self.jaw != 0.0
 
     def scaled(self, factor: float) -> "_Amounts":
         return _Amounts(*(getattr(self, name) * factor for name in self.__dataclass_fields__))
@@ -815,10 +838,18 @@ def _column_runs(active: np.ndarray) -> list[tuple[int, int]]:
     return [(int(start), int(end)) for start, end in zip(edges[::2], edges[1::2])]
 
 
-def _warp_mask(mask: np.ndarray | None, area: _Area, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray | None:
+def _warp_mask(
+    mask: np.ndarray | None, area: _Area, map_x: np.ndarray, map_y: np.ndarray, memory: list[np.ndarray], slot: int
+) -> np.ndarray | None:
+    """``mask`` with ``area`` warped. The result lives in ``memory`` (a frame's worth of fresh memory costs more
+    than copying into it) and lasts until the next frame; it is a new array object each time, because the
+    hair effect recognizes a mask it has already searched by its identity."""
     if mask is None:
         return None
-    warped = mask.copy()
+    if memory[slot].shape != mask.shape:
+        memory[slot] = np.empty(mask.shape, mask.dtype)
+    warped = memory[slot].view()
+    np.copyto(warped, mask)
     warped[area.roi.slices] = cv2.remap(mask, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     warped.setflags(write=False)
     return warped
@@ -915,11 +946,13 @@ class ReshapeEffect(Effect):
     order = 5
 
     def __init__(self) -> None:
+        self._mask_memory = [np.empty((0, 0), np.float32) for _ in range(3)]  # see _warp_mask
         self._step: int | None = None
         self._pose: float | None = None
         self._asked_intensity: float | None = None
         self._intensity: float | None = None
         self._forget_plate()
+        self._forget_room()
 
     def reset(self) -> None:
         self._step = None
@@ -927,6 +960,12 @@ class ReshapeEffect(Effect):
         self._asked_intensity = None
         self._intensity = None
         self._forget_plate()
+        self._forget_room()
+
+    def _forget_room(self) -> None:
+        self._slim_level: float | None = None  # 0..1, how much of the slimming the room next to the jaw allows
+        self._slim_wanted = 1.0
+        self._room_frames = 0
 
     def _forget_plate(self) -> None:
         self._plate: np.ndarray | None = None  # the plate the statistics below belong to
@@ -947,6 +986,9 @@ class ReshapeEffect(Effect):
         amounts = amounts.scaled(self._held_intensity(ctx.intensity) / ctx.intensity * self._update_pose(face))
         if not amounts.any():
             return frame
+        if ctx.background is not None and ctx.background is not self._plate:
+            self._forget_room()  # a new plate: whatever was seen without it does not count
+        amounts = self._slim_for_the_room(amounts)
         step = self._grid_step(face.scale)
         roi = regions.roi_around(face.landmarks[regions.FACE_OVAL], frame.shape, _ROI_PAD, 2.0 * step)
         if roi is None:
@@ -969,7 +1011,10 @@ class ReshapeEffect(Effect):
         map_y = area.upsample(by) + np.arange(pixels.y0, pixels.y1, dtype=np.float32)[:, None]
         warped = cv2.remap(frame, map_x, map_y, _INTERPOLATION, borderMode=cv2.BORDER_REPLICATE)
         np.clip(warped, 0.0, 1.0, out=warped)
-        warped_masks = [_warp_mask(m, area, map_x, map_y) for m in (ctx.hair_mask, ctx.face_skin_mask, ctx.body_skin_mask)]
+        warped_masks = [
+            _warp_mask(m, area, map_x, map_y, self._mask_memory, slot)
+            for slot, m in enumerate((ctx.hair_mask, ctx.face_skin_mask, ctx.body_skin_mask))
+        ]
         plate = ctx.background
         if person is None or plate is None or plate.shape != frame.shape:
             self._forget_plate()
@@ -979,6 +1024,8 @@ class ReshapeEffect(Effect):
             if level > 0.0:
                 warp = _Warp(grid, area, bx, by)
                 _fill_from_plate(warped, frame, plate, person, warped_masks, warp, live_nodes, room_nodes, self._plate_gain, self._plate_mismatch, level)
+        if person is not None and amounts.slims():
+            self._watch_the_room(frame, grid, person)
         targets = _warped_points(face.landmarks, grid, fx, fy, bx, by)
         targets.setflags(write=False)
         # Everything succeeded: commit the frame and the context together.
@@ -986,6 +1033,32 @@ class ReshapeEffect(Effect):
         ctx.landmarks = targets
         ctx.hair_mask, ctx.face_skin_mask, ctx.body_skin_mask = warped_masks
         return frame
+
+    def _slim_for_the_room(self, amounts: _Amounts) -> _Amounts:
+        """``amounts`` with the slimming that the room next to the jaw allows (see the module docstring)."""
+        if self._slim_level is None:
+            self._slim_level = 1.0
+        elif self._intensity is not None and self._intensity <= _SLIM_SETTLED_INTENSITY:
+            self._slim_level = self._slim_wanted  # still fading in: no change can be seen
+        else:
+            change = self._slim_wanted - self._slim_level
+            self._slim_level += max(min(change, _BUSY_ROOM_RISE), -_BUSY_ROOM_FALL)
+        if self._slim_level >= 1.0:
+            return amounts
+        return dataclasses.replace(amounts, face_slim=amounts.face_slim * self._slim_level, jaw=amounts.jaw * self._slim_level)
+
+    def _watch_the_room(self, frame: np.ndarray, grid: _Grid, person: np.ndarray) -> None:
+        """Update what ``_slim_for_the_room`` aims at. A plate in use bends nothing."""
+        if self._plate_on:
+            self._slim_wanted = 1.0
+            return
+        self._room_frames = (self._room_frames + 1) % _BUSY_ROOM_EVERY
+        if self._room_frames != 1:
+            return
+        share = _busy_room_share(frame, grid, person)
+        if share is not None:
+            busy = float(_smoothstep(_BUSY_ROOM_SHARE[0], _BUSY_ROOM_SHARE[1], np.float32(share)))
+            self._slim_wanted = 1.0 - busy * (1.0 - _BUSY_ROOM_FLOOR)
 
     def _held_intensity(self, intensity: float) -> float:
         """The intensity to warp with. The pipeline fades the effects when the face
@@ -1062,6 +1135,31 @@ class ReshapeEffect(Effect):
         target = 1.0 if self._plate_on else 0.0
         self._plate_trust += max(min(target - self._plate_trust, 1.0 / _PLATE_FADE_FRAMES), -1.0 / _PLATE_FADE_FRAMES)
         return self._plate_trust
+
+
+def _busy_room_share(frame: np.ndarray, grid: _Grid, person: np.ndarray) -> float | None:
+    """How much of the room next to the jaw lies on an edge (None: too little of it can be seen)."""
+    face = grid.face
+    eye_y = float(face.y[[regions.RIGHT_EYE_OUTER_CORNER, regions.LEFT_EYE_OUTER_CORNER]].mean())
+    zone = (
+        (cv2.dilate(person, _NEIGHBORS) < _PLATE_ROOM_BELOW)
+        & (grid.u > _BUSY_ROOM_OVAL_U[0])
+        & (grid.u < _BUSY_ROOM_OVAL_U[1])
+        & (grid.Y > eye_y)
+        & (grid.Y < float(face.y[_CHIN_POINT]))
+    )
+    if int(zone.sum()) < _BUSY_ROOM_MIN_NODES:
+        return None
+    # Only the rows that matter: this takes up to a millisecond on a large face.
+    rows = np.flatnonzero(zone.any(axis=1))
+    first, last = int(rows[0]), int(rows[-1]) + 1
+    roi, step = grid.roi, grid.step
+    top, bottom = roi.y0 + first * step, min(roi.y0 + last * step, roi.y1)
+    green = frame[top:bottom, roi.x0 : roi.x1, 1]
+    edges = cv2.absdiff(green, cv2.blur(green, (3, 3))) > _BUSY_ROOM_EDGE
+    size = (grid.nx * step, (last - first) * step)
+    pixels = cv2.resize(np.uint8(zone[first:last]), size, interpolation=cv2.INTER_NEAREST)[: bottom - top, : roi.w] > 0
+    return float((edges & pixels).sum()) / max(int(pixels.sum()), 1)
 
 
 def _to_frame_axes(grid: _Grid) -> tuple[np.ndarray, np.ndarray]:

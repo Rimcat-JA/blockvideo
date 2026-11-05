@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import pytest
 
+from makeup_cam import background as plates
 from makeup_cam import camera as camera_module
 from makeup_cam import runner as runner_module
 from makeup_cam.camera import (
@@ -23,10 +24,12 @@ from makeup_cam.camera import (
     virtual_camera_as_input_message,
 )
 from makeup_cam.config import MakeupSettings
-from makeup_cam.pipeline import ProcessResult
+from makeup_cam.pipeline import MakeupPipeline, ProcessResult
 from makeup_cam.runner import (
     CAMERA_LOST_MESSAGE,
     CAMERA_READ_FAILED_MESSAGE,
+    CAPTURE_BUSY_MESSAGE,
+    CAPTURE_STOPPED_MESSAGE,
     PROCESSING_FAILED_MESSAGE,
     CameraRunner,
     RunnerStatus,
@@ -151,9 +154,15 @@ class FakePipeline:
         self.calls = 0
         self.settings: MakeupSettings | None = None
         self.bypass = False
+        self.prepared: list[tuple[np.ndarray, int]] = []
+        self.processed: list[tuple[np.ndarray, int]] = []
+
+    def prepare(self, frame_bgr: np.ndarray, timestamp_ms: int) -> None:
+        self.prepared.append((frame_bgr, timestamp_ms))
 
     def process(self, frame_bgr: np.ndarray, timestamp_ms: int | None = None) -> ProcessResult:
         assert timestamp_ms is not None
+        self.processed.append((frame_bgr, timestamp_ms))
         self.calls += 1
         time.sleep(self.delay_s)
         if self.fails.is_set():
@@ -705,3 +714,340 @@ def test_placeholder_frame_is_cached_and_read_only() -> None:
     assert not frame.flags.writeable
     assert placeholder_frame(320, 180) is frame
     assert frame.max() > frame.min()  # something is drawn on it
+
+
+# ---- background capture -------------------------------------------------------
+
+
+class NoTracker:
+    """A real MakeupPipeline without models: no face in any frame."""
+
+    def detect(self, frame: np.ndarray, ts_ms: int) -> tuple[None, None]:
+        return None, None
+
+    def set_smoothing(self, smoothing: float) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class NoSegmenter:
+    def update(self, frame: np.ndarray, ts_ms: int, frame_index: int) -> None:
+        return None
+
+    def set_interval(self, interval: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class GatedProbe:
+    """A person check that can be held open, to look at what happens while it runs."""
+
+    def __init__(self, fraction: float = 0.0) -> None:
+        self.fraction = fraction
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+        self.threads: list[str] = []
+        self.frames: list[np.ndarray] = []
+
+    def __call__(self, frame: np.ndarray) -> float:
+        self.threads.append(threading.current_thread().name)
+        self.frames.append(frame)
+        self.entered.set()
+        assert self.release.wait(5.0)
+        return self.fraction
+
+
+def fast_collector(countdown_s: float = 0.02, timeout_s: float = 0.3) -> Callable[[], plates.PlateCollector]:
+    return lambda: plates.PlateCollector(countdown_s=countdown_s, count=6, spacing_s=0.005, timeout_s=timeout_s)
+
+
+class Answers:
+    """Records what ``on_done`` got, and on which thread."""
+
+    def __init__(self) -> None:
+        self.results: list[plates.PlateResult] = []
+        self.threads: list[str] = []
+
+    def __call__(self, result: plates.PlateResult) -> None:
+        self.threads.append(threading.current_thread().name)
+        self.results.append(result)
+
+    def wait(self) -> plates.PlateResult:
+        assert wait_until(lambda: bool(self.results))
+        return self.results[-1]
+
+
+@pytest.fixture
+def plate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The user's real room picture is never read or written."""
+    monkeypatch.setenv("AI_MAKEUP_CAM_HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
+
+
+@pytest.fixture
+def plate_harness(make_harness, plate_home: Path) -> Callable[..., tuple[Harness, GatedProbe]]:
+    def make(*, probe: GatedProbe | None = None, **kwargs) -> tuple[Harness, GatedProbe]:
+        gate = probe or GatedProbe()
+        pipeline = MakeupPipeline(MakeupSettings(), tracker=NoTracker(), segmenter=NoSegmenter(), effects=[], person_probe=gate)
+        kwargs.setdefault("plate_collector_factory", fast_collector())
+        return make_harness(pipeline=pipeline, **kwargs), gate
+
+    return make
+
+
+def test_a_capture_uses_raw_frames_and_ends_with_a_saved_plate(plate_harness, plate_home: Path) -> None:
+    h, probe = plate_harness()
+    h.runner.start()
+    assert h.wait_for_sent(lambda frame: True)
+    answers = Answers()
+    assert not h.runner.has_background
+
+    h.runner.capture_background(answers)
+    result = answers.wait()
+
+    assert result.ok and result.message == plates.SUCCESS_MESSAGE
+    assert h.runner.has_background
+    assert (plate_home / f"background_{WIDTH}x{HEIGHT}.png").is_file()
+    assert result.plate is not None and result.plate[0, 0, 0] == camera_value(0)  # not a processed frame
+    assert probe.threads and "makeup-cam-output" not in probe.threads and "MainThread" not in probe.threads
+    assert answers.threads == ["makeup-cam-background"]
+    assert wait_until(lambda: h.runner.status.background_message is None)
+
+
+def test_the_countdown_and_the_capture_are_in_the_status(plate_harness) -> None:
+    h, probe = plate_harness(plate_collector_factory=fast_collector(countdown_s=1.2))
+    probe.release.clear()
+    h.runner.start()
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+
+    assert wait_until(lambda: h.runner.status.background_message == plates.COUNTDOWN_MESSAGE.format(seconds=2))
+    assert wait_until(lambda: h.runner.status.background_message == plates.COUNTDOWN_MESSAGE.format(seconds=1))
+    assert probe.entered.wait(5.0)
+    assert h.runner.status.background_message == plates.CAPTURING_MESSAGE  # the person check is still running
+    messages = [status.background_message for status in h.statuses]
+    assert plates.COUNTDOWN_MESSAGE.format(seconds=1) in messages  # also told through on_status
+    probe.release.set()
+    answers.wait()
+    assert wait_until(lambda: h.statuses[-1].background_message is None)
+
+
+def test_video_keeps_flowing_during_the_person_check(plate_harness) -> None:
+    h, probe = plate_harness()
+    probe.release.clear()
+    h.runner.start()
+    answers = Answers()
+
+    started = time.monotonic()
+    h.runner.capture_background(answers)
+    assert time.monotonic() - started < 0.05  # the caller, a GUI thread, never waits
+    assert probe.entered.wait(5.0)
+
+    assert h.wait_for_sent(lambda frame: True, count=5)
+    assert not answers.results
+    probe.release.set()
+    assert answers.wait().ok
+
+
+def test_a_lost_camera_ends_the_capture_with_a_message(plate_harness) -> None:
+    h, _ = plate_harness(camera_timeout_s=0.05)
+    h.runner.start()
+    assert h.wait_for_sent(lambda frame: True)
+    h.cameras.outage.set()
+    assert wait_until(lambda: not h.runner.status.camera_ok)
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+    result = answers.wait()
+
+    assert not result.ok and result.message == plates.TOO_FEW_FRAMES_MESSAGE
+    assert not h.runner.has_background
+    assert wait_until(lambda: h.runner.status.background_message is None)
+    assert h.wait_for_sent(is_placeholder)  # and the call still gets its placeholder
+
+
+def test_a_camera_lost_halfway_keeps_the_previous_plate(plate_harness, plate_home: Path) -> None:
+    h, _ = plate_harness()
+    h.runner.start()
+    answers = Answers()
+    h.runner.capture_background(answers)
+    assert answers.wait().ok
+    saved = (plate_home / f"background_{WIDTH}x{HEIGHT}.png").read_bytes()
+    h.cameras.outage.set()
+    assert wait_until(lambda: not h.runner.status.camera_ok)
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+
+    assert answers.wait().message == plates.TOO_FEW_FRAMES_MESSAGE
+    assert h.runner.has_background
+    assert (plate_home / f"background_{WIDTH}x{HEIGHT}.png").read_bytes() == saved
+
+
+def test_deleting_during_the_countdown_voids_the_capture_at_once(plate_harness, plate_home: Path) -> None:
+    h, probe = plate_harness(plate_collector_factory=fast_collector(countdown_s=60.0))
+    h.runner.start()
+    answers = Answers()
+    h.runner.capture_background(answers)
+    assert wait_until(lambda: bool(h.runner.status.background_message))
+
+    cleared = h.runner.clear_background()
+
+    assert cleared.ok and cleared.message == plates.CLEARED_MESSAGE
+    assert answers.wait().message == plates.CAPTURE_CANCELLED_MESSAGE
+    assert wait_until(lambda: h.runner.status.background_message is None)  # no 60 s of overlay left
+    assert not probe.frames  # nothing was even checked
+    assert not h.runner.has_background
+    assert not list(plate_home.glob("background_*"))
+
+
+def test_deleting_during_the_person_check_wins_over_the_capture(plate_harness, plate_home: Path) -> None:
+    h, probe = plate_harness()
+    probe.release.clear()
+    h.runner.start()
+    answers = Answers()
+    h.runner.capture_background(answers)
+    assert probe.entered.wait(5.0)
+
+    assert h.runner.clear_background().ok
+    probe.release.set()
+
+    assert answers.wait().message == plates.CAPTURE_CANCELLED_MESSAGE
+    assert not h.runner.has_background
+    assert not list(plate_home.glob("background_*"))
+
+
+def test_an_older_plate_deleted_before_pressing_does_not_void_the_new_capture(plate_harness) -> None:
+    h, _ = plate_harness()
+    h.runner.start()
+    assert h.runner.clear_background().ok  # the generation is read when pressed, not at start-up
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+
+    assert answers.wait().ok
+
+
+def test_a_person_in_the_picture_is_reported_and_the_plate_kept_out(plate_harness, plate_home: Path) -> None:
+    h, _ = plate_harness(probe=GatedProbe(fraction=0.4))
+    h.runner.start()
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+    result = answers.wait()
+
+    assert not result.ok and "人や髪が映っています" in result.message
+    assert not list(plate_home.glob("background_*"))
+
+
+def test_asking_twice_answers_the_second_one_at_once(plate_harness) -> None:
+    h, probe = plate_harness()
+    probe.release.clear()
+    h.runner.start()
+    first, second = Answers(), Answers()
+
+    h.runner.capture_background(first)
+    h.runner.capture_background(second)
+
+    assert second.results[0].message == CAPTURE_BUSY_MESSAGE and not second.results[0].ok
+    probe.release.set()
+    assert first.wait().ok
+    third = Answers()
+    assert wait_until(lambda: h.runner.status.background_message is None)
+    h.runner.capture_background(third)  # and it can be done again
+    assert third.wait().ok
+
+
+def test_a_capture_can_be_asked_for_again_from_its_own_answer(plate_harness) -> None:
+    h, _ = plate_harness()
+    h.runner.start()
+    second = Answers()
+
+    h.runner.capture_background(lambda _result: h.runner.capture_background(second))
+
+    assert second.wait().ok
+
+
+def test_a_stopped_runner_answers_at_once(plate_harness) -> None:
+    h, _ = plate_harness()
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+
+    assert answers.results[0].message == CAPTURE_STOPPED_MESSAGE and not answers.results[0].ok
+
+
+def test_stopping_during_the_countdown_answers_and_a_restart_is_clean(plate_harness) -> None:
+    h, probe = plate_harness(plate_collector_factory=fast_collector(countdown_s=60.0))
+    h.runner.start()
+    answers = Answers()
+    h.runner.capture_background(answers)
+    assert wait_until(lambda: bool(h.runner.status.background_message))
+
+    h.runner.stop()
+
+    assert [result.message for result in answers.results] == [CAPTURE_STOPPED_MESSAGE]
+    assert not probe.frames
+    h.runner.start()
+    assert h.wait_for_sent(lambda frame: True, count=3)
+    assert h.runner.status.background_message is None
+
+
+def test_stop_waits_for_a_capture_being_finished(plate_harness) -> None:
+    h, probe = plate_harness()
+    h.runner.start()
+    probe.release.clear()
+    answers = Answers()
+    h.runner.capture_background(answers)
+    assert probe.entered.wait(5.0)
+    threading.Timer(0.1, probe.release.set).start()
+
+    h.runner.stop()
+
+    assert len(answers.results) == 1 and answers.results[0].ok  # not left running behind the stop
+
+
+def test_a_failing_capture_or_answer_keeps_the_video_going(make_harness, plate_home: Path) -> None:
+    class Broken(FakePipeline):
+        background_generation = 0
+        has_background = False
+
+        def capture_background(self, frames, generation):
+            raise RuntimeError("exploded")
+
+    h = make_harness(pipeline=Broken(), plate_collector_factory=fast_collector())
+    h.runner.start()
+    answers = Answers()
+
+    h.runner.capture_background(answers)
+    assert answers.wait().message == plates.CHECK_FAILED_MESSAGE
+
+    def explode(_result: plates.PlateResult) -> None:
+        raise RuntimeError("the answer exploded")
+
+    assert wait_until(lambda: h.runner.status.background_message is None)
+    h.runner.capture_background(explode)
+    assert h.wait_for_sent(processed(), count=3)
+
+
+def test_the_console_watch_starts_and_stops_quietly() -> None:
+    watch = runner_module.ConsoleCloseWatch()
+    assert not watch.closing.is_set()
+    watch.finish()  # no console going away: nothing ends the process
+    watch.finish()
+
+
+def test_every_frame_is_announced_before_it_is_processed(make_harness: Callable[..., Harness]) -> None:
+    """The landmarks start on the capture thread's frame itself: same array, same timestamp."""
+    h = make_harness()
+    h.runner.start()
+    wait_until(lambda: h.pipeline.calls >= 3)
+    h.runner.stop()
+    prepared = {(id(frame), ts) for frame, ts in h.pipeline.prepared}
+    assert all((id(frame), ts) in prepared for frame, ts in h.pipeline.processed)

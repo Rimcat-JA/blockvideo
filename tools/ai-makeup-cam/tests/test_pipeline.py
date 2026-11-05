@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
+import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -14,10 +17,10 @@ import pytest
 from makeup_cam import background as plates
 from makeup_cam import effects as effects_pkg
 from makeup_cam import pipeline as pipeline_module
-from makeup_cam.config import MakeupSettings
+from makeup_cam.config import LipSettings, MakeupSettings
 from makeup_cam.effects.base import Effect, FrameContext
 from makeup_cam.models import MODEL_SPECS
-from makeup_cam.pipeline import FADE_FRAMES, MakeupPipeline
+from makeup_cam.pipeline import FADE_FRAMES, SETTINGS_GLIDE_FRAMES, MakeupPipeline
 from makeup_cam.segmentation import SegMasks
 
 H, W = 48, 64
@@ -277,6 +280,31 @@ def test_segmentation_runs_only_for_hair_or_skin(
     pipeline, _, segmenter = make_pipeline(effects, settings)
     pipeline.process(sample_frame(), 0)
     assert bool(segmenter.updates) == expect_segmentation
+
+
+@pytest.mark.parametrize("name", ["contour", "reshape"])
+def test_optional_mask_users_get_masks_without_skin_or_hair(name: str) -> None:
+    pipeline, _, segmenter = make_pipeline([effect(name)], settings_with())
+    pipeline.process(sample_frame(), 0)
+    assert segmenter.updates
+
+
+def test_builtin_effects_are_registered_in_their_order() -> None:
+    effects = effects_pkg.load_builtin_effects()
+    assert [(cls.order, cls.name) for cls in effects if cls.__module__.startswith("makeup_cam.effects.")] == [
+        (5, "reshape"),
+        (8, "hairshape"),
+        (10, "hair"),
+        (20, "skin"),
+        (25, "contour"),
+        (30, "brows"),
+        (40, "eyeshadow"),
+        (45, "tearbag"),
+        (50, "eyeliner"),
+        (60, "blush"),
+        (70, "lips"),
+        (75, "teeth"),
+    ]
 
 
 def test_hair_effect_waits_for_a_mask() -> None:
@@ -680,3 +708,649 @@ def test_a_plate_that_cannot_be_saved_survives_a_change_of_resolution(home: Path
     pipeline.clear_background()
     run_once(pipeline, lips, 99, smaller)
     assert run_once(pipeline, lips, 132).background is None
+
+
+# ---------------------------------------------------------------------------
+# Speed: reused float buffer, tracking ahead, thread settings
+# ---------------------------------------------------------------------------
+
+
+def every_value_frame() -> np.ndarray:
+    values = np.arange(256, dtype=np.uint8).reshape(16, 16)
+    return np.dstack([values, values[::-1], values.T])
+
+
+def test_float_table_matches_the_formula_and_survives_the_round_trip() -> None:
+    values = np.arange(256, dtype=np.uint8)
+    expected = np.multiply(values, np.float32(1.0 / 255.0), dtype=np.float32)
+    assert pipeline_module._TO_FLOAT.dtype == np.float32
+    np.testing.assert_array_equal(pipeline_module._TO_FLOAT.ravel(), expected)
+    keep = effect("lips", delta=0.0)
+    pipeline, _, _ = make_pipeline([keep], settings_with())
+    frame = every_value_frame()
+    np.testing.assert_array_equal(pipeline.process(frame, 0).output, frame)
+
+
+def test_effects_get_float32_values_of_the_current_frame() -> None:
+    seen: list[np.ndarray] = []
+
+    class Recorder(FakeEffect):
+        def apply(self, frame: np.ndarray, ctx: FrameContext, settings: Any) -> np.ndarray:
+            assert frame.dtype == np.float32
+            seen.append(frame.copy())
+            return frame
+
+    pipeline, _, _ = make_pipeline([Recorder()], settings_with())
+    first = every_value_frame()
+    second = first[::-1].copy()
+    for index, frame in enumerate((first, second)):
+        pipeline.process(frame, index * 33)
+        np.testing.assert_array_equal(seen[index], np.multiply(frame, np.float32(1.0 / 255.0), dtype=np.float32))
+
+
+def test_what_an_effect_did_never_reaches_the_next_frame() -> None:
+    """The buffer is reused: toggled off, partly written and failing effects must leave no trace."""
+
+    class Scribbler(FakeEffect):
+        def apply(self, frame: np.ndarray, ctx: FrameContext, settings: Any) -> np.ndarray:
+            frame[:] = 0.75
+            if self.fail:
+                raise self.fail
+            return frame
+
+    scribble = Scribbler()
+    keep = effect("blush", 60, delta=0.0)
+    settings = settings_with()
+    pipeline, _, _ = make_pipeline([scribble, keep], settings)
+    frame = sample_frame()
+    assert not np.array_equal(pipeline.process(frame, 0).output, frame)
+
+    settings.lips.enabled = False
+    pipeline.set_settings(settings)
+    np.testing.assert_array_equal(pipeline.process(frame, 33).output, frame)
+
+    settings.lips.enabled = True
+    pipeline.set_settings(settings)
+    scribble.fail = RuntimeError("after writing")
+    partly = pipeline.process(frame, 66).output
+    assert not np.array_equal(partly, frame)  # as ever: an in-place effect may have written before failing
+    settings.lips.enabled = False
+    pipeline.set_settings(settings)
+    np.testing.assert_array_equal(pipeline.process(frame, 99).output, frame)
+
+
+def test_results_stay_valid_while_later_frames_are_processed() -> None:
+    pipeline, _, _ = make_pipeline([effect("lips", delta=0.1)], settings_with())
+    frame = sample_frame()
+    first = pipeline.process(frame, 0)
+    kept = first.output.copy()
+    assert not np.shares_memory(first.output, pipeline._float_frame)
+    pipeline.process(frame // 2, 33)
+    np.testing.assert_array_equal(first.output, kept)
+
+
+def test_an_effect_may_return_a_new_array() -> None:
+    new = np.full((H, W, 3), 0.25, np.float32)
+    effects = [effect("lips", needs_face=False, result=new), effect("blush", 60, needs_face=False, delta=0.25)]
+    pipeline, _, _ = make_pipeline(effects, settings_with())
+    for ts in (0, 33, 66):
+        output = pipeline.process(sample_frame(), ts).output
+        assert np.all(output == 128)
+        new[:] = 0.25  # the second effect wrote into it
+    assert pipeline._float_frame is not None and not np.shares_memory(new, pipeline._float_frame)
+
+
+def test_the_buffer_follows_the_frame_size() -> None:
+    lips = effect("lips", delta=0.0)
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    small = sample_frame()
+    large = cv2.resize(small, (W * 2, H * 3), interpolation=cv2.INTER_NEAREST)
+    for index, frame in enumerate((small, large, small, small, large)):
+        result = pipeline.process(frame, index * 33)
+        np.testing.assert_array_equal(result.output, frame)
+        assert pipeline._float_frame is not None and pipeline._float_frame.shape == frame.shape
+    buffer = pipeline._float_frame
+    pipeline.process(large, 200)
+    assert pipeline._float_frame is buffer
+
+
+def test_no_effect_needs_no_buffer() -> None:
+    settings = settings_with()
+    settings.lips.enabled = False
+    pipeline, _, _ = make_pipeline([effect("lips")], settings)
+    frame = sample_frame()
+    assert pipeline.process(frame, 0).output is frame
+    assert pipeline._float_frame is None
+
+
+def test_the_mirrored_previews_can_be_displayed() -> None:
+    settings = settings_with(mirror_preview=True)
+    pipeline, _, _ = make_pipeline([effect("lips", delta=0.1)], settings)
+    frame = sample_frame()
+    frame.setflags(write=False)
+    result = pipeline.process(frame, 0)
+    np.testing.assert_array_equal(np.ascontiguousarray(result.preview), cv2.flip(result.output, 1))
+    np.testing.assert_array_equal(np.ascontiguousarray(result.original_preview), cv2.flip(frame, 1))
+    assert cv2.resize(result.original_preview, (W // 2, H // 2)).shape == (H // 2, W // 2, 3)  # a view works too
+
+
+@pytest.fixture
+def cv2_threads() -> Any:
+    before = cv2.getNumThreads()
+    yield
+    cv2.setNumThreads(before)
+
+
+def test_opencv_threads_are_limited_but_never_raised(cv2_threads: None) -> None:
+    cv2.setNumThreads(pipeline_module.CV2_THREADS + 4)
+    make_pipeline([])
+    assert cv2.getNumThreads() == pipeline_module.CV2_THREADS
+    cv2.setNumThreads(1)
+    make_pipeline([])
+    assert cv2.getNumThreads() == 1
+
+
+def _process_affinity() -> int:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessAffinityMask.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    allowed, system = ctypes.c_size_t(), ctypes.c_size_t()
+    assert kernel32.GetProcessAffinityMask(kernel32.GetCurrentProcess(), ctypes.byref(allowed), ctypes.byref(system))
+    return allowed.value
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_one_hardware_thread_per_core_stays_within_what_is_allowed() -> None:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    first = pipeline_module._first_thread_of_each_core(kernel32)
+    assert first != 0
+    assert bin(first).count("1") <= (os.cpu_count() or 1)
+    pipeline_module._use_one_thread_per_core()
+    allowed = _process_affinity()
+    assert allowed != 0 and allowed & first == allowed
+    pipeline_module._use_one_thread_per_core()  # a second pipeline changes nothing
+    assert _process_affinity() == allowed
+
+
+def test_the_affinity_is_never_a_reason_to_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_: Any, **__: Any) -> Any:
+        raise OSError("no such library")
+
+    monkeypatch.setattr(pipeline_module.ctypes, "WinDLL", refuse, raising=False)
+    pipeline_module._use_one_thread_per_core()
+
+
+class ThreadCheckingTracker(FakeTracker):
+    """Landmarks depend on the frame's first pixel; fails the test if two calls overlap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.running = threading.Lock()
+        self.overlapped = False
+        self.calls: list[tuple[int, int, str]] = []
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def _enter(self) -> None:
+        if not self.running.acquire(blocking=False):
+            self.overlapped = True
+            self.running.acquire()
+
+    def detect(self, frame: np.ndarray, ts_ms: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+        self._enter()
+        try:
+            self.gate.wait(5.0)
+            self.calls.append((id(frame), ts_ms, threading.current_thread().name))
+            if self.fail:
+                raise self.fail
+            return FACE + float(frame[0, 0, 0]), np.zeros(len(FACE), np.float32)
+        finally:
+            self.running.release()
+
+    def set_smoothing(self, smoothing: float) -> None:
+        self._enter()
+        try:
+            self.smoothing.append(smoothing)
+            self.calls.append((0, -1, threading.current_thread().name))
+        finally:
+            self.running.release()
+
+
+def value_frame(value: int) -> np.ndarray:
+    return np.full((H, W, 3), value, np.uint8)
+
+
+def test_a_prepared_frame_is_tracked_once_on_its_own_thread() -> None:
+    tracker = ThreadCheckingTracker()
+    lips = effect("lips", delta=0.0)
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+    frame = value_frame(7)
+    pipeline.prepare(frame, 100)
+    result = pipeline.process(frame, 100)
+    pipeline.close()
+    detections = [call for call in tracker.calls if call[1] >= 0]
+    assert detections == [(id(frame), 100, detections[0][2])]
+    assert detections[0][2].startswith("tracker")
+    np.testing.assert_array_equal(result.landmarks, FACE + 7.0)
+    assert not tracker.overlapped
+
+
+@pytest.mark.parametrize("fail_at", [None, 3])
+def test_preparing_changes_nothing_but_the_thread(fail_at: int | None, caplog: pytest.LogCaptureFixture) -> None:
+    def run_all(prepare: bool) -> list[tuple[np.ndarray, np.ndarray | None, list[float]]]:
+        tracker = ThreadCheckingTracker()
+        lips = effect("lips", delta=0.05)
+        pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+        outcome = []
+        for index in range(8):
+            frame = value_frame(10 * index)
+            tracker.fail = RuntimeError("no model") if index == fail_at else None
+            if prepare:
+                pipeline.prepare(frame, index * 33)
+            result = pipeline.process(frame, index * 33)
+            outcome.append((result.output.copy(), result.landmarks, list(lips.intensities)))
+        pipeline.close()
+        return outcome
+
+    for plain, prepared in zip(run_all(False), run_all(True), strict=True):
+        np.testing.assert_array_equal(plain[0], prepared[0])
+        np.testing.assert_array_equal(plain[1], prepared[1])
+        assert plain[2] == prepared[2]
+
+
+def test_frames_the_renderer_skips_are_forgotten() -> None:
+    tracker = ThreadCheckingTracker()
+    pipeline, _, _ = make_pipeline([], settings_with(), tracker=tracker)
+    frames = [value_frame(value) for value in (1, 2, 3)]
+    futures = []
+    for index, frame in enumerate(frames):
+        pipeline.prepare(frame, index)
+        futures.append(pipeline._track_ahead._jobs[-1][2])
+        futures[-1].result(5.0)
+    result = pipeline.process(frames[2], 2)
+    np.testing.assert_array_equal(result.landmarks, FACE + 3.0)
+    assert not pipeline._track_ahead._jobs
+    # An older frame that shows up late is simply tracked again, in turn.
+    assert pipeline.process(frames[0], 0).landmarks is not None
+    assert len([call for call in tracker.calls if call[1] >= 0]) == 4
+    pipeline.close()
+    assert not tracker.overlapped
+
+
+def test_a_busy_tracker_is_not_queued_behind() -> None:
+    tracker = ThreadCheckingTracker()
+    pipeline, _, _ = make_pipeline([], settings_with(), tracker=tracker)
+    pipeline.process(value_frame(0), 1)  # the first process() also forwards the settings, which would wait
+    tracker.gate.clear()
+    first, second = value_frame(1), value_frame(2)
+    pipeline.prepare(first, 10)
+    pipeline.prepare(second, 33)  # the first is still running: not started now
+    assert len(pipeline._track_ahead._jobs) == 1
+    # Tracked when asked for, after the running one, never at the same time.
+    results: list[Any] = []
+    renderer = threading.Thread(target=lambda: results.append(pipeline.process(second, 33)))
+    renderer.start()
+    renderer.join(0.05)
+    assert renderer.is_alive()
+    tracker.gate.set()
+    renderer.join(5.0)
+    np.testing.assert_array_equal(results[0].landmarks, FACE + 2.0)
+    pipeline.close()
+    assert not tracker.overlapped
+    assert [call[1] for call in tracker.calls if call[1] >= 0] == [1, 10, 33]
+
+
+def test_another_frame_or_timestamp_is_not_taken_for_the_announced_one() -> None:
+    tracker = ThreadCheckingTracker()
+    pipeline, _, _ = make_pipeline([], settings_with(), tracker=tracker)
+    announced = value_frame(5)
+    pipeline.prepare(announced, 10)
+    pipeline._track_ahead._jobs[-1][2].result(5.0)
+    np.testing.assert_array_equal(pipeline.process(value_frame(9), 10).landmarks, FACE + 9.0)
+    np.testing.assert_array_equal(pipeline.process(announced, 11).landmarks, FACE + 5.0)
+    pipeline.close()
+    assert len([call for call in tracker.calls if call[1] >= 0]) == 3
+
+
+def test_smoothing_changes_wait_for_the_running_detection() -> None:
+    tracker = ThreadCheckingTracker()
+    settings = settings_with(landmark_smoothing=0.2)
+    pipeline, _, _ = make_pipeline([], settings, tracker=tracker)
+    frame = value_frame(1)
+    pipeline.prepare(frame, 0)
+    pipeline.process(frame, 0)
+    tracker.gate.clear()
+    pipeline.prepare(frame, 33)  # still running when process() forwards the new value
+    settings.general.landmark_smoothing = 0.8
+    pipeline.set_settings(settings)
+    renderer = threading.Thread(target=pipeline.process, args=(frame, 33))
+    renderer.start()
+    renderer.join(0.05)
+    assert renderer.is_alive() and tracker.smoothing == [0.2]
+    tracker.gate.set()
+    renderer.join(5.0)
+    pipeline.close()
+    assert tracker.smoothing == [0.2, 0.8]
+    assert not tracker.overlapped
+
+
+def test_fade_out_works_with_prepared_frames() -> None:
+    tracker = FakeTracker(script=[FACE] * 8 + [None] * 8)
+    lips = effect("lips", delta=0.0)
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+    for index in range(16):
+        frame = sample_frame()
+        pipeline.prepare(frame, index * 33)
+        pipeline.process(frame, index * 33)
+    pipeline.close()
+    levels = [round(value * FADE_FRAMES) for value in lips.intensities]
+    assert levels[:6] == [1, 2, 3, 4, 5, 6]
+    assert levels[-5:] == [5, 4, 3, 2, 1]
+    assert lips.resets == 2  # the first frame size, and the lost face
+
+
+def test_prepare_never_raises_and_does_nothing_after_close(caplog: pytest.LogCaptureFixture) -> None:
+    tracker = ThreadCheckingTracker()
+    pipeline, _, _ = make_pipeline([], settings_with(), tracker=tracker)
+    pipeline.prepare("not a frame", 0)  # type: ignore[arg-type]
+    pipeline.prepare(np.zeros((4, 4), np.uint8), 0)
+    pipeline.prepare(np.zeros((4, 4, 3), np.float32), 0)
+    assert not pipeline._track_ahead._jobs
+    pipeline.close()
+    pipeline.prepare(value_frame(1), 0)
+    assert tracker.calls == []
+    assert pipeline.process(value_frame(1), 0).landmarks is None
+
+
+def test_close_waits_for_a_running_detection() -> None:
+    tracker = ThreadCheckingTracker()
+    tracker.gate.clear()
+    pipeline, _, _ = make_pipeline([], settings_with(), tracker=tracker)
+    pipeline.prepare(value_frame(1), 0)
+    closer = threading.Thread(target=pipeline.close)
+    closer.start()
+    closer.join(0.05)
+    assert closer.is_alive() and tracker.closed == 0
+    tracker.gate.set()
+    closer.join(5.0)
+    assert not closer.is_alive() and tracker.closed == 1
+    assert len(tracker.calls) == 1
+
+
+def test_prepare_and_process_from_two_threads_at_full_speed() -> None:
+    tracker = ThreadCheckingTracker()
+    lips = effect("lips", delta=0.0)
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+    latest: list[tuple[np.ndarray, int]] = []
+    stop = threading.Event()
+
+    def camera() -> None:
+        ts = 0
+        while not stop.is_set():
+            frame = value_frame(ts % 251)
+            pipeline.prepare(frame, ts)
+            latest.append((frame, ts))
+            ts += 1
+
+    thread = threading.Thread(target=camera)
+    thread.start()
+    processed = 0
+    try:
+        while processed < 200:
+            if latest:
+                frame, ts = latest[-1]
+                result = pipeline.process(frame, ts)
+                np.testing.assert_array_equal(result.landmarks, FACE + float(frame[0, 0, 0]))
+                processed += 1
+    finally:
+        stop.set()
+        thread.join()
+        pipeline.close()
+    assert not tracker.overlapped
+
+
+# ---------------------------------------------------------------------------
+# A lost face leaves nothing behind
+# ---------------------------------------------------------------------------
+
+
+class CoastingTracker(FakeTracker):
+    """After a lost face, says where the picture moved it (None: cannot tell)."""
+
+    def __init__(self, script: list[np.ndarray | None], coasts: list[np.ndarray | None]) -> None:
+        super().__init__(script)
+        self.coasts = coasts
+
+    def coast(self) -> tuple[np.ndarray, np.ndarray] | None:
+        where = self.coasts.pop(0)
+        return None if where is None else (where.copy(), np.zeros(len(where), np.float32))
+
+
+def levels(lips: FakeEffect) -> list[int]:
+    return [round(value * FADE_FRAMES) for value in lips.intensities]
+
+
+def test_makeup_follows_the_face_while_it_fades_after_a_loss() -> None:
+    moved = [FACE + (0.0, 2.0 * i) for i in range(1, 5)]
+    tracker = CoastingTracker([FACE] * FADE_FRAMES + [None] * 4, list(moved))
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+    results = run(pipeline, FADE_FRAMES + 4)
+    assert levels(lips)[FADE_FRAMES:] == [5, 4, 3, 2]
+    for ctx, where in zip(lips.calls[FADE_FRAMES:], moved, strict=True):
+        assert np.array_equal(ctx.landmarks, where)
+    assert [r.face_found for r in results[-4:]] == [False] * 4  # only the model says a face is there
+    assert results[-1].landmarks is None
+
+
+def test_a_fast_face_with_no_known_motion_moves_on_and_fades_quickly() -> None:
+    speed = np.float32([0.0, 60.0])
+    path = [FACE + speed * i for i in range(FADE_FRAMES + 2)]
+    tracker = FakeTracker([*path, None, None, None, None])
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+    run(pipeline, FADE_FRAMES + 2)
+    lips.calls.clear()
+    lips.intensities.clear()
+    results = run(pipeline, 4)
+    assert levels(lips) == [4, 2]  # no pop, but gone in a moment
+    np.testing.assert_allclose(lips.calls[0].landmarks, path[-1] + speed)  # not where the face used to be
+    np.testing.assert_allclose(lips.calls[1].landmarks, path[-1] + speed * 2)
+    assert np.array_equal(results[-1].output, sample_frame())
+
+
+def test_a_still_face_with_no_known_motion_still_fades_gently() -> None:
+    tracker = FakeTracker([FACE] * FADE_FRAMES + [None] * 3)
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=tracker)
+    run(pipeline, FADE_FRAMES + 3)
+    assert levels(lips)[FADE_FRAMES:] == [5, 4, 3]
+
+
+def test_a_face_found_on_and_off_does_not_make_the_makeup_pulse() -> None:
+    from makeup_cam.pipeline import STEADY_FRAMES
+
+    on_off: list[np.ndarray | None] = [FACE, FACE, None] * 3 + [FACE, None, FACE, None]
+    script: list[np.ndarray | None] = [FACE] * FADE_FRAMES + [None] * (FADE_FRAMES + 1) + on_off + [FACE] * (STEADY_FRAMES + 2)
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with(), tracker=FakeTracker(script))
+    results = run(pipeline, len(script))
+    start = FADE_FRAMES + FADE_FRAMES + 1
+    for result in results[start : start + len(on_off)]:
+        assert np.array_equal(result.output, sample_frame())  # nothing while the detections come and go
+    assert levels(lips)[-3:] == [1, 2, 3][: 3]  # it rises once the face stays
+    assert len(lips.intensities) >= 3
+
+
+def test_the_first_face_fades_in_without_waiting() -> None:
+    lips = effect("lips")
+    pipeline, _, _ = make_pipeline([lips], settings_with())
+    run(pipeline, 3)
+    assert levels(lips) == [1, 2, 3]
+
+
+def test_a_prepared_frame_is_tracked_with_the_settings_of_its_time() -> None:
+    tracker = ThreadCheckingTracker()
+    order: list[object] = []
+    detect, set_smoothing = tracker.detect, tracker.set_smoothing
+    tracker.detect = lambda frame, ts: (order.append(ts), detect(frame, ts))[1]  # type: ignore[method-assign]
+    tracker.set_smoothing = lambda value: (order.append(value), set_smoothing(value))[1]  # type: ignore[method-assign]
+    settings = settings_with(landmark_smoothing=0.2)
+    pipeline, _, _ = make_pipeline([], settings, tracker=tracker)
+    first, second = value_frame(1), value_frame(2)
+    pipeline.prepare(first, 0)
+    pipeline.process(first, 0)
+    settings.general.landmark_smoothing = 0.8
+    pipeline.set_settings(settings)
+    pipeline.prepare(second, 33)
+    pipeline.process(second, 33)
+    pipeline.close()
+    assert order.index(0.8) < order.index(33)  # no frame late, as without prepare
+
+
+# ---------------------------------------------------------------------------
+# Choosing a preset glides
+# ---------------------------------------------------------------------------
+
+
+def test_glide_interpolates_numbers_and_colors_and_ends_exactly() -> None:
+    from makeup_cam.pipeline import SETTINGS_GLIDE_FRAMES
+
+    old, new = settings_with(), settings_with()
+    old.lips.opacity, new.lips.opacity = 0.2, 0.6
+    old.lips.color, new.lips.color = "#000000", "#FFFFFF"
+    old.lips.finish, new.lips.finish = "matte", "gloss"
+    seen: list[LipSettings] = []
+    lips = effect("lips")
+    apply = lips.apply
+
+    def recording(frame: np.ndarray, ctx: FrameContext, settings: Any) -> np.ndarray:
+        seen.append(settings)
+        return apply(frame, ctx, settings)
+
+    lips.apply = recording  # type: ignore[method-assign]
+    pipeline, _, _ = make_pipeline([lips], old)
+    run(pipeline, 1)
+    pipeline.glide_to_settings(new)
+    run(pipeline, SETTINGS_GLIDE_FRAMES + 1)
+    steps = [s.opacity for s in seen[1:]]
+    assert all(a < b for a, b in itertools.pairwise(steps[:SETTINGS_GLIDE_FRAMES]))
+    assert steps[0] == pytest.approx(0.2 + 0.4 / SETTINGS_GLIDE_FRAMES)
+    assert seen[1].finish == "matte" and seen[SETTINGS_GLIDE_FRAMES - 1].finish == "gloss"
+    assert seen[-1] == new.lips
+    assert seen[-1].color == "#FFFFFF" and seen[1].color not in ("#000000", "#FFFFFF")
+
+
+def test_glide_fades_a_section_only_one_look_has() -> None:
+    from makeup_cam.pipeline import SETTINGS_GLIDE_FRAMES
+
+    off, on = settings_with(), settings_with()
+    off.lips.enabled = False
+    lips = effect("lips", delta=0.0)
+    pipeline, _, _ = make_pipeline([lips], off)
+    run(pipeline, FADE_FRAMES)
+    pipeline.glide_to_settings(on)
+    run(pipeline, SETTINGS_GLIDE_FRAMES)
+    expected = [i / SETTINGS_GLIDE_FRAMES for i in range(1, SETTINGS_GLIDE_FRAMES)] + [1.0]
+    np.testing.assert_allclose(lips.intensities[-SETTINGS_GLIDE_FRAMES:], expected)
+
+    lips.intensities.clear()
+    pipeline.glide_to_settings(off)
+    results = run(pipeline, SETTINGS_GLIDE_FRAMES)
+    np.testing.assert_allclose(lips.intensities, [1.0 - i / SETTINGS_GLIDE_FRAMES for i in range(1, SETTINGS_GLIDE_FRAMES)])
+    assert np.array_equal(results[-1].output, sample_frame())  # exactly the new look at the end
+
+
+def glide_watcher(start: float) -> tuple[Any, list[float], MakeupSettings]:
+    """A pipeline at lips opacity ``start``, the values the lips are drawn with, and its settings."""
+    old = settings_with()
+    old.lips.opacity = start
+    seen: list[float] = []
+    lips = effect("lips")
+    apply = lips.apply
+    lips.apply = lambda frame, ctx, settings: (seen.append(settings.opacity), apply(frame, ctx, settings))[1]  # type: ignore[method-assign]
+    pipeline, _, _ = make_pipeline([lips], old)
+    return pipeline, seen, old
+
+
+def test_set_settings_is_immediate() -> None:
+    pipeline, seen, new = glide_watcher(0.2)
+    new.lips.opacity = 0.6
+    pipeline.set_settings(new)
+    run(pipeline, 1)
+    assert seen == [0.6]
+
+
+def test_a_slider_during_a_glide_goes_on_from_where_the_picture_is() -> None:
+    pipeline, seen, new = glide_watcher(0.2)
+    new.lips.opacity = 0.6
+    pipeline.glide_to_settings(new)
+    run(pipeline, 3)
+    other = new.copy()
+    other.lips.opacity = 0.7
+    pipeline.set_settings(other)
+    run(pipeline, SETTINGS_GLIDE_FRAMES + 1)
+    steps = np.abs(np.diff(seen))
+    assert steps.max() <= (0.7 - 0.2) / SETTINGS_GLIDE_FRAMES + 1e-6, seen
+    assert seen[-1] == 0.7
+    assert pipeline.get_settings().lips.opacity == 0.7
+
+
+def test_a_second_preset_during_a_glide_goes_on_from_where_the_picture_is() -> None:
+    pipeline, seen, first = glide_watcher(0.2)
+    first.lips.opacity = 1.0
+    pipeline.glide_to_settings(first)
+    run(pipeline, 4)  # half way: 0.6
+    second = first.copy()
+    second.lips.opacity = 0.2
+    pipeline.glide_to_settings(second)
+    run(pipeline, SETTINGS_GLIDE_FRAMES + 1)
+    assert max(seen) <= 0.6 + 1e-6, seen
+    assert np.abs(np.diff(seen)).max() <= (1.0 - 0.2) / SETTINGS_GLIDE_FRAMES + 1e-6, seen
+    assert seen[-1] == 0.2
+
+
+def test_a_section_fading_out_comes_back_from_where_it_was_when_the_choice_changes() -> None:
+    on, off = settings_with(), settings_with()
+    off.lips.enabled = False
+    intensities: list[float] = []
+    lips = effect("lips")
+    apply = lips.apply
+    lips.apply = lambda frame, ctx, settings: (intensities.append(ctx.intensity), apply(frame, ctx, settings))[1]  # type: ignore[method-assign]
+    pipeline, _, _ = make_pipeline([lips], on)
+    run(pipeline, FADE_FRAMES + 2)  # the fade-in of the face is over
+    intensities.clear()
+    pipeline.glide_to_settings(off)
+    run(pipeline, 4)
+    pipeline.glide_to_settings(on)
+    run(pipeline, SETTINGS_GLIDE_FRAMES + 1)
+    assert np.abs(np.diff(intensities)).max() <= 1.0 / SETTINGS_GLIDE_FRAMES + 1e-6, intensities
+    assert min(intensities) >= 0.5 - 1.0 / SETTINGS_GLIDE_FRAMES - 1e-6, intensities
+    assert intensities[-1] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Masks while the face moves fast
+# ---------------------------------------------------------------------------
+
+
+def test_masks_come_every_frame_while_the_face_moves_fast() -> None:
+    moved = [FACE + np.float32([0.0, 20.0 * k]) for k in range(1, 4)]
+    script = [FACE] * 6 + moved + [moved[-1]] * (pipeline_module._FAST_FOR_MASKS_FRAMES + 3)
+    settings = settings_with(segmentation_interval=2)
+    pipeline, _, segmenter = make_pipeline([], settings, tracker=FakeTracker(script))
+    run(pipeline, 6)
+    assert segmenter.intervals == [2]
+    run(pipeline, 3, 200)
+    assert segmenter.intervals[-1] == 1
+    run(pipeline, pipeline_module._FAST_FOR_MASKS_FRAMES + 3, 300)
+    assert segmenter.intervals == [2, 1, 2]
+    pipeline.close()

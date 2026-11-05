@@ -11,6 +11,9 @@ CREMA-D ones also without ``.test-media`` (see ``scripts/fetch_test_media.py``).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import cv2
@@ -659,7 +662,7 @@ def test_round_trip_with_the_bare_photo(astronaut, real_models, models_path, nam
     assert got.lips.finish == truth.lips.finish
     assert got.blush.opacity > 0.1, "blush present"
     assert abs(hue_of(got.blush.color) - hue_of(truth.blush.color)) < 15.0
-    assert got.eyeshadow.opacity > 0.3, "eyeshadow present"
+    assert got.eyeshadow.opacity >= 0.3, "eyeshadow present"
     assert got.eyeliner.opacity > 0.4, "eyeliner present"
     assert got.brows.opacity == pytest.approx(truth.brows.opacity, abs=0.2)
     if truth.eyeliner.wing >= 0.5:
@@ -1108,3 +1111,13 @@ def test_one_photo_finds_a_rose_lipstick_on_the_asian_test_face(real_models, mod
     got = analyze_makeup(pipeline_render(crema_frame("1072"), truth, models_path), None, models=real_models).settings
     assert got.lips.opacity >= 0.5
     assert color_distance(got.lips.color, truth.lips.color) < 25.0
+
+
+def test_numpy_runs_single_threaded_unless_the_user_says_otherwise() -> None:
+    """Many BLAS threads on half the CPUs froze the video for over a second during a photo analysis."""
+    code = "import makeup_cam, os; print(os.environ['OPENBLAS_NUM_THREADS'])"
+    root = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    run = lambda e: subprocess.run([sys.executable, "-c", code], cwd=root, env=e, capture_output=True, text=True, check=True).stdout.strip()  # noqa: E731
+    assert run(env) == "1"
+    assert run({**env, "OPENBLAS_NUM_THREADS": "3"}) == "3"

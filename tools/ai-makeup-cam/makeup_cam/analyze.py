@@ -3125,7 +3125,7 @@ def save_as_preset(result: AnalysisResult, name: str) -> PresetInfo:
     safe_name = sanitize_preset_name(name)
     if (BUILTIN_PRESETS_DIR / f"{safe_name}{PRESET_SUFFIX}").is_file():
         raise PresetError(f"『{safe_name}』は標準プリセットの名前なので使えません。別の名前を指定してください。")
-    return save_preset(safe_name, result.settings)
+    return save_preset(safe_name, result.settings)  # refuses a built-in preset's display name too
 
 
 # --------------------------------------------------------------------------

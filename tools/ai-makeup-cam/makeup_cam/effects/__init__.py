@@ -12,7 +12,7 @@ import importlib
 from .base import Effect, FrameContext, register_effect, registered_effects
 
 # Built-in effect modules (execution order is set by each Effect.order).
-BUILTIN_EFFECT_MODULES = ("hair", "skin", "brows", "eyes", "blush", "lips")
+BUILTIN_EFFECT_MODULES = ("reshape", "hairshape", "hair", "skin", "contour", "brows", "eyes", "blush", "lips", "teeth")
 
 
 def load_builtin_effects() -> list[type[Effect]]:

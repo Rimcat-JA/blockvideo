@@ -202,3 +202,153 @@ def test_close_up_faces_are_made_up_at_reduced_resolution(frame, face_landmarks_
 def test_unknown_finish_is_rejected(frame, face_landmarks_720p, fake_ctx) -> None:
     with pytest.raises(ValueError, match="finish"):
         apply_lips(frame, face_landmarks_720p, fake_ctx, finish="sparkle")
+
+
+# ---------------------------------------------------------------------------
+# The picture has the last word about the teeth
+# ---------------------------------------------------------------------------
+
+LIP_COLOR = (90 / 255, 80 / 255, 185 / 255)  # BGR, a red lip
+SKIN_COLOR = (130 / 255, 160 / 255, 205 / 255)
+TOOTH_COLOR = (175 / 255, 225 / 255, 235 / 255)
+
+
+def painted_mouth(landmarks: np.ndarray, *, lip: tuple[float, float, float] = LIP_COLOR) -> np.ndarray:
+    """A flat mouth: skin, lips, and a white band of teeth right at the mouth opening."""
+    image = np.empty((720, 1280, 3), np.float32)
+    image[...] = SKIN_COLOR
+    roi = full_roi(image)
+    lips = regions.polygon_mask(landmarks[regions.LIPS_OUTER], roi) > 0.5
+    image[lips] = lip
+    opening = regions.polygon_mask(landmarks[regions.LIPS_INNER], roi) > 0.5
+    image[opening] = (0.05, 0.05, 0.08)
+    return image
+
+
+def teeth_below_the_opening(image: np.ndarray, landmarks: np.ndarray, depth: float) -> np.ndarray:
+    """Paint teeth from the opening down over the lower lip's mask: the inner lip line is too high,
+    as it is for a few frames when the mouth opens. Returns where the teeth are outside the opening."""
+    roi = full_roi(image)
+    scale = regions.face_scale(landmarks)
+    opening = regions.polygon_mask(landmarks[regions.LIPS_INNER], roi) > 0.5
+    grown = regions.polygon_mask(regions.expand_polygon(landmarks[regions.LIPS_INNER], depth * scale), roi) > 0.5
+    image[grown] = TOOTH_COLOR
+    return grown & ~opening
+
+
+def test_teeth_inside_the_lip_mask_stay_white(face_landmarks_720p, fake_ctx) -> None:
+    image = painted_mouth(face_landmarks_720p)
+    teeth = teeth_below_the_opening(image, face_landmarks_720p, 0.06)
+    out = LipEffect().apply(image.copy(), fake_ctx(image, face_landmarks_720p), LipSettings(opacity=1.0, finish="matte", color="#7E2A5A", feather=0.0))
+    core = cv2.erode(teeth.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    assert core.sum() > 15
+    assert change(image, out)[core].max() < 0.02
+    lips = (regions.lips_mask(face_landmarks_720p, full_roi(image)) > 0.99) & ~cv2.dilate(teeth.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    assert change(image, out)[lips].mean() > 0.03  # and the lips still get their color
+
+
+def test_a_pale_lower_lip_is_not_taken_for_teeth(face_landmarks_720p, fake_ctx) -> None:
+    """On dark skin the lower lip can be much paler than the upper one, nearly as pale as skin."""
+    lm = face_landmarks_720p
+    image = painted_mouth(lm, lip=(60 / 255, 70 / 255, 120 / 255))
+    image[...] *= 0.55  # dark skin and lips, not the white of teeth
+    roi = full_roi(image)
+    lower = np.zeros((720, 1280), bool)
+    mouth_y = float(lm[regions.LIPS_INNER, 1].mean())
+    lower[int(mouth_y):] = True
+    pale = (regions.lips_mask(lm, roi) > 0.5) & lower
+    image[pale] = (120 / 255, 145 / 255, 175 / 255)
+    teeth_below_the_opening(image, lm, 0.0)
+    image[regions.polygon_mask(lm[regions.LIPS_INNER], roi) > 0.5] = TOOTH_COLOR
+    out = LipEffect().apply(image.copy(), fake_ctx(image, lm), LipSettings(opacity=1.0, finish="matte", color="#B5525E", feather=0.0))
+    core = pale & (regions.polygon_mask(regions.expand_polygon(lm[regions.LIPS_INNER], 2.0), roi) < 0.5)
+    assert core.sum() > 50
+    assert change(image, out)[core].mean() > 0.03  # no hole in the lipstick
+
+
+def test_shine_on_the_lips_keeps_the_lipstick(face_landmarks_720p, fake_ctx) -> None:
+    """Bright and pale like teeth, but cut off from the mouth opening by lip."""
+    lm = face_landmarks_720p
+    image = painted_mouth(lm)
+    scale = regions.face_scale(lm)
+    roi = full_roi(image)
+    center = (lm[regions.LIPS_INNER_BOTTOM] + lm[regions.LIPS_BOTTOM]) / 2.0
+    spot = regions.ellipse_mask(center, (0.06 * scale, 0.02 * scale), 0.0, roi) > 0.5
+    image[spot] = TOOTH_COLOR
+    image[regions.polygon_mask(lm[regions.LIPS_INNER], roi) > 0.5] = TOOTH_COLOR
+    out = LipEffect().apply(image.copy(), fake_ctx(image, lm), LipSettings(opacity=1.0, finish="matte", color="#B5525E", feather=0.0))
+    assert spot.sum() > 10
+    assert change(image, out)[spot].mean() > 0.02
+
+
+def test_dark_lips_are_not_lightened_much() -> None:
+    limit = lips_module._limit_lightening
+    assert limit(20.0, 30.0) == pytest.approx(lips_module._MAX_LIGHTEN)  # dark lips
+    assert limit(20.0, 70.0) == pytest.approx(20.0)  # light lips: a nude lightens them
+    assert lips_module._MAX_LIGHTEN < limit(20.0, 52.0) < 20.0
+    assert limit(-15.0, 30.0) == pytest.approx(-15.0)  # darkening is never limited
+
+
+def lab_of(image: np.ndarray) -> np.ndarray:
+    return blend.bgr_to_lab(image)
+
+
+def test_lower_teeth_with_the_lips_color_bled_into_them_stay_white(face_landmarks_720p, fake_ctx) -> None:
+    """Small lower teeth in shade: hardly lighter than the lip, and webcams blur its red into them."""
+    lm = face_landmarks_720p
+    image = painted_mouth(lm)
+    teeth = teeth_below_the_opening(image, lm, 0.06)
+    lip = np.float32(LIP_COLOR)
+    image[teeth] = 0.55 * lip + 0.45 * np.float32(TOOTH_COLOR)  # as light as the lip at most, half way to its red
+    image = cv2.GaussianBlur(image, (0, 0), 1.0)
+    before = lab_of(image)
+    out = LipEffect().apply(image.copy(), fake_ctx(image, lm), LipSettings(opacity=1.0, finish="satin", gloss=0.0, color="#7E2A5A", feather=0.0))
+    after = lab_of(out)
+    core = cv2.erode(teeth.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    assert core.sum() > 15
+    outer = regions.lips_mask(lm, full_roi(image)) > 0.99
+    outer &= ~cv2.dilate(teeth.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    painted = np.abs(after - before).max(axis=2)
+    assert painted[outer].mean() > 3.0 * painted[core].mean()
+
+
+def test_each_lip_follows_the_lipstick_on_its_own(face_landmarks_720p, fake_ctx) -> None:
+    """A dark upper and a pale lower lip must not split into a deep red and a salmon pink."""
+    lm = face_landmarks_720p
+    image = painted_mouth(lm, lip=(40 / 255, 40 / 255, 90 / 255))
+    roi = full_roi(image)
+    lips = regions.polygon_mask(lm[regions.LIPS_OUTER], roi) > 0.5
+    lower = lips & (regions.polygon_mask(lm[regions.LIPS_LOWER_OUTER + regions.LIPS_LOWER_INNER[::-1]], roi) > 0.5)
+    upper = lips & (regions.polygon_mask(lm[regions.LIPS_UPPER_OUTER + regions.LIPS_UPPER_INNER[::-1]], roi) > 0.5)
+    image[lower] = (130 / 255, 145 / 255, 200 / 255)
+    before = lab_of(image)[..., 0]
+    out = LipEffect().apply(image.copy(), fake_ctx(image, lm), LipSettings(opacity=1.0, finish="satin", gloss=0.0, color="#B5525E", feather=0.0))
+    after = lab_of(out)[..., 0]
+    core = regions.lips_mask(lm, roi, outline=-0.15) > 0.99
+    gap_before = float(before[lower & core].mean() - before[upper & core].mean())
+    gap_after = float(after[lower & core].mean() - after[upper & core].mean())
+    assert gap_before > 20.0
+    assert gap_after < 0.6 * gap_before
+    assert after[lower & core].mean() < before[lower & core].mean()  # the pale lip takes the pigment's depth
+    assert after[upper & core].mean() - before[upper & core].mean() <= lips_module._MAX_LIGHTEN + 0.5
+
+
+def open_mouth(lm: np.ndarray, factor: float) -> np.ndarray:
+    """``lm`` with the lower lip moved down, as far as ``factor`` x the width of the mouth."""
+    out = lm.copy()
+    width = float(np.linalg.norm(lm[regions.MOUTH_LEFT_CORNER] - lm[regions.MOUTH_RIGHT_CORNER]))
+    out[regions.LIPS_LOWER_INNER[1:-1] + regions.LIPS_LOWER_OUTER[1:-1], 1] += factor * width
+    return out
+
+
+def test_a_wide_open_mouth_gets_no_red_ring(face_landmarks_720p) -> None:
+    lm = open_mouth(face_landmarks_720p, 0.7)
+    roi = regions.Roi(400, 200, 900, 600)
+    scale = regions.face_scale(lm)
+    guard = lips_module._thin_guard(lm, roi, scale)
+    assert guard.min() == pytest.approx(lips_module._THIN_FLOOR, abs=0.1)
+
+
+def test_a_mouth_that_is_not_wide_open_keeps_all_of_its_pigment(face_landmarks_720p) -> None:
+    guard = lips_module._thin_guard(face_landmarks_720p, regions.Roi(400, 200, 900, 600), regions.face_scale(face_landmarks_720p))
+    assert guard == 1.0

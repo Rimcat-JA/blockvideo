@@ -1145,3 +1145,183 @@ def test_a_light_switch_near_the_hair_is_not_a_strand(face_landmarks_720p: np.nd
     assert switch.sum() > 50
     out = run_effect(scene, frame=scene.clean, flyaway=1.0)
     assert change(scene.clean, out)[switch].mean() < 0.02
+
+
+# ---------------------------------------------------------------------------
+# Speed: the same numbers, computed with fewer temporary images
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("shape", [(40, 30), (64,), (1, 50)])
+def test_smoothstep_matches_the_formula_and_leaves_its_input(shape: tuple[int, ...]) -> None:
+    values = np.random.default_rng(6).uniform(-0.5, 1.5, shape).astype(np.float32)
+    before = values.copy()
+    result = hairshape_module._smoothstep_t(values)
+    t = np.clip(values, 0.0, 1.0)
+    np.testing.assert_array_equal(result, t * t * (3.0 - 2.0 * t))
+    np.testing.assert_array_equal(values, before)
+    assert result.dtype == np.float32
+    ranged = hairshape_module._smoothstep(values, 0.2, 0.7)
+    t = np.clip((values - np.float32(0.2)) * np.float32(1.0 / (0.7 - 0.2)), 0.0, 1.0)
+    np.testing.assert_array_equal(ranged, t * t * (3.0 - 2.0 * t))
+    np.testing.assert_array_equal(values, before)
+
+
+def test_clip_leaves_its_input() -> None:
+    values = np.array([[-1.0, 0.5, 2.0]], np.float32)
+    before = values.copy()
+    np.testing.assert_array_equal(hairshape_module._clip01(values), [[0.0, 0.5, 1.0]])
+    np.testing.assert_array_equal(values, before)
+
+
+def test_above_matches_the_comparison() -> None:
+    values = np.random.default_rng(7).uniform(0.0, 1.0, (50, 60)).astype(np.float32)
+    level = float(values[3, 4])  # an exact tie counts as not above
+    np.testing.assert_array_equal(hairshape_module._above(values, level), (values > level).astype(np.float32))
+
+
+def _keep_attached_as_written_first(alpha, band, distance, head, reach, previous):  # type: ignore[no-untyped-def]
+    """The straightforward form of ``_keep_attached``, as a reference for the fast one."""
+    m = hairshape_module
+    candidates = (alpha > m._CANDIDATE).astype(np.uint8)
+    if not candidates.any():
+        return np.zeros_like(alpha)
+    bridged = cv2.dilate(candidates, m._RECT_3)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(bridged, connectivity=8)
+    d = head.grid_to_work(distance)
+    attached = np.zeros(count, bool)
+    attached[labels[d <= m._ATTACH]] = True
+    limit = m._LEAVES_LENGTH * head.work_scale * m._LEAVES_WIDTH
+    beyond = np.bincount(labels[d > reach + m._LONG_STRUCTURE], minlength=count).astype(np.float32)
+    for border in (labels[0], labels[-1], labels[:, 0], labels[:, -1]):
+        beyond[border] = np.float32(limit * m._LEAVES_HOLD)
+    area = stats[:, cv2.CC_STAT_AREA]
+    held = np.bincount(labels[previous > 0.5], minlength=count) > m._HELD_SHARE * area
+    leaves = beyond >= np.where(held, limit * m._LEAVES_HOLD, limit)
+    keep = attached & ~leaves & (area >= m._MIN_AREA * head.work_scale * head.work_scale)
+    keep[0] = False
+    return m._finish_alpha(alpha * keep[labels].astype(np.float32)) * band
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_keep_attached_matches_its_plain_form(face_landmarks_720p: np.ndarray, seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    head = hairshape_module._locate_head(face_landmarks_720p.astype(np.float32), (720, 1280, 3), None)
+    assert head is not None
+    w, h = head.work_size
+    grid_w, grid_h = head.grid_size
+    alpha = np.zeros((h, w), np.float32)
+    for _ in range(40):  # blobs and lines of all sizes, some touching the border
+        x, y = int(rng.integers(0, w)), int(rng.integers(0, h))
+        end = (x + int(rng.integers(-40, 40)), y + int(rng.integers(-40, 40)))
+        cv2.line(alpha, (x, y), end, float(rng.uniform(0.1, 1.0)), int(rng.integers(1, 4)))
+    distance = cv2.resize(rng.uniform(-1.0, 2.0, (6, 6)).astype(np.float32), (grid_w, grid_h))
+    band = rng.uniform(0.0, 1.0, (h, w)).astype(np.float32)
+    previous = cv2.GaussianBlur(alpha, (0, 0), 2.0) * float(rng.uniform(0.0, 3.0))
+    alpha_before = alpha.copy()
+    fast = hairshape_module._keep_attached(alpha, band, distance, head, 0.5, previous)
+    np.testing.assert_array_equal(alpha, alpha_before)
+    np.testing.assert_array_equal(fast, _keep_attached_as_written_first(alpha, band, distance, head, 0.5, previous))
+
+
+def test_keep_attached_without_candidates(face_landmarks_720p: np.ndarray) -> None:
+    head = hairshape_module._locate_head(face_landmarks_720p.astype(np.float32), (720, 1280, 3), None)
+    assert head is not None
+    w, h = head.work_size
+    zero = np.zeros((h, w), np.float32)
+    distance = np.zeros(head.grid_size[::-1], np.float32)
+    assert not hairshape_module._keep_attached(zero, zero, distance, head, 0.5, zero).any()
+
+
+def _head_at(landmarks: np.ndarray, shift: tuple[float, float] = (0.0, 0.0), zoom: float = 1.0):  # type: ignore[no-untyped-def]
+    center = landmarks.mean(axis=0)
+    moved = (landmarks - center) * np.float32(zoom) + center + np.float32(shift)
+    head = hairshape_module._locate_head(moved.astype(np.float32), (720, 1280, 3), None)
+    assert head is not None
+    return head
+
+
+def test_strand_memory_projects_once_per_frame(
+    face_landmarks_720p: np.ndarray, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = hairshape_module._StrandMemory()
+    head = _head_at(face_landmarks_720p)
+    shape = head.work_size[::-1]
+    mask = memory.update(np.full(shape, 0.5, np.float32), head)
+    assert mask.max() == pytest.approx(0.3)
+
+    next_head = _head_at(face_landmarks_720p, (6.0, 0.0))
+    calls: list[int] = []
+    real = hairshape_module._StrandMemory._project
+
+    def counting(*args: object) -> np.ndarray:
+        calls.append(1)
+        return real(*args)
+
+    monkeypatch.setattr(hairshape_module._StrandMemory, "_project", counting)
+    shape = next_head.work_size[::-1]
+    projected = memory.projected(next_head, shape)
+    assert memory.projected(next_head, shape) is projected
+    updated = memory.update(np.zeros(shape, np.float32), next_head)
+    assert len(calls) == 1
+    assert memory.projected(next_head, shape) is updated  # the new mask, not the projection of the old one
+
+
+def test_strand_memory_follows_a_work_area_that_changes_size(face_landmarks_720p: np.ndarray) -> None:
+    memory = hairshape_module._StrandMemory()
+    for zoom, shift in ((1.0, (0.0, 0.0)), (1.08, (2.0, 0.0)), (0.9, (0.0, 3.0)), (1.0, (0.0, 0.0))):
+        head = _head_at(face_landmarks_720p, shift, zoom)
+        shape = head.work_size[::-1]
+        before = memory.projected(head, shape)
+        assert before.shape == shape
+        mask = memory.update(np.full(shape, 0.5, np.float32), head)
+        assert mask.shape == shape and mask.dtype == np.float32
+        assert 0.0 <= float(mask.min()) and float(mask.max()) <= 1.0
+
+
+@pytest.mark.parametrize("plate", [False, True])
+def test_the_work_area_may_change_size_between_frames(scene: Scene, plate: bool) -> None:
+    """A head coming closer: the working images change size and everything follows."""
+    effect = HairShapeEffect()
+    settings = HairShapeSettings(flyaway=1.0, volume_top=0.3, width_sides=-0.3, use_background_plate=True)
+    center = scene.landmarks.mean(axis=0)
+    for zoom in (1.0, 1.05, 1.15, 1.3, 1.3, 1.0, 0.8, 1.0):
+        landmarks = ((scene.landmarks - center) * np.float32(zoom) + center).astype(np.float32)
+        ctx = dataclasses.replace(scene.ctx(plate=plate), landmarks=landmarks)
+        out = effect.apply(scene.frame.copy(), ctx, settings)
+        assert out.shape == scene.frame.shape and np.isfinite(out).all()
+
+
+def test_the_room_is_only_measured_for_a_warp_and_then_at_once(scene: Scene) -> None:
+    """Sliders moved at runtime: the same result as if the warp had been on from the start of it."""
+    plain = HairShapeEffect()
+    ctx = scene.ctx
+    off = HairShapeSettings(**{**OFF, "flyaway": 0.3})
+    on = HairShapeSettings(**{**OFF, "flyaway": 0.3, "volume_top": 0.5})
+    for _ in range(3):
+        plain.apply(scene.frame.copy(), ctx(), off)
+    assert plain._room_busy is None
+    out = plain.apply(scene.frame.copy(), ctx(), on)
+    assert plain._room_busy is not None and not np.array_equal(out, scene.frame)
+    turned_off = plain.apply(scene.frame.copy(), ctx(), off)
+    assert turned_off.shape == scene.frame.shape
+
+
+def test_no_flyaway_slider_means_no_work_at_all(scene: Scene, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_: object) -> None:
+        raise AssertionError("must not run")
+
+    monkeypatch.setattr(hairshape_module, "_silhouette", forbidden)
+    effect = HairShapeEffect()
+    frame = scene.frame.copy()
+    assert effect.apply(frame, scene.ctx(), HairShapeSettings(**OFF)) is frame
+
+
+def test_a_mask_without_any_hair_causes_no_overflow(scene: Scene) -> None:
+    """In a deep bow the model may find no hair at all."""
+    head = hairshape_module._locate_head(scene.landmarks, scene.frame.shape, None)
+    bald = dataclasses.replace(scene, hair_mask=np.zeros_like(scene.hair_mask))
+    with np.errstate(over="raise", invalid="raise"):
+        outline = hairshape_module._silhouette(head, bald.ctx())
+    assert np.isfinite(outline.distance).all()
+    assert outline.near_hair.max() == 0.0

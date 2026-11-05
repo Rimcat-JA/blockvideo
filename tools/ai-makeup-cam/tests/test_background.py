@@ -72,6 +72,7 @@ def test_median_of_an_even_count_is_a_real_value() -> None:
 def test_capture_of_an_empty_room() -> None:
     result = plates.capture(frames(), empty_room)
     assert result.ok and result.message == plates.SUCCESS_MESSAGE
+    assert "髪型" in result.message and "顔の形" in result.message  # both effects use it
     assert result.plate is not None
     np.testing.assert_array_equal(result.plate, room())
 

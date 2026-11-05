@@ -327,7 +327,7 @@ class MakeupSettings:
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "MakeupSettings":
-        return cls.from_json(Path(path).read_text(encoding="utf-8"))
+        return cls.from_json(Path(path).read_text(encoding="utf-8-sig"))  # Windows Notepad may save with a BOM
 
 
 def _coerce(value: Any, f) -> Any:

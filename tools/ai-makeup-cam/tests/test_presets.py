@@ -190,6 +190,145 @@ def test_partial_and_out_of_range_preset_is_completed_with_defaults(dirs: tuple[
     assert settings.skin == MakeupSettings().skin
 
 
+# ---- display names ---------------------------------------------------------
+
+
+def _write_named(path: Path, display_name: object) -> None:
+    data = MakeupSettings().to_dict()
+    data["display_name"] = display_name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_display_name_comes_from_the_file(dirs: tuple[Path, Path]) -> None:
+    builtin_dir, _ = dirs
+    _write_named(builtin_dir / "natural.json", "就活ナチュラル（標準）")
+    info = find_preset("natural")
+    assert info is not None
+    assert (info.name, info.display_name) == ("natural", "就活ナチュラル（標準）")
+    assert load_preset("natural") == MakeupSettings()  # not a setting
+
+
+def test_saved_user_presets_show_their_own_name(dirs: tuple[Path, Path]) -> None:
+    info = save_preset("面接用", MakeupSettings())
+    assert info.display_name == "面接用"
+    assert find_preset("面接用") == info
+    assert "display_name" not in json.loads(info.path.read_text(encoding="utf-8"))
+
+
+def test_user_preset_overriding_a_builtin_does_not_borrow_its_display_name(dirs: tuple[Path, Path]) -> None:
+    builtin_dir, _ = dirs
+    _write_named(builtin_dir / "natural.json", "就活ナチュラル（標準）")
+    save_preset("natural", MakeupSettings())
+    assert find_preset("natural").display_name == "natural"
+    delete_preset("natural")
+    assert find_preset("natural").display_name == "就活ナチュラル（標準）"
+
+
+@pytest.mark.parametrize("value", ["", "   ", 5, None, ["名前"], {"ja": "名前"}])
+def test_unusable_display_name_falls_back_to_the_name(dirs: tuple[Path, Path], value: object) -> None:
+    builtin_dir, _ = dirs
+    _write_named(builtin_dir / "mine.json", value)
+    assert find_preset("mine").display_name == "mine"
+
+
+def test_overlong_display_name_is_cut(dirs: tuple[Path, Path]) -> None:
+    builtin_dir, _ = dirs
+    _write_named(builtin_dir / "mine.json", "あ" * 200)
+    assert find_preset("mine").display_name == "あ" * presets.MAX_NAME_LENGTH
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2, 3]", "\udcff"])
+def test_corrupt_preset_is_still_listed_under_its_name(dirs: tuple[Path, Path], content: str) -> None:
+    _, user_dir = dirs
+    user_dir.mkdir(parents=True)
+    (user_dir / "broken.json").write_bytes(content.encode("utf-8", "surrogateescape"))
+    assert find_preset("broken").display_name == "broken"
+    with pytest.raises(PresetError):  # choosing it still reports the problem
+        load_preset("broken")
+
+
+def test_builtin_presets_have_japanese_display_names() -> None:
+    expected = {
+        "natural": "就活ナチュラル（標準）",
+        "bare": "すっぴん風補正",
+        "polished": "しっかりメイク",
+        "strong": "しっかりメイク＋小顔補正",
+        "off": "全部オフ",
+    }
+    files = {path.stem: path for path in config.BUILTIN_PRESETS_DIR.glob("*.json")}
+    assert sorted(files) == sorted(expected)
+    for name, path in files.items():
+        assert name.isascii()
+        assert json.loads(path.read_text(encoding="utf-8"))["display_name"] == expected[name]
+
+
+# ---- what each built-in preset promises ------------------------------------
+
+
+def _builtin(name: str) -> MakeupSettings:
+    return MakeupSettings.load(config.BUILTIN_PRESETS_DIR / f"{name}.json")
+
+
+_RESHAPE_SLIDERS = (
+    "face_slim",
+    "jaw",
+    "chin_length",
+    "eye_size",
+    "nose_width",
+    "nose_length",
+    "mouth_width",
+    "mouth_corner",
+    "lip_fullness",
+    "brow_lift",
+)
+
+
+@pytest.mark.parametrize("name", ["natural", "bare", "polished", "off"])
+def test_only_the_strong_preset_changes_the_face_shape(name: str) -> None:
+    assert all(getattr(_builtin(name).reshape, slider) == 0.0 for slider in _RESHAPE_SLIDERS)
+
+
+@pytest.mark.parametrize("name", ["natural", "bare", "polished", "strong"])
+def test_no_preset_warps_the_hair_and_all_tidy_flyaways(name: str) -> None:
+    hairshape = _builtin(name).hairshape
+    assert hairshape.enabled and 0.0 < hairshape.flyaway <= 0.5
+    assert (hairshape.volume_top, hairshape.width_sides) == (0.0, 0.0)
+
+
+def test_bare_has_no_color_makeup() -> None:
+    bare = _builtin("bare")
+    for section in (bare.lips, bare.blush, bare.eyeshadow, bare.eyeliner, bare.brows, bare.contour, bare.tearbag):
+        assert not section.enabled
+    for section in (bare.skin, bare.teeth, bare.hair, bare.hairshape):
+        assert section.enabled
+    assert bare.skin.under_eye > 0.0
+
+
+def test_strong_is_polished_plus_a_moderate_reshape() -> None:
+    strong, polished = _builtin("strong").to_dict(), _builtin("polished").to_dict()
+    reshape = strong.pop("reshape")
+    polished.pop("reshape")
+    assert strong == polished
+    assert reshape["enabled"] and reshape["face_slim"] > 0.0
+    assert all(abs(reshape[slider]) <= 0.5 for slider in _RESHAPE_SLIDERS)  # still clearly the same person
+
+
+def test_presets_grow_in_strength_from_natural_to_polished() -> None:
+    natural, polished = _builtin("natural"), _builtin("polished")
+    assert 0.0 < natural.contour.shading < polished.contour.shading
+    assert 0.0 < natural.contour.highlight < polished.contour.highlight
+    assert 0.0 < natural.tearbag.strength < polished.tearbag.strength
+    assert natural.contour.enabled and natural.tearbag.enabled and natural.teeth.enabled
+
+
+def test_off_disables_every_section() -> None:
+    off = _builtin("off")
+    for section in config.SECTIONS:
+        if section != "general":
+            assert not getattr(off, section).enabled, section
+
+
 # ---- last session ----------------------------------------------------------
 
 
@@ -239,3 +378,25 @@ def test_initial_settings_fallback_order(dirs: tuple[Path, Path]) -> None:
     assert initial_settings() == (session, None)
     assert initial_settings(DEFAULT_PRESET_NAME) == (natural, DEFAULT_PRESET_NAME)
     assert initial_settings("missing") == (session, None)
+
+
+def test_a_preset_saved_with_a_bom_is_read(dirs: tuple[Path, Path]) -> None:
+    """Windows Notepad offers "UTF-8 with BOM"."""
+    _, user = dirs
+    save_preset("mine", MakeupSettings())
+    path = user / "mine.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["display_name"] = "ぼむ"
+    data["lips"]["opacity"] = 0.33
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8-sig")
+    assert load_preset("mine").lips.opacity == 0.33
+    assert find_preset("mine").display_name == "ぼむ"
+    assert MakeupSettings.load(path).lips.opacity == 0.33
+
+
+def test_a_user_preset_cannot_take_the_name_a_builtin_is_shown_under(dirs: tuple[Path, Path]) -> None:
+    builtin, _ = dirs
+    (builtin / "natural.json").write_text(json.dumps({"display_name": "就活ナチュラル（標準）"}), encoding="utf-8")
+    with pytest.raises(PresetError, match="表示名"):
+        save_preset("就活ナチュラル（標準）", MakeupSettings())
+    assert save_preset("就活ナチュラル", MakeupSettings()).name == "就活ナチュラル"
