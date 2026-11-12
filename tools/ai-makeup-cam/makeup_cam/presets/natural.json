@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "display_name": "就活ナチュラル（標準）",
+  "general": {
+    "intensity": 1.0,
+    "mirror_preview": true,
+    "mirror_output": false,
+    "landmark_smoothing": 0.5,
+    "segmentation_interval": 2,
+    "show_landmarks": false
+  },
+  "skin": {
+    "enabled": true,
+    "smoothing": 0.4,
+    "texture": 0.4,
+    "blemish": 0.5,
+    "redness": 0.2,
+    "under_eye": 0.3,
+    "tone_color": "#F1D3C0",
+    "tone_strength": 0.12,
+    "brightness": 0.02
+  },
+  "contour": {
+    "enabled": true,
+    "shading_color": "#A0745F",
+    "shading": 0.3,
+    "jawline": 0.6,
+    "cheek_hollow": 0.5,
+    "nose_shadow": 0.4,
+    "forehead": 0.4,
+    "highlight_color": "#FFF4EA",
+    "highlight": 0.25,
+    "nose_bridge": 0.6,
+    "cheekbone": 0.6,
+    "chin": 0.4,
+    "cupids_bow": 0.3,
+    "softness": 0.7
+  },
+  "lips": {
+    "enabled": true,
+    "color": "#C25B62",
+    "opacity": 0.45,
+    "finish": "satin",
+    "gloss": 0.3,
+    "feather": 0.4,
+    "outline": 0.0
+  },
+  "blush": {
+    "enabled": true,
+    "color": "#E8878C",
+    "opacity": 0.22,
+    "shape": "oval",
+    "size": 1.0,
+    "offset_x": 0.0,
+    "offset_y": 0.0,
+    "softness": 0.7
+  },
+  "eyeshadow": {
+    "enabled": true,
+    "color": "#A0705E",
+    "opacity": 0.5,
+    "height": 0.5,
+    "softness": 0.6,
+    "shimmer": 0.0
+  },
+  "tearbag": {
+    "enabled": true,
+    "strength": 0.3,
+    "width": 0.5,
+    "shadow": 0.3,
+    "softness": 0.6
+  },
+  "eyeliner": {
+    "enabled": true,
+    "color": "#2E211C",
+    "opacity": 0.55,
+    "thickness": 0.3,
+    "wing": 0.1,
+    "lower": 0.0,
+    "softness": 0.4
+  },
+  "brows": {
+    "enabled": true,
+    "color": "#5C4334",
+    "opacity": 0.3,
+    "thickness": 0.0,
+    "softness": 0.5
+  },
+  "teeth": {
+    "enabled": true,
+    "whitening": 0.3,
+    "yellow_reduction": 0.4,
+    "evenness": 0.3,
+    "feather": 0.5
+  },
+  "reshape": {
+    "enabled": true,
+    "face_slim": 0.0,
+    "jaw": 0.0,
+    "chin_length": 0.0,
+    "eye_size": 0.0,
+    "nose_width": 0.0,
+    "nose_length": 0.0,
+    "mouth_width": 0.0,
+    "mouth_corner": 0.0,
+    "lip_fullness": 0.0,
+    "brow_lift": 0.0,
+    "protect_background": 0.8
+  },
+  "hair": {
+    "enabled": true,
+    "gloss": 0.3,
+    "smoothness": 0.3,
+    "color": "#3B2A22",
+    "color_strength": 0.0,
+    "brightness": 0.0,
+    "contrast": 0.0,
+    "edge_softness": 0.5
+  },
+  "hairshape": {
+    "enabled": true,
+    "flyaway": 0.3,
+    "volume_top": 0.0,
+    "width_sides": 0.0,
+    "use_background_plate": true
+  }
+}

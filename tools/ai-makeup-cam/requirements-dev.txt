@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=7
+# Only for the optional integration tests (public-domain test portrait).
+scikit-image>=0.21
